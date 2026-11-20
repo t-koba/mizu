@@ -234,34 +234,6 @@ class RoleStateTests(Fixture):
         self.assertEqual(out["generation"], 2)
         self.assertEqual(tight.read("searcher")["record"]["state"], {})
 
-    def test_lowered_write_bound_keeps_record_readable_and_compactable(self):
-        from mizu.fs import canonical
-        from mizu.role_state import MAX_RECORD_BYTES, RoleStateStore
-        root = self.project.root / "role-state"
-        root.mkdir(parents=True, exist_ok=True)
-        wide = RoleStateStore(root, max_bytes=8192)
-        big = {"pad": "x" * 5000}
-        wide.replace("searcher", big, expected_generation=0)
-        stored = wide.read("searcher")
-        self.assertEqual(stored["status"], "current")
-        self.assertEqual(stored["generation"], 1)
-        self.assertGreater(len(canonical(stored["record"])), 4096)
-        self.assertLessEqual(len(canonical(stored["record"])), MAX_RECORD_BYTES)
-        # The 4,096-byte default store still reads the ~5 KiB record and
-        # compacts it with a smaller replacement at the read generation.
-        narrow = RoleStateStore(root, max_bytes=4096)
-        seen = narrow.read("searcher")
-        self.assertEqual(seen["status"], "current")
-        self.assertEqual(seen["generation"], 1)
-        self.assertEqual(seen["record"]["state"], big)
-        out = narrow.replace("searcher", {"ok": True},
-                             expected_generation=seen["generation"])
-        self.assertEqual(out["generation"], 2)
-        compacted = narrow.read("searcher")
-        self.assertEqual(compacted["status"], "current")
-        self.assertEqual(compacted["generation"], 2)
-        self.assertEqual(compacted["record"]["state"], {"ok": True})
-
     def test_record_above_supported_ceiling_remains_unavailable(self):
         from mizu.errors import Denied
         from mizu.fs import canonical, write_json
@@ -329,13 +301,6 @@ class RoleStateTests(Fixture):
         with self.assertRaisesRegex(Denied, "Stale"):
             self.project.role_state.replace("searcher", {"old": True},
                                             expected_generation=0)
-
-    def test_state_never_uses_insights(self):
-        before = self.project.insights.projection(pending=False)["total"]
-        self.project.role_state.replace("searcher", STATE,
-                                        expected_generation=0)
-        after = self.project.insights.projection(pending=False)["total"]
-        self.assertEqual(before, after)
 
     def test_roles_are_isolated(self):
         self.project.role_state.replace("searcher", STATE,

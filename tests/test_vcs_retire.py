@@ -328,18 +328,6 @@ class RetireConfigTests(Fixture):
             with self.assertRaises(ConfigError, msg=lns[0]):
                 load(self.file)
 
-    def test_load_refuses_retire_with_self_approval(self):
-        from mizu.config import load
-        text = self.file.read_text()
-        body = text.split("[roles.worker]")[1].split("[roles.")[0]
-        # The worker already holds decide, so granting retire must fail load.
-        self.assertIn('"decide"', body)
-        body = body.replace('capabilities = [',
-                            'capabilities = ["vcs_retire", ', 1)
-        self.file.write_text(text + "\n[roles.retirer]" + body)
-        with self.assertRaisesRegex(ConfigError, "vcs_retire"):
-            load(self.file)
-
 
 def observed_proposal(ref="mizu/x-1", state="open", base_ref="main"):
     return {"id": "forge:owner/repo#1", "state": state,
@@ -415,8 +403,3 @@ class RetireLiveRefTests(Fixture):
                                         "expected_sha": SHA_A})
         self.assertTrue(out["retired"])
 
-    def test_ci_records_never_block(self):
-        self.project.insights.submit(source="vcs", title="Historical CI failure",
-                                     body="An old per-check observation", base_snapshot=None,
-                                     insight_id="ci-" + "a" * 32)
-        self.assertEqual(vcs.live_proposal_refs(self.project, "mizu/x-1"), [])

@@ -26,15 +26,16 @@ class WorkItemTests(Fixture):
     def setUp(self):
         super().setUp()
         self.store = self.project.work_items
-        self.proposal = self.project.insights.submit(
-            source="worker", title="Bounded lifecycle", body="Implement a core slice", base_snapshot=None)
-        self.decision = self.project.insights.decide(
-            self.proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
-        self.seed = self.decision["work_item"]
+        self.seed = self.store.create(idempotency_key="bounded", title="Bounded lifecycle",
+                                      actor="worker")["record"]["work_item"]
         self.item_id = self.seed["id"]
-        self.seed_path = self.project.root / "decision-history" / f"{self.item_id[3:]}.json"
+        self.seed_path = self.project.root / "work-items" / self.item_id / "create.json"
         self.directory = self.project.root / "work-items" / self.item_id
         self.serial = 0
+
+    def revision_names(self):
+        """Revision files beside the immutable creation record."""
+        return sorted(p.name for p in self.directory.iterdir() if p.name != "create.json")
 
     def change(self, status="doing", expected_rev=1, **kwargs):
         return self.store.transition(self.item_id, expected_rev=expected_rev, status=status,
@@ -56,32 +57,6 @@ class WorkItemTests(Fixture):
             store.publish(snapshot)
         return snapshot
 
-    def test_completion_diagnostic_is_bounded_and_legacy_callback_is_compatible(self):
-        self.change()
-        snapshot = self.snapshot()
-        binding = self.bind(snapshot)
-        # Standalone callers may still supply the original proof-only callback.
-        calls = []
-        store = WorkItems(self.project.root, self.project.snapshots, self.project.insights,
-                          effective_verification=lambda value: calls.append(value['id']))
-        message = "verified_snapshot_v1: Completion snapshot must have passing digest-bound verification"
-        with self.assertRaises(Denied) as refused:
-            store.transition(self.item_id, expected_rev=binding['rev'], status='done',
-                             actor='worker', snapshot_id=snapshot['id'])
-        self.assertEqual(str(refused.exception), message)
-        self.assertEqual(calls, [snapshot['id']])
-        # Unknown diagnostic data must not escape into the tool error, even
-        # when it contains long strings or control characters.
-        store.effective_verification = None
-        store.effective_verification_projection = lambda value: (None, {
-            'reason': 'unsafe\n' + 'x' * 10000, 'receipt_id': 'private-data'})
-        with self.assertRaises(Denied) as refused:
-            store.transition(self.item_id, expected_rev=binding['rev'], status='done',
-                             actor='worker', snapshot_id=snapshot['id'])
-        self.assertEqual(str(refused.exception), message)
-        self.assertEqual(calls, [snapshot['id']])
-        self.assertEqual(self.store.get(self.item_id), binding)
-
     def status_readers(self):
         return (self.store.count_open, self.store.count_open_readonly,
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
@@ -101,36 +76,6 @@ class WorkItemTests(Fixture):
         page = self.store.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("doing", changed["rev"]))
-
-    def test_direct_record_cache_rechecks_conflicting_sources(self):
-        created = self.store.create(idempotency_key="direct-conflict", title="Conflict",
-                                    actor="worker")["record"]["work_item"]
-        self.store._direct_record(created["id"])
-        collision = (self.project.root / "decision-history" /
-                     f"{created['id'][3:]}.json")
-        collision.write_text("{}")
-        with self.assertRaises(Denied):
-            self.store._direct_record(created["id"])
-        collision.unlink()
-        (self.project.root / "work-items" / created["id"] / "legacy.json").write_text("{}")
-        with self.assertRaises(Denied):
-            self.store._direct_record(created["id"])
-
-    def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
-        calls = []
-        original = self.store._page_open_impl
-
-        def scanned(**kwargs):
-            calls.append(kwargs)
-            return original(**kwargs)
-
-        with patch.object(self.store, "_page_open_impl", side_effect=scanned):
-            status = self.project.status()
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0]["blocked_only"])
-        self.assertTrue(calls[0]["include_open_count"])
-        self.assertEqual(status["backpressure"]["open_work_count"], 1)
-        self.assertEqual(status["blocked_work"]["total"], 0)
 
     def test_status_projections_skip_superseded_snapshots_and_validate_exact_sources(self):
         self.change("doing")
@@ -300,32 +245,6 @@ class WorkItemTests(Fixture):
         with self.assertRaisesRegex(Denied, "Delivery does not match its immutable snapshot"):
             self.store.explain(self.item_id, after_rev=2, limit=1)
 
-    def test_explain_preserves_structured_wait_record(self):
-        self.change("blocked", wait={"kind": "insight_decided", "insight": self.proposal["id"]})
-        view = self.store.explain(self.item_id)
-        self.assertEqual(view["item"]["status"], "blocked")
-        self.assertEqual(view["history"][1]["wait"],
-                         {"kind": "object_resolved", "subject": {"type": "insight", "id": self.proposal["id"]}})
-
-    def test_wait_liveness_accepts_insight_title_length_edges(self):
-        item_ids = []
-        for index, title in enumerate(("x", "t" * 200)):
-            proposal = self.project.insights.submit(
-                source="worker", title=title, body="Evidence", base_snapshot=None)
-            seed = self.store.create(
-                idempotency_key=f"title-wait-{index}", title=f"Wait {index}", actor="worker"
-            )["record"]["work_item"]
-            self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
-            self.store.transition(
-                seed["id"], expected_rev=2, status="blocked", actor="worker",
-                wait={"kind": "insight_decided", "insight": proposal["id"]})
-            item_ids.append(seed["id"])
-        page = self.store.blocked_liveness_readonly()
-        self.assertEqual(page["total"], 2)
-        rows = {row["id"]: row for row in page["items"]}
-        for item_id in item_ids:
-            self.assertEqual(rows[item_id]["state"], "pending")
-
     def test_explain_reads_dropped_terminal_item_and_preserves_reason(self):
         dropped = self.change("dropped", reason="No longer needed")
         view = self.store.explain(self.item_id)
@@ -368,169 +287,11 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.explain(self.item_id, limit=100)
 
-    def test_projection_marks_revision_stale_until_current_decision(self):
-        view = self.store.projection(self.item_id)
-        self.assertEqual(view["item"], self.seed)
-        self.assertEqual(view["current_origin_rev"], 1)
-        self.assertFalse(view["stale"])
-        self.assertIsNone(view["redecision"])
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        pending = self.store.projection(self.item_id)
-        self.assertEqual(pending["current_origin_rev"], 2)
-        self.assertTrue(pending["stale"])
-        self.assertIsNone(pending["redecision"])
-        detail = self.store.explain(self.item_id)
-        self.assertEqual(detail["current_origin_rev"], pending["current_origin_rev"])
-        self.assertEqual(detail["stale"], pending["stale"])
-        self.assertEqual(detail["redecision"], pending["redecision"])
-        decision = self.project.insights.decide(
-            self.proposal["id"], "defer", "Reassess after new evidence", "revisit the revised scope",
-            "run-redecision", expected_rev=2)
-        settled = self.store.projection(self.item_id)
-        self.assertEqual(settled["current_origin_rev"], 2)
-        self.assertFalse(settled["stale"])
-        self.assertEqual(settled["redecision"], {"rev": 2, "action": "defer"})
-        self.assertEqual(settled["item"]["origin"], self.seed["origin"])
-        self.assertEqual(self.store.get(self.item_id), self.seed)
-        self.assertEqual(decision["action"], "defer")
-
-    def test_projection_rejects_incomplete_current_decision(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
-        write_json(path, {"id": self.proposal["id"], "rev": 2, "action": "accept"})
-        with self.assertRaises(Denied):
-            self.store.projection(self.item_id)
-
-    def test_projection_validates_current_accept_seed_before_clearing_stale(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        self.project.insights.decide(self.proposal["id"], "accept", "reviewed again", "",
-                                     "run-redecision", expected_rev=2)
-        view = self.store.projection(self.item_id)
-        self.assertFalse(view["stale"])
-        self.assertEqual(view["redecision"], {"rev": 2, "action": "accept"})
-        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
-        record = json.loads(path.read_text())
-        record["work_item"]["title"] = None
-        write_json(path, record)
-        with self.assertRaises(Denied):
-            self.store.projection(self.item_id)
-
-    def test_projection_keeps_withdrawn_revision_stale(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        withdrawal = self.project.insights.withdraw(
-            self.proposal["id"], source="worker", reason="Withdraw revised proposal", expected_rev=2)
-        self.assertIsNone(withdrawal["run"])
-        view = self.store.projection(self.item_id)
-        self.assertTrue(view["stale"])
-        self.assertIsNone(view["redecision"])
-
-    def test_projection_treats_missing_origin_as_stale(self):
-        (self.project.root / "inbox" / f"{self.proposal['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        view = self.store.projection(self.item_id)
-        self.assertIsNone(view["current_origin_rev"])
-        self.assertTrue(view["stale"])
-
     def test_projection_is_byte_bounded(self):
         event = self.change(reason="r" * (PREVIEW_BYTES - 2048))
         view = self.store.projection(self.item_id)
         self.assertEqual(view["item"], event)
         self.assertLessEqual(len(canonical(view)), MAX_PROJECTION_BYTES)
-
-    def test_projection_rejects_symlinked_current_decision(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
-        target = self.project.root / "saved-decision.json"
-        path.rename(target)
-        self.symlink(target, path)
-        forget_ledger(self.project.root)  # The pointer is validated when the index is rebuilt.
-        with self.assertRaises(Denied):
-            self.store.projection(self.item_id)
-
-    def test_projection_rejects_symlinked_origin(self):
-        path = self.project.root / "inbox" / f"{self.proposal['id']}.json"
-        target = self.project.root / "saved-origin.json"
-        path.rename(target)
-        self.symlink(target, path)
-        forget_ledger(self.project.root)  # The pointer is validated when the index is rebuilt.
-        with self.assertRaises(Denied):
-            self.store.projection(self.item_id)
-
-    def test_seed_decision_is_bounded_before_persisting(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Oversized decision", body="Check event bound", base_snapshot=None)
-        history = set((self.project.root / "decision-history").glob("*.json"))
-        for intent in ("create", "none"):
-            with self.subTest(intent=intent), self.assertRaises(LimitExceeded):
-                self.project.insights.decide(
-                    proposal["id"], "accept", "x" * PREVIEW_BYTES, "", "run-oversized",
-                    expected_rev=1, work_item_intent=intent)
-        self.assertEqual(set((self.project.root / "decision-history").glob("*.json")), history)
-        self.assertFalse((self.project.root / "decisions" / f"{proposal['id']}.json").exists())
-        self.assertFalse((self.project.root / "work-items").exists())
-
-    def test_page_open_rejects_mismatched_key_on_seeded_history(self):
-        event = json.loads(self.seed_path.read_text())
-        event["decision_key"] = "0" * 32
-        write_json(self.seed_path, event)
-        with self.assertRaisesRegex(Denied, "decision key"):
-            self.store.page_open()
-
-    def test_page_open_rejects_keyed_substantive_event_at_wrong_filename(self):
-        event = json.loads(self.seed_path.read_text())
-        wrong_id = "f" * 32 if self.seed_path.stem != "f" * 32 else "e" * 32
-        write_json(self.seed_path.parent / f"{wrong_id}.json", event, exclusive=True)
-        with self.assertRaisesRegex(Denied, "decision key"):
-            self.store.page_open()
-
-    def test_keyed_defer_uses_random_event_filename_but_validates_key(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Deferred proposal", body="Wait for evidence", base_snapshot=None)
-        record = self.project.insights.decide(proposal["id"], "defer", "Need evidence", "when ready",
-                                              "run-1", expected_rev=1)
-        path = next(path for path in (self.project.root / "decision-history").glob("*.json")
-                    if json.loads(path.read_text()).get("id") == proposal["id"])
-        self.assertNotEqual(path.stem, record["decision_key"])
-        self.assertEqual(self.store.page_open()["total"], 1)
-
-    def test_pre_intent_seed_schema_remains_readable(self):
-        old_event = {key: value for key, value in self.decision.items() if key != "work_item_intent"}
-        write_json(self.seed_path, old_event)
-        write_json(self.project.root / "decisions" / f"{self.proposal['id']}.json", old_event)
-        self.assertEqual(self.store.get(self.item_id), self.seed)
-        self.assertTrue(self.store.page_open()["coverage_complete"])
-        self.assertEqual(self.store.submitter_status(self.proposal["id"])["id"], self.item_id)
-
-    def test_modify_seed_works(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Smaller scope",
-                                     body="Revised scope", base_snapshot=None, expected_rev=1)
-        modified = self.project.insights.decide(self.proposal["id"], "modify", "smaller scope", "",
-                                                "run-2", expected_rev=2)
-        self.assertEqual(self.store.get(modified["work_item"]["id"]), modified["work_item"])
-
-    def test_full_state_events_preserve_seed_and_reconstruct_without_pointer(self):
-        original = self.seed_path.read_bytes()
-        doing = self.change()
-        self.assertEqual(doing["holder"], "worker")
-        self.assertEqual(doing["rev"], 2)
-        self.assertEqual(doing["actor"], "worker")
-        self.assertEqual(doing["transition"], {"from": "open", "to": "doing"})
-        opened = self.change("open", expected_rev=2, actor="reviewer", reason="Release holder")
-        self.assertIsNone(opened["holder"])
-        for key in ("origin", "title", "created_at"):
-            self.assertEqual(opened[key], self.seed[key])
-        for key in ("wait", "snapshot_id", "verification"):
-            self.assertIsNone(opened[key])
-        self.assertEqual(self.seed_path.read_bytes(), original)
-        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json"])
-        self.assertEqual(json.loads((self.directory / "2.json").read_bytes()), doing)
-        reopened = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
-        self.assertEqual(reopened.get(self.item_id), opened)
 
     def test_stale_and_invalid_revisions_write_nothing(self):
         self.change()
@@ -538,94 +299,8 @@ class WorkItemTests(Fixture):
         for revision in (1, 0, -1, True, False, 2.0, "2", None):
             with self.subTest(revision=revision), self.assertRaises(Denied):
                 self.change("open", expected_rev=revision)
-        self.assertEqual([p.name for p in self.directory.iterdir()], ["2.json"])
+        self.assertEqual(self.revision_names(), ["2.json"])
         self.assertEqual((self.directory / "2.json").read_bytes(), original)
-
-    def test_unknown_and_malformed_ids_fail_closed(self):
-        for item_id in (None, 1, "", "wi_" + "f" * 32, "wi_" + "A" * 32,
-                        "wi_" + "a" * 31, "wi_" + "a" * 33, "../decision-history/a", self.proposal["id"]):
-            with self.subTest(item_id=item_id):
-                with self.assertRaises(Denied):
-                    self.store.get(item_id)
-                with self.assertRaises(Denied):
-                    self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
-        self.assertFalse(self.directory.exists())
-
-    def test_malformed_seed_records_fail_closed(self):
-        cases = []
-        for key, value in (("id", "other"), ("title", ""), ("title", 1), ("origin", {}),
-                           ("origin", {"insight_id": self.proposal["id"], "rev": True}),
-                           ("rev", True), ("rev", 2), ("status", "done"), ("holder", "worker"),
-                           ("created_at", "bad"), ("updated_at", "bad")):
-            record = copy.deepcopy(self.decision)
-            record["work_item"][key] = value
-            cases.append(record)
-        for key, value in (("action", "defer"), ("id", "other"), ("rev", 2), ("rev", True),
-                           ("created_at", "bad"), ("work_item", None)):
-            record = copy.deepcopy(self.decision)
-            record[key] = value
-            cases.append(record)
-        for record in cases + [[], {}, None]:
-            with self.subTest(record=record):
-                write_json(self.seed_path, record)
-                with self.assertRaises(Denied):
-                    self.store.get(self.item_id)
-                with self.assertRaises(Denied):
-                    self.change()
-        self.seed_path.write_bytes(b"{not-json")
-        with self.assertRaises(Denied):
-            self.store.get(self.item_id)
-        self.seed_path.write_bytes(b" " * (PREVIEW_BYTES + 1))
-        with self.assertRaises(LimitExceeded):
-            self.store.get(self.item_id)
-        self.assertFalse(self.directory.exists())
-
-    def test_new_block_requires_wait_but_legacy_no_wait_replays(self):
-        for wait in (None, "later", {}, {"kind": "unknown"}, {"kind": "deadline", "at": "2030-01-01"}):
-            with self.subTest(wait=wait), self.assertRaises(Denied):
-                self.change("blocked", wait=wait)
-        self.assertFalse(self.directory.exists())
-        blocked = self.change("blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
-        # Simulate a pre-policy immutable event, not a supported new write.
-        blocked["wait"] = None
-        write_json(self.directory / "2.json", blocked)
-        self.assertIsNone(blocked["wait"])
-        self.assertEqual(blocked["holder"], "worker")
-        self.assertEqual(self.store.get(self.item_id), blocked)
-        self.assertFalse((self.project.root / "waits").exists())
-        doing = self.change("doing", expected_rev=2)
-        self.assertEqual(doing["holder"], "worker")
-        self.assertIsNone(doing["wait"])
-        blocked = self.change("blocked", expected_rev=3, actor="reviewer",
-                              wait={"kind": "deadline", "at": "2030-01-01T00:00:00.123+09:00"})
-        self.assertEqual(blocked["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+09:00"})
-        self.assertEqual(blocked["holder"], "worker")
-        self.assertEqual(self.store.get(self.item_id), blocked)
-        doing = self.change("doing", expected_rev=4)
-        self.assertEqual(doing["holder"], "worker")
-        blocked = self.change("blocked", expected_rev=5, actor="reviewer",
-                              wait={"kind": "insight_decided", "insight": self.proposal["id"]})
-        self.assertEqual(blocked["holder"], "worker")
-        self.assertEqual(blocked["wait"], {"kind": "object_resolved", "subject": {"type": "insight", "id": self.proposal["id"]}})
-        self.assertEqual(self.store.get(self.item_id), blocked)
-
-    def test_code_change_wait_keeps_original_baseline(self):
-        baseline = self.project.snapshots.get()["code_digest"]
-        blocked = self.change("blocked", wait={"kind": "code_change"})
-        self.assertEqual(blocked["wait"], {"kind": "code_change", "digest": baseline})
-        with patch.object(self.project.insights, "project_snapshots_digest", side_effect=AssertionError("rebase")):
-            self.assertEqual(self.store.get(self.item_id), blocked)
-
-    def test_dependency_wait_uses_existing_validator(self):
-        wait = {"kind": "dependency", "recipient": "reviewer",
-                "requires": {"insight": self.proposal["id"], "rev": 1, "action": "accept"}}
-        for revision in (0, True):
-            invalid = {**wait, "requires": {**wait["requires"], "rev": revision}}
-            with self.subTest(revision=revision), self.assertRaises(Denied):
-                self.change("blocked", wait=invalid)
-        blocked = self.change("blocked", wait=wait)
-        self.assertEqual(blocked["wait"], wait)
-        self.assertEqual(self.store.get(self.item_id), blocked)
 
     def test_done_rejects_missing_unpublished_unverified_failed_and_mismatched_evidence(self):
         candidates = [None, "bad", "f" * 64, self.snapshot("valid", publish=False)["id"],
@@ -635,7 +310,7 @@ class WorkItemTests(Fixture):
         for sid in candidates:
             with self.subTest(sid=sid), self.assertRaises(Denied):
                 self.change("done", snapshot_id=sid)
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
 
     def test_done_binds_the_published_tree_that_carries_the_delivery(self):
         self.change("doing", reason="Start the work item")
@@ -655,7 +330,7 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.change("done", expected_rev=2, snapshot_id=snapshot["id"])
         self.assertEqual(self.store.get(self.item_id)["status"], "doing")
-        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json"])
+        self.assertEqual(self.revision_names(), ["2.json"])
 
     def test_done_accepts_an_older_published_snapshot_carrying_the_same_tree(self):
         self.change("doing", reason="Start the work item")
@@ -673,7 +348,7 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             store.transition(self.item_id, expected_rev=1, status="done", actor="worker",
                              snapshot_id=snapshot["id"])
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
 
     def test_done_record_must_name_the_tree_its_snapshot_carries(self):
         snapshot = self.snapshot("valid")
@@ -707,7 +382,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.project.snapshots.get(old["id"]), old)
         with self.assertRaises(Denied):
             self.change("done", snapshot_id=old["id"])
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
 
     def test_sibling_snapshot_conflict_preserves_winner_and_done_evidence(self):
         snapshots = self.project.snapshots
@@ -774,7 +449,7 @@ class WorkItemTests(Fixture):
         for status in ("open", "doing", "blocked", "done", "dropped"):
             with self.subTest(status=status), self.assertRaises(Denied):
                 self.change(status, expected_rev=4, reason="Reopen")
-        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json", "4.json"])
+        self.assertEqual(self.revision_names(), ["2.json", "3.json", "4.json"])
 
     def test_reconstruction_rejects_completion_copy_mismatched_to_snapshot(self):
         snapshot = self.snapshot("valid")
@@ -807,7 +482,7 @@ class WorkItemTests(Fixture):
         for reason in (None, "", " \n", 1):
             with self.subTest(reason=reason), self.assertRaises(Denied):
                 self.change("dropped", reason=reason)
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
         dropped = self.change("dropped", reason="Superseded by a smaller goal")
         self.assertIsNone(dropped["holder"])
         self.assertEqual(dropped["reason"], "Superseded by a smaller goal")
@@ -822,19 +497,34 @@ class WorkItemTests(Fixture):
                      {"wait": {"kind": "code_change"}}, {"snapshot_id": self.project.snapshots.get()["id"]}):
             with self.subTest(args=args), self.assertRaises(Denied):
                 self.change(**args)
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
 
     def test_oversized_transition_writes_nothing(self):
         with self.assertRaises(LimitExceeded):
             self.change(reason="x" * PREVIEW_BYTES)
-        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.revision_names(), [])
+
+    def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
+        calls = []
+        original = self.store._page_open_impl
+
+        def scanned(**kwargs):
+            calls.append(kwargs)
+            return original(**kwargs)
+
+        with patch.object(self.store, "_page_open_impl", side_effect=scanned):
+            status = self.project.status()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["blocked_only"])
+        self.assertTrue(calls[0]["include_open_count"])
+        self.assertEqual(status["blocked_work"]["total"], 0)
 
     def test_history_gap_bad_names_malformed_and_oversized_events_fail_closed(self):
         event = self.change()
         path = self.directory / "2.json"
         mutations = [{**event, "rev": True}, {**event, "rev": 3}, {**event, "title": "changed"},
                      {**event, "holder": None}, {**event, "transition": {}},
-                     {**event, "origin": {"insight_id": self.proposal["id"], "rev": True}},
+                     {**event, "origin": "changed origin"},
                      {**event, "status": "blocked", "wait": {}}, {"rev": 2}, []]
         for record in mutations:
             with self.subTest(record=record):
@@ -879,7 +569,7 @@ class WorkItemTests(Fixture):
             self.skipTest("Symlink creation unavailable")
 
     def test_interrupted_orphan_temporary_is_removed_without_promoting_it(self):
-        self.directory.mkdir(parents=True)
+        self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.directory / ".new-leftover"
         temporary.write_bytes(b"incomplete write")
         forget_ledger(self.project.root)  # Found by a rebuild; a write to the item recovers it too.
@@ -902,7 +592,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(event_path.stat().st_nlink, 1)
 
     def test_atomic_temporary_symlink_fails_closed(self):
-        self.directory.mkdir(parents=True)
+        self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.directory / ".new-leftover"
         target = self.project.root / "saved-temporary"
         target.write_bytes(b"outside")
@@ -911,16 +601,6 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.get(self.item_id)
         self.assertTrue(target.is_file())
-
-    def test_symlink_seed_fails_closed(self):
-        target = self.project.root / "saved-seed.json"
-        self.seed_path.rename(target)
-        self.symlink(target, self.seed_path)
-        forget_ledger(self.project.root)
-        with self.assertRaises(Denied):
-            self.store.get(self.item_id)
-        with self.assertRaises(Denied):
-            self.change()
 
     def test_symlink_transition_fails_closed(self):
         self.change()
@@ -945,119 +625,6 @@ class WorkItemTests(Fixture):
             self.change()
         self.assertEqual(list(target.iterdir()), [])
 
-    def test_page_open_still_validates_scanned_seed_fields(self):
-        event = json.loads(self.seed_path.read_bytes())
-        event["work_item"]["status"] = "doing"
-        write_json(self.seed_path, event)
-        with self.assertRaises(Denied):
-            self.store.page_open()
-
-    def test_page_open_orders_status_then_oldest_timestamp_and_id(self):
-        self.store.doing_limit = 3  # This ordering fixture deliberately holds three items.
-        self.change("doing")
-
-        def create(title, created_at):
-            with patch("mizu.insights.now", return_value=created_at):
-                proposal = self.project.insights.submit(
-                    source="worker", title=title, body="Check stable ordering", base_snapshot=None)
-                decision = self.project.insights.decide(
-                    proposal["id"], "accept", "reviewed", "", title, expected_rev=1)
-            return decision["work_item"]["id"]
-
-        older_doing = create("Older doing", "2030-01-01T00:00:00+00:00")
-        self.store.transition(older_doing, expected_rev=1, status="doing", actor="worker")
-        newer_doing = create("Newer doing", "2030-01-02T00:00:00+00:00")
-        self.store.transition(newer_doing, expected_rev=1, status="doing", actor="worker")
-        blocked = create("Blocked", "2030-02-01T00:00:00+00:00")
-        self.store.transition(blocked, expected_rev=1, status="blocked", actor="worker",
-                              wait={"kind": "deadline", "at": "2030-04-01T00:00:00+00:00"})
-        tied_a = create("Tied A", "2030-03-01T00:00:00+00:00")
-        tied_b = create("Tied B", "2030-03-01T01:00:00+01:00")
-
-        item_ids = [self.item_id, older_doing, newer_doing, blocked, tied_a, tied_b]
-        status_order = {"doing": 0, "blocked": 1, "open": 2}
-        expected_rows = sorted((self.store.get(item_id) for item_id in item_ids),
-                               key=lambda item: (status_order[item["status"]],
-                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
-        expected = [item["id"] for item in expected_rows]
-        seen, cursor = [], None
-        while True:
-            page = self.store.page_open(cursor=cursor, limit=2)
-            ids = [row["id"] for row in page["items"]]
-            self.assertEqual(ids, expected[len(seen):len(seen) + 2])
-            expected_overflow = max(0, len(expected) - len(seen) - len(ids))
-            self.assertEqual(page["overflow_count"], expected_overflow)
-            self.assertEqual(page["truncated"], expected_overflow > 0)
-            seen.extend(ids)
-            if not page["truncated"]:
-                self.assertIsNone(page["next_cursor"])
-                break
-            last = page["items"][-1]
-            self.assertEqual(page["next_cursor"],
-                             f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
-            cursor = page["next_cursor"]
-        self.assertEqual(seen, expected)
-
-    def test_page_open_enumerates_deterministic_exclusive_pages(self):
-        extra_ids = []
-        for index in range(4):
-            proposal = self.project.insights.submit(
-                source="worker", title=f"Page item {index}", body="Enumerate this item", base_snapshot=None)
-            decision = self.project.insights.decide(
-                proposal["id"], "accept", "reviewed", "", f"page-{index}", expected_rev=1)
-            extra_ids.append(decision["work_item"]["id"])
-        status_order = {"doing": 0, "blocked": 1, "open": 2}
-        expected_rows = sorted((self.store.get(item_id) for item_id in [self.item_id, *extra_ids]),
-                               key=lambda item: (status_order[item["status"]],
-                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
-        expected = [item["id"] for item in expected_rows]
-        seen = []
-        cursor = None
-        while True:
-            page = self.store.page_open(cursor=cursor, limit=2)
-            self.assertEqual(page["total"], len(expected))
-            self.assertTrue(page["coverage_complete"])
-            ids = [row["id"] for row in page["items"]]
-            self.assertEqual(ids, expected[len(seen):len(seen) + 2])
-            expected_overflow = max(0, len(expected) - len(seen) - len(ids))
-            self.assertEqual(page["overflow_count"], expected_overflow)
-            self.assertEqual(page["truncated"], expected_overflow > 0)
-            seen.extend(ids)
-            if not page["truncated"]:
-                self.assertIsNone(page["next_cursor"])
-                break
-            last = page["items"][-1]
-            self.assertEqual(page["next_cursor"],
-                             f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
-            cursor = page["next_cursor"]
-        self.assertEqual(seen, expected)
-        self.assertEqual(len(seen), len(set(seen)))
-
-    def test_page_open_live_cursor_does_not_offset_skip_after_earlier_close(self):
-        extra_ids = []
-        for index in range(3):
-            proposal = self.project.insights.submit(
-                source="worker", title=f"Live page item {index}", body="Enumerate this item", base_snapshot=None)
-            decision = self.project.insights.decide(
-                proposal["id"], "accept", "reviewed", "", f"live-page-{index}", expected_rev=1)
-            extra_ids.append(decision["work_item"]["id"])
-        status_order = {"doing": 0, "blocked": 1, "open": 2}
-        expected_rows = sorted((self.store.get(item_id) for item_id in [self.item_id, *extra_ids]),
-                               key=lambda item: (status_order[item["status"]],
-                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
-        expected = [item["id"] for item in expected_rows]
-        first = self.store.page_open(limit=2)
-        self.assertEqual([row["id"] for row in first["items"]], expected[:2])
-        last = first["items"][-1]
-        self.assertEqual(first["next_cursor"],
-                         f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
-        self.store.transition(expected[0], expected_rev=1, status="dropped", actor="worker",
-                              reason="Closed after first live page")
-        second = self.store.page_open(cursor=first["next_cursor"], limit=2)
-        self.assertEqual(second["total"], 3)
-        self.assertEqual([row["id"] for row in second["items"]], expected[2:])
-        self.assertFalse(second["truncated"])
-
     def test_page_open_validates_cursor_and_exact_integer_limit(self):
         for cursor in ("", "wi_" + "A" * 32, "../anything", 1, True,
                        "wi1|finished|2030-01-01T00:00:00+00:00|wi_" + "f" * 32,
@@ -1071,15 +638,6 @@ class WorkItemTests(Fixture):
         future = f"wi1|open|{_timestamp_order('9999-12-31T23:59:59+00:00')}|wi_" + "f" * 32
         self.assertEqual(self.store.page_open(cursor=future, limit=100)["items"], [])
 
-    def test_page_open_includes_current_stale_projection(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised page title",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        page = self.store.page_open()
-        row = next(row for row in page["items"] if row["id"] == self.item_id)
-        self.assertEqual(row["current_origin_rev"], 2)
-        self.assertTrue(row["stale"])
-        self.assertIsNone(row["redecision"])
-
     def test_page_open_includes_blocked_wait_and_bounded_reason(self):
         # Control characters expand when escaped in the canonical JSON row;
         # the documented row bound accommodates the full byte-capped preview.
@@ -1092,145 +650,6 @@ class WorkItemTests(Fixture):
         self.assertEqual(len(row["reason_preview"].encode("utf-8")), 1024)
         self.assertTrue(row["reason_truncated"])
         self.assertLessEqual(len(canonical(row)), MAX_OPEN_ROW_BYTES)
-
-    def test_page_open_reports_legacy_unseeded_decisions_and_closed_items(self):
-        legacy = copy.deepcopy(self.decision)
-        legacy.pop("work_item")
-        legacy.pop("work_item_intent")
-        legacy.pop("decision_key")
-        legacy.pop("rev")
-        legacy.pop("created_at")
-        legacy_id = "a" * 32
-        write_json(self.project.root / "decision-history" / f"{legacy_id}.json", legacy, exclusive=True)
-        self.change("dropped", reason="No longer active")
-        page = self.store.page_open()
-        self.assertEqual(page["items"], [])
-        self.assertEqual(page["total"], 0)
-        self.assertEqual(page["unseeded_decisions"], 1)
-        self.assertFalse(page["coverage_complete"])
-
-    def test_page_open_uses_configured_history_temporary_budget(self):
-        from mizu.project import Project
-
-        history = self.project.root / "decision-history"
-        committed = {path.name: path.read_bytes() for path in history.iterdir()}
-        expected_page = self.store.page_open()
-        self.assertEqual(self.store.history_temporaries,
-                         self.config.limits.history_temporaries)
-        self.assertEqual(self.store.history_temporaries, 64)
-
-        safe = {f".new-{index:08d}": b"uncommitted" for index in range(64)}
-        for name, content in safe.items():
-            (history / name).write_bytes(content)
-        forget_ledger(self.project.root)
-        self.assertEqual(self.store.page_open(), expected_page)
-        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()}, committed)
-
-        over_default = {f".new-{index:08d}": b"uncommitted" for index in range(65)}
-        for name, content in over_default.items():
-            (history / name).write_bytes(content)
-        forget_ledger(self.project.root)
-        with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
-            self.store.page_open()
-        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
-                         {**committed, **over_default})
-
-        configured = dataclasses.replace(
-            self.config, limits=dataclasses.replace(self.config.limits, history_temporaries=65))
-        configured_store = Project(configured, self.project.name).work_items
-        self.assertEqual(configured_store.history_temporaries, 65)
-        forget_ledger(self.project.root)
-        self.assertEqual(configured_store.page_open(), expected_page)
-        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()}, committed)
-
-    def test_page_open_refuses_over_absolute_history_temporary_ceiling_without_cleanup(self):
-        from mizu.project import Project
-
-        history = self.project.root / "decision-history"
-        committed = {path.name: path.read_bytes() for path in history.iterdir()}
-        configured = dataclasses.replace(
-            self.config, limits=dataclasses.replace(
-                self.config.limits, history_temporaries=MAX_HISTORY_TEMPORARIES))
-        store = Project(configured, self.project.name).work_items
-        temporaries = {f".new-{index:08d}": b"uncommitted"
-                       for index in range(MAX_HISTORY_TEMPORARIES + 1)}
-        for name, content in temporaries.items():
-            (history / name).write_bytes(content)
-        forget_ledger(self.project.root)
-        with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
-            store.page_open()
-        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
-                         {**committed, **temporaries})
-
-    def test_page_open_recovers_post_link_decision_history_temporary(self):
-        history = self.project.root / "decision-history"
-        temporary = history / ".new-alias123"
-        try:
-            os.link(self.seed_path, temporary)
-        except (OSError, NotImplementedError):
-            self.skipTest("Hard links unavailable")
-        self.assertEqual(self.seed_path.stat().st_nlink, 2)
-        forget_ledger(self.project.root)
-        page = self.store.page_open()
-        self.assertEqual([row["id"] for row in page["items"]], [self.item_id])
-        self.assertFalse(temporary.exists())
-        self.assertEqual(self.seed_path.stat().st_nlink, 1)
-
-    def test_page_open_recovers_current_redecision_alias_before_projection(self):
-        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
-                                     body="Changed claims", base_snapshot=None, expected_rev=1)
-        decision = self.project.insights.decide(
-            self.proposal["id"], "accept", "reassessed", "", "run-redecision", expected_rev=2)
-        history = self.project.root / "decision-history"
-        event_path = history / f"{decision['work_item']['id'][3:]}.json"
-        temporary = history / ".new-redec123"
-        try:
-            os.link(event_path, temporary)
-        except (OSError, NotImplementedError):
-            self.skipTest("Hard links unavailable")
-        forget_ledger(self.project.root)
-        page = self.store.page_open(limit=10)
-        self.assertEqual(page["total"], 2)
-        # This test checks recovery and membership; the ordering contract is
-        # tested separately and depends on created_at across different runs.
-        self.assertCountEqual([row["id"] for row in page["items"]],
-                              (self.item_id, decision["work_item"]["id"]))
-        self.assertFalse(temporary.exists())
-        self.assertEqual(event_path.stat().st_nlink, 1)
-
-    def test_page_open_fails_closed_on_malformed_committed_history_and_ignores_temporary(self):
-        history = self.project.root / "decision-history"
-        temporary = history / ".new-leftover"
-        temporary.write_bytes(b"uncommitted")
-        forget_ledger(self.project.root)
-        self.assertEqual([row["id"] for row in self.store.page_open()["items"]], [self.item_id])
-        self.assertFalse(temporary.exists())
-        unknown = history / "unexpected.data"
-        unknown.write_text("not a committed event")
-        forget_ledger(self.project.root)
-        with self.assertRaises(Denied):
-            self.store.page_open()
-        unknown.unlink()
-        bad = history / ("b" * 32 + ".json")
-        bad.write_bytes(b"{not-json")
-        forget_ledger(self.project.root)
-        with self.assertRaises(Denied):
-            self.store.page_open()
-
-    def test_page_open_rejects_unmatched_decision_history_hard_link(self):
-        history = self.project.root / "decision-history"
-        outside = self.project.root / "outside-decision-event"
-        outside.write_bytes(b"not a committed event")
-        temporary = history / ".new-extern12"
-        try:
-            os.link(outside, temporary)
-        except (OSError, NotImplementedError):
-            self.skipTest("Hard links unavailable")
-        forget_ledger(self.project.root)
-        with self.assertRaisesRegex(Denied, "Unrecognized decision-history temporary hard link"):
-            self.store.page_open()
-        self.assertTrue(temporary.exists())
-        self.assertEqual(outside.read_bytes(), b"not a committed event")
 
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)
@@ -1248,7 +667,7 @@ class WorkItemTests(Fixture):
         winners = [result for result in results if result is not None]
         self.assertEqual(len(winners), 1)
         self.assertEqual(self.store.get(self.item_id), winners[0])
-        self.assertEqual([p.name for p in self.directory.iterdir()], ["2.json"])
+        self.assertEqual(self.revision_names(), ["2.json"])
 
 
     def test_continued_doing_sidecar_is_removed_and_exact(self):
@@ -1302,19 +721,6 @@ class WorkItemTests(Fixture):
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("doing", 2))
         self.assertEqual(fresh.get(self.item_id)["status"], "doing")
-
-    def test_sidecar_recomputes_origin_on_read(self):
-        self.change("doing")
-        first = self.store.page_open_readonly(limit=100)
-        row = next(row for row in first["items"] if row["id"] == self.item_id)
-        self.assertFalse(row["stale"])
-        self.project.insights.revise(self.proposal["id"], source="worker",
-                                     title="Revised scope", body="Changed claims",
-                                     base_snapshot=None, expected_rev=1)
-        second = WorkItems(self.project.root, self.project.snapshots, self.project.ledger).page_open_readonly(limit=100)
-        row = next(row for row in second["items"] if row["id"] == self.item_id)
-        self.assertTrue(row["stale"])
-        self.assertEqual(row["current_origin_rev"], 2)
 
 if __name__ == "__main__":
     unittest.main()

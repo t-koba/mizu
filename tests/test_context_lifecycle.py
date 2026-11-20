@@ -36,11 +36,6 @@ class ContextLifecycleBoundaryTests(Fixture):
                 self.assertNotIn(name, Context.__dict__)
                 self.assertIs(getattr(Context, name), getattr(ContextLifecycleMixin, name))
 
-    def test_wrap_up_ops_is_one_shared_object(self):
-        self.assertIs(WRAP_UP_OPS, MIXIN_WRAP_UP_OPS)
-        self.assertEqual(WRAP_UP_OPS,
-                         frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"}))
-
     def test_drain_refusal_constant_resolves_through_the_mixin(self):
         self.assertIn("DRAIN_REQUEST_REFUSED", ContextLifecycleMixin.__dict__)
         self.assertNotIn("DRAIN_REQUEST_REFUSED", Context.__dict__)

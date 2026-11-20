@@ -36,7 +36,7 @@ class CheckJobIndexTests(Fixture):
             pass
 
     def build(self):
-        with self.project.insights.ledger.read('check_jobs', locked=True):
+        with self.project.ledger.read('check_jobs', locked=True):
             pass
         return rows(self.project.root)
 
@@ -102,13 +102,13 @@ class CheckJobIndexTests(Fixture):
     def test_wait_references_rebuild_and_clear_without_directory_scan(self):
         job = self.queue()
         check_jobs.set_wait(self.project, 'worker', job['id'])
-        expected = self.project.insights.ledger.snapshot('check_jobs')
+        expected = self.project.ledger.snapshot('check_jobs')
         forget_ledger(self.project.root)
         self.build()
-        self.assertEqual(self.project.insights.ledger.snapshot('check_jobs'), expected)
+        self.assertEqual(self.project.ledger.snapshot('check_jobs'), expected)
         self.assertTrue(self.project.work_items.audit()['check_jobs']['consistent'])
         check_jobs.clear_wait(self.project, 'worker')
-        self.assertNotIn('worker.wait.json', self.project.insights.ledger.snapshot('check_jobs')[1])
+        self.assertNotIn('worker.wait.json', self.project.ledger.snapshot('check_jobs')[1])
         record = check_jobs.raw_read(self.project, job['id'])
         with lock(self.project.root / 'locks/check-jobs.lock'):
             acceptance.write_job(self.project, job['id'], {**record, 'status': 'cancelled', 'acknowledged': True})

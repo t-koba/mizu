@@ -23,11 +23,9 @@ class WorkItemsCliViewTests(Fixture):
         self.store = self.project.work_items
 
     def make_open(self, title, body="Body text"):
-        proposal = self.project.insights.submit(
-            source="worker", title=title, body=body, base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
-        return proposal, decision, decision["work_item"]["id"]
+        item = self.store.create(idempotency_key=title, title=title, actor="worker",
+                                 description=body)["record"]["work_item"]
+        return {"id": item["id"]}, {"work_item": item}, item["id"]
 
     def make_snapshot(self, run="run-1"):
         captured = self.project.snapshots.capture_files(self.project.workspace)
@@ -101,15 +99,12 @@ class WorkItemsCliViewTests(Fixture):
         expected_open = self.store.page_open()
         self.assertEqual(result["open"], expected_open)
         self.assertEqual(result["open"]["total"], 1)
-        self.assertTrue(result["open"]["coverage_complete"])
-        self.assertEqual(result["open"]["unseeded_decisions"], 0)
         for key in ("items", "total", "cursor", "next_cursor",
                     "overflow_count", "truncated"):
             self.assertIn(key, result["open"])
         row = result["open"]["items"][0]
         for key in ("id", "title", "origin", "status", "rev", "holder",
-                    "created_at", "updated_at",
-                    "current_origin_rev", "stale", "redecision"):
+                    "created_at", "updated_at"):
             self.assertIn(key, row)
         self.assertLessEqual(len(canonical(row)), MAX_OPEN_ROW_BYTES)
         self.assertLessEqual(len(canonical(result["open"])), MAX_OPEN_PAGE_BYTES)
@@ -251,23 +246,6 @@ class WorkItemsCliViewTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_open_readonly(cursor="bad-cursor")
 
-    def test_unseeded_coverage_exposed_through_cli(self):
-        import copy
-        self.make_open("Seeded")
-        # Craft a legacy accept event without a seed or intent.
-        legacy_id = "b" * 32
-        legacy_event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
-                        "reason": "Legacy assessment", "revisit": "", "run": "synthetic-run",
-                        "created_at": "2024-01-01T00:00:00+00:00"}
-        from support import history_write_json as _write
-        _write(self.project.root / "decision-history" / f"{legacy_id}.json",
-               legacy_event, exclusive=True)
-        args = parser().parse_args(["--config", str(self.file), "work-items", "sample"])
-        result = execute(args)
-        self.assertEqual(result["open"]["unseeded_decisions"], 1)
-        self.assertFalse(result["open"]["coverage_complete"])
-        self.assertEqual(result["open"]["total"], 1)
-
     def test_readonly_does_not_acquire_lock(self):
         self.make_open("Locked check")
         import mizu.work_items as wi
@@ -289,27 +267,6 @@ class WorkItemsCliViewTests(Fixture):
         self.store.page_closed_readonly(limit=5)
         self.assertFalse(lock_path.exists())
 
-    def test_readonly_neither_cleans_nor_promotes_temporaries(self):
-        _, _, item_id = self.make_open("Temp check")
-        history = self.project.root / "decision-history"
-        leftover = history / ".new-leftover"
-        leftover.write_bytes(b"uncommitted")
-        item_dir = self.project.root / "work-items" / item_id
-        item_dir.mkdir(parents=True, exist_ok=True)
-        item_temp = item_dir / ".new-temp1234"
-        item_temp.write_bytes(b"uncommitted")
-        forget_ledger(self.project.root)  # Leftovers are only seen while rebuilding.
-        opened = self.store.page_open_readonly()
-        closed = self.store.page_closed_readonly(limit=5)
-        self.assertEqual([row["id"] for row in opened["items"]], [item_id])
-        self.assertTrue(leftover.exists())
-        self.assertTrue(item_temp.exists())
-        self.assertEqual(leftover.read_bytes(), b"uncommitted")
-        # The locked reader recovers the same leftovers.
-        locked = self.store.page_open()
-        self.assertEqual([row["id"] for row in locked["items"]], [item_id])
-        self.assertFalse(leftover.exists())
-        self.assertFalse(item_temp.exists())
     def _archive_origin(self, insight_id):
         import datetime as dt
         from mizu.fs import read_json
@@ -323,78 +280,3 @@ class WorkItemsCliViewTests(Fixture):
         self.assertEqual(removed, 1)
         self.assertFalse((self.project.root / "inbox" / f"{insight_id}.json").exists())
 
-    def test_readonly_archived_origin_reads_without_recovery_or_locks(self):
-        import hashlib
-        from unittest.mock import patch
-        from mizu import insight_archive
-        import mizu.work_items as wi
-        proposal, _, item_id = self.make_open("Archived origin")
-        insight_id = proposal["id"]
-        self._archive_origin(insight_id)
-        archive_path = self.project.root / insight_archive.NAME
-        self.assertTrue(archive_path.is_file())
-        for suffix in ("-journal", "-wal", "-shm"):
-            self.assertFalse((Path(str(archive_path) + suffix)).exists())
-        lock_path = self.project.root / "locks" / "insights.lock"
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        before_bytes = archive_path.read_bytes()
-        before_digest = hashlib.sha256(before_bytes).hexdigest()
-        before_mtime = archive_path.stat().st_mtime_ns
-        with patch.object(wi, "lock", side_effect=AssertionError("lock must not be acquired")):
-            opened = self.store.page_open_readonly()
-        self.assertEqual(opened["total"], 1)
-        row = opened["items"][0]
-        self.assertEqual(row["id"], item_id)
-        self.assertEqual(row["current_origin_rev"], 1)
-        self.assertFalse(row["stale"])
-        self.assertIsNone(row["redecision"])
-        self.assertEqual(archive_path.read_bytes(), before_bytes)
-        self.assertEqual(hashlib.sha256(archive_path.read_bytes()).hexdigest(), before_digest)
-        self.assertEqual(archive_path.stat().st_mtime_ns, before_mtime)
-        for suffix in ("-journal", "-wal", "-shm"):
-            self.assertFalse((Path(str(archive_path) + suffix)).exists())
-        self.assertFalse(lock_path.exists())
-
-    def test_readonly_refuses_pending_recovery_sidecar_without_touching_files(self):
-        import hashlib
-        from mizu import insight_archive
-        proposal, _, item_id = self.make_open("Archived with journal")
-        insight_id = proposal["id"]
-        self._archive_origin(insight_id)
-        archive_path = self.project.root / insight_archive.NAME
-        lock_path = self.project.root / "locks" / "insights.lock"
-        for suffix in ("-journal", "-wal", "-shm"):
-            sidecar = Path(str(archive_path) + suffix)
-            try:
-                sidecar.unlink()
-            except FileNotFoundError:
-                pass
-            sidecar.write_bytes(b"pending-recovery")
-            sidecar_mtime = sidecar.stat().st_mtime_ns
-            before_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-            before_mtime = archive_path.stat().st_mtime_ns
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            forget_ledger(self.project.root)  # Only a build of the index reads the archive.
-            with self.assertRaises(Denied):
-                self.store.page_open_readonly()
-            # Fail closed: sidecar preserved, archive untouched, no locks/sidecars created.
-            self.assertTrue(sidecar.exists())
-            self.assertEqual(sidecar.read_bytes(), b"pending-recovery")
-            self.assertEqual(sidecar.stat().st_mtime_ns, sidecar_mtime)
-            self.assertEqual(hashlib.sha256(archive_path.read_bytes()).hexdigest(), before_digest)
-            self.assertEqual(archive_path.stat().st_mtime_ns, before_mtime)
-            self.assertFalse(lock_path.exists())
-            for other in ("-journal", "-wal", "-shm"):
-                if other == suffix:
-                    continue
-                self.assertFalse((Path(str(archive_path) + other)).exists())
-            sidecar.unlink()
-            # Recovers to a normal read-only view once the sidecar is gone.
-            opened = self.store.page_open_readonly()
-            self.assertEqual([row["id"] for row in opened["items"]], [item_id])

@@ -215,10 +215,8 @@ class SnapshotTests(Fixture):
 
 class ContextTests(Fixture):
     def _accepted_work_item(self, title="Runtime transition"):
-        proposal = self.project.insights.submit(source="worker", title=title,
-                                                body="Test the runtime operation", base_snapshot=None)
-        return self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                            "runtime-test", expected_rev=1)["work_item"]
+        return self.project.work_items.create(idempotency_key=title, title=title,
+                                              actor="worker")["record"]["work_item"]
 
     def test_retired_work_item_operations_have_no_runtime_surface(self):
         from mizu.config import CAPABILITIES
@@ -235,68 +233,6 @@ class ContextTests(Fixture):
                 self.assertFalse(operation_allowed(operation, (operation,)))
                 with self.assertRaisesRegex(Denied, "Unknown operation"):
                     ctx.dispatch(operation, {})
-
-    def test_work_items_transition_protocol_schema_and_configured_grant(self):
-        from mizu.config import CAPABILITIES
-        from mizu.protocol import DEFINITIONS, validate
-        from mizu.runtime import _is_observational_operation
-
-        self.assertIn("work_items_transition", CAPABILITIES)
-        self.assertIn("work_items_transition", DEFINITIONS)
-        self.assertIn("work_items_transition", self.config.roles["worker"].capabilities)
-        for name, role in self.config.roles.items():
-            if name != "worker":
-                self.assertNotIn("work_items_transition", role.capabilities, name)
-        description, schema = DEFINITIONS["work_items_transition"]
-        self.assertIn("new transitions to blocked require a supported observable wait", description)
-        self.assertIn("receipt-bound work-item-only CI wait", description)
-        self.assertIn("work-item-only wait {kind:proposal_merged", description)
-        self.assertIn("work-item-only wait {kind:object_resolved", description)
-        item_id = "wi_" + "a" * 32
-        validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
-        validate({"id": item_id, "expected_rev": 1, "status": "blocked",
-                  "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}}, schema)
-        validate({"id": item_id, "expected_rev": 2, "status": "blocked",
-                  "wait": {"kind": "code_change"}}, schema)
-        work_wait = schema["properties"]["wait"]["properties"]
-        insight_schema = DEFINITIONS["decide"][1]
-        insight_wait = insight_schema["properties"]["wait"]["properties"]
-        self.assertEqual(work_wait["kind"]["enum"], ["deadline", "code_change", "dependency", "object_resolved",
-                          "ci", "publication_ci", "proposal_merged"])
-        for field in insight_wait.keys() - {"kind"}:
-            self.assertEqual(work_wait[field], insight_wait[field])
-        self.assertEqual(work_wait.keys() - insight_wait.keys(),
-                         {"publication_id", "snapshot_id", "proposal_id", "checks", "subject"})
-        proposal_wait = {"kind": "proposal_merged", "publication_id": "a" * 64,
-                         "proposal_id": "forge:owner/repo#1"}
-        validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": proposal_wait}, schema)
-        record_wait = {"kind": "object_resolved", "subject": {
-            "type": "record", "kind": "role.question",
-            "id": "role/worker/role.question/question1", "digest": "b" * 64}}
-        validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": record_wait}, schema)
-        for work_only_wait in (proposal_wait, record_wait):
-            with self.assertRaises(Denied):
-                validate({"action": "defer", "id": "i" * 32, "rev": 1,
-                          "reason": "Need evidence", "revisit": "When evidence arrives",
-                          "wait": work_only_wait}, insight_schema)
-        bad_arguments = (
-            {},
-            {"id": item_id, "status": "doing"},
-            {"id": item_id, "expected_rev": 0, "status": "doing"},
-            {"id": item_id, "expected_rev": True, "status": "doing"},
-            {"id": item_id, "expected_rev": 1, "status": "unknown"},
-            {"id": item_id, "expected_rev": 1, "status": "doing", "reason": ""},
-            {"id": item_id, "expected_rev": 1, "status": "doing", "reason": "r" * 4001},
-            {"id": item_id, "expected_rev": 1, "status": "doing", "snapshot_id": "g" * 64},
-            {"id": item_id, "expected_rev": 1, "status": "doing", "snapshot_id": "a" * 63},
-            {"id": item_id, "expected_rev": 1, "status": "doing", "actor": "model"},
-            {"id": item_id, "expected_rev": 1, "status": "blocked",
-             "wait": {"kind": "code_change", "extra": 1}},
-        )
-        for arguments in bad_arguments:
-            with self.subTest(arguments=arguments), self.assertRaises(Denied):
-                validate(arguments, schema)
-        self.assertFalse(_is_observational_operation("work_items_transition", {}))
 
     def test_work_items_transition_uses_read_revision_and_binds_actor(self):
         item = self._accepted_work_item()
@@ -330,7 +266,7 @@ class ContextTests(Fixture):
             ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 1,
                                                   "status": "blocked"})
         directory = self.project.root / "work-items" / item["id"]
-        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["2.json"])
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["2.json", "create.json"])
         self.assertEqual(self.project.work_items.get(item["id"])["rev"], 2)
 
     def test_work_items_transition_denial_and_consult_delegate_exclusion(self):
@@ -345,7 +281,7 @@ class ContextTests(Fixture):
         with self.assertRaisesRegex(Denied, "no capability: work_items_transition"):
             ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 1,
                                                   "status": "doing"})
-        self.assertFalse((self.project.root / "work-items" / item["id"]).exists())
+        self.assertFalse((self.project.root / "work-items" / item["id"] / "2.json").exists())
         self.assertIn("work_items_transition", CONSULT_FORBIDDEN)
         self.assertIn("work_items_transition", DELEGATE_FORBIDDEN)
         consult = self.config.roles["consult"]
@@ -356,7 +292,7 @@ class ContextTests(Fixture):
         with self.assertRaises(ConfigError):
             check_delegate_role("helper", dataclasses.replace(
                 delegate, capabilities=(*delegate.capabilities, "work_items_transition")))
-        for capability in ("objects", "events"):
+        for capability in ("queues",):
             self.assertIn(capability, CONSULT_FORBIDDEN)
             self.assertIn(capability, DELEGATE_FORBIDDEN)
             with self.assertRaises(ConfigError):
@@ -396,42 +332,6 @@ class ContextTests(Fixture):
         self.assertEqual(completed["verification"], verification)
         # The delivery tree is taken from the exact bound immutable manifest.
         self.assertEqual(completed["delivered_tree"], captured["code_digest"])
-
-    def test_work_items_read_protocol_grant_paging_and_observation(self):
-        from mizu.config import CAPABILITIES
-        from mizu.protocol import DEFINITIONS, validate
-        from mizu.runtime import _is_observational_operation
-        self.assertIn("work_items_read", CAPABILITIES)
-        self.assertIn("work_items_read", DEFINITIONS)
-        validate({}, DEFINITIONS["work_items_read"][1])
-        validate({"cursor": "opaque", "limit": 1}, DEFINITIONS["work_items_read"][1])
-        for arguments in ({"limit": 0}, {"limit": 101}, {"cursor": "x" * 129}):
-            with self.assertRaises(Denied):
-                validate(arguments, DEFINITIONS["work_items_read"][1])
-
-        for index in range(3):
-            proposal = self.project.insights.submit(
-                source="worker", title=f"Readable item {index}", body="Open", base_snapshot=None)
-            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                         f"read-{index}", expected_rev=1)
-        ctx = self.context("worker")
-        self.assertIn("work_items_read", ctx.role.capabilities)
-        first = ctx.handle("work_items_read", {"limit": 2})
-        self.assertEqual(len(first["items"]), 2)
-        self.assertEqual(first["overflow_count"], 1)
-        self.assertTrue(first["truncated"])
-        second = ctx.handle("work_items_read", {"cursor": first["next_cursor"], "limit": 2})
-        self.assertEqual(len(second["items"]), 1)
-        self.assertEqual(second["overflow_count"], 0)
-        self.assertFalse(second["truncated"])
-        self.assertTrue(_is_observational_operation("work_items_read", {}))
-        self.assertFalse(ctx.progress_tool)
-
-        denied = self.context("consult")
-        denied.role = dataclasses.replace(denied.role, capabilities=tuple(
-            capability for capability in denied.role.capabilities if capability != "work_items_read"))
-        with self.assertRaisesRegex(Denied, "no capability: work_items_read"):
-            denied.handle("work_items_read", {})
 
     def test_work_items_read_by_id_open_and_terminal_is_observational(self):
         from mizu.fs import canonical
@@ -504,13 +404,6 @@ class ContextTests(Fixture):
             with self.assertRaisesRegex(Denied, "store rejected cursor"):
                 ctx.handle("work_items_read", {})
 
-    def test_capability_refusal(self):
-        ctx = self.context("searcher")
-        with self.assertRaises(Denied):
-            ctx.handle("exec", {"script": "echo no"})
-        with self.assertRaises(Denied):
-            ctx.handle("decide", {"id": "x", "action": "accept", "reason": "no"})
-
     def test_extra_arguments_refused(self):
         with self.assertRaises(Denied):
             self.context().handle("read", {"path": "app.py", "source": "operator"})
@@ -522,41 +415,6 @@ class ContextTests(Fixture):
             ctx.handle("read", {"path": "app.py"})
         with self.assertRaises(Denied):
             ctx.handle("_budget", {"sequence": 1})
-
-    def test_writer_continue_refuses_invalid_next_before_side_effects(self):
-        item = self.project.insights.submit(source="worker", title="Finding", body="Evidence",
-                                            base_snapshot=None)
-        self.project.insights.decide(item["id"], "reject", "Not material", "", "test", expected_rev=1)
-        events = self.project.insights.decision_events("worker", ("reject",))
-        self.assertEqual(len(events), 1)
-        snapshots = {p.name: p.read_bytes() for p in (self.project.root / "snapshots").iterdir()}
-        for step in (None, "", "none", "Nothing.", "n/a", " padded", "padded ",
-                     "two\nlines", "tab\there", "x" * 4097, 42):
-            with self.subTest(next_step=step):
-                ctx = self.context()
-                ctx.decision_events = events
-                args = {"outcome": "continue", "summary": "Work completed",
-                        "state": "Now: Work done.\nNext: Valid prose is not a typed step",
-                        "ack_events": [events[0]["ack_token"]]}
-                if step is not None:
-                    args["next_step"] = step
-                with patch("mizu.runtime.operator_records.validate") as validate, \
-                        patch("mizu.runtime.structured_wait_events.received") as received, \
-                        patch.object(ctx, "close_exec") as close_exec:
-                    diagnostic = "next_step requires 1–4096 printable characters" if step is None else "next_step"
-                    with self.assertRaisesRegex(Denied, diagnostic):
-                        ctx.handle("finish", args)
-                    validate.assert_not_called()
-                    received.assert_not_called()
-                    close_exec.assert_not_called()
-                self.assertIsNone(ctx.finished)
-                self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
-                self.assertEqual(self.project.insights.decision_events("worker", ("reject",)), events)
-                self.assertEqual({p.name: p.read_bytes() for p in
-                                  (self.project.root / "snapshots").iterdir()}, snapshots)
-                # A refusal leaves the same unit open for correction, not sealed.
-                args["next_step"] = "Check the focused test result"
-                self.assertTrue(ctx.handle("finish", args)["sealed"])
 
     def test_next_diagnostic_leaves_other_roles_and_outcomes_unchanged(self):
         for workspace in ("read", "none"):
@@ -651,22 +509,6 @@ class EngineTests(Fixture):
         self.assertEqual(len(driver.calls), 1)
         self.assertFalse((self.project.root / "work-items").exists())
 
-    def test_flat_shared_record_refuses_run_until_removed(self):
-        flat = self.project.root / "shared-records" / "legacy.json"
-        flat.parent.mkdir(exist_ok=True)
-        flat.write_bytes(b"{}")  # Presence, not validity, is the guard.
-        driver = ScriptDriver()
-        engine = Engine(self.config, driver=driver)
-        with patch("mizu.workspace_cache.maintain") as maintain:
-            with self.assertRaisesRegex(Denied, f"mizu migrate-records {self.project.name} --apply"):
-                engine.run(self.project, "worker")
-            maintain.assert_not_called()
-        self.assertEqual(driver.calls, [])
-
-        flat.unlink()
-        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
-        self.assertEqual(len(driver.calls), 1)
-
     def test_complete_work_unit_publishes(self):
         old = self.project.snapshots.get()["id"]
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
@@ -694,23 +536,6 @@ class EngineTests(Fixture):
             with self.assertRaises(Busy):
                 Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
 
-    def test_smoke_gc_contention_does_not_defer_run_admission(self):
-        class ReachedAdmission(Exception):
-            pass
-
-        config = dataclasses.replace(
-            self.config, limits=dataclasses.replace(self.config.limits, lock_timeout_seconds=0))
-        project = Project(config, self.project.name)
-        engine = Engine(config, driver=ScriptDriver())
-        with patch.object(project.insights, "gc_decided",
-                         wraps=project.insights.gc_decided) as sweep:
-            with shared_lock(config.data):
-                with patch.object(engine, "_admit", side_effect=ReachedAdmission):
-                    with self.assertRaises(ReachedAdmission):
-                        engine.run(project, "worker", probes_serviced=True)
-        self.assertEqual(sweep.call_args.kwargs.get("blocking"), False)
-        self.assertFalse((self.project.root / "runs").exists())
-
     def test_unchanged_review_avoids_model_call(self):
         driver = ScriptDriver()
         engine = Engine(self.config, driver=driver)
@@ -737,12 +562,6 @@ class EngineTests(Fixture):
                 Engine(config, driver=ScriptDriver(fails)).run(project, "worker")
         self.assertFalse(project.control()["paused"])
         self.assertEqual(read_json(project.root / "health" / "worker.json")["consecutive_failures"], 4)
-
-    def test_arrival_during_work_is_not_marked_seen(self):
-        def incoming(ctx, *_):
-            ctx.project.insights.submit(source="editor", title="new", body="arrived mid-run", base_snapshot=ctx.snapshot["id"])
-        Engine(self.config, driver=ScriptDriver(incoming)).run(self.project, "worker")
-        self.assertTrue(should_run(self.project, self.project.snapshots.get()))
 
     def test_explicit_wake_during_work_survives(self):
         def wake(ctx, *_):
@@ -797,43 +616,6 @@ class EngineTests(Fixture):
         self.assertEqual(session_generation(path.parent), 1)
         self.assertFalse(path.exists())
 
-    def test_code_change_wait_wakes_writer(self):
-        snap = self.project.snapshots.get()
-        proposal = self.project.insights.submit(source="worker", title="Risk", body="evidence",
-                                                base_snapshot=snap["id"])
-        self.project.insights.decide(proposal["id"], "defer", "recheck after edits", "when code changes",
-                                     "worker", wait={"kind": "code_change"}, expected_rev=1)
-        (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
-        Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-        # The wait came due after the run published: no inbox, goal, or wake
-        # change marks it, so only the event check admits the next dispatch.
-        self.assertTrue(should_run(self.project, self.project.snapshots.get()))
-        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
-        # An unnamed check covers the same write set.
-        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="ghost"))
-
-    def test_decision_event_wakes_writer(self):
-        roles = dict(self.config.roles)
-        roles["worker"] = dataclasses.replace(roles["worker"], decision_events=("reject",))
-        config = dataclasses.replace(self.config, roles=roles)
-        project = Project(config, "sample")
-        proposal = project.insights.submit(source="worker", title="Idea", body="evidence",
-                                           base_snapshot=project.snapshots.get()["id"], addressee="operator")
-        Engine(config, driver=ScriptDriver()).run(project, "worker")
-        self.assertFalse(should_run(project, project.snapshots.get(), role_name="worker"))
-        # A rejection leaves no inbox-generation footprint, so only the
-        # event check admits the next dispatch.
-        project.insights.decide(proposal["id"], "reject", "not now", "", "worker", expected_rev=1)
-        self.assertTrue(should_run(project, project.snapshots.get(), role_name="worker"))
-        self.assertTrue(should_run(project, project.snapshots.get()))
-
-    def test_done_does_not_reopen_for_news(self):
-        snap = {**self.project.snapshots.get(), "outcome": "done", "wake_generation": "test-wake"}
-        self.project.insights.submit(source="searcher", title="News", body="interesting", base_snapshot=snap["id"])
-        self.assertFalse(should_run(self.project, snap))
-        self.project.set_control(wake_generation="operator-new")
-        self.assertTrue(should_run(self.project, snap))
-
     def test_consult_same_snapshot_and_isolated_failure(self):
         import dataclasses
         def answer(ctx, prompt, profile):
@@ -845,7 +627,7 @@ class EngineTests(Fixture):
         roles["advisor-b"] = dataclasses.replace(self.config.roles["consult"], name="advisor-b", profile="alternate")
         config = dataclasses.replace(self.config, roles=roles)
         engine = Engine(config, driver=ScriptDriver(answer))
-        result = self.admitted_call(engine, "consult", {"question": "What could fail?", "roles": ["advisor-a", "advisor-b"]})
+        result = self.admitted_call(engine, "consult", {"request": "What could fail?", "roles": ["advisor-a", "advisor-b"]})
         self.assertEqual({x["snapshot"] for x in result["answers"]}, {result["snapshot"]})
         self.assertEqual(len(result["answers"]), 2)
         self.assertEqual(result["roles"], ["advisor-a", "advisor-b"])
@@ -867,22 +649,22 @@ class EngineTests(Fixture):
 
     def test_agent_cannot_select_unapproved_consult_model(self):
         with self.assertRaises(ConfigError):
-            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["unapproved"]})
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"request": "x", "roles": ["unapproved"]})
         with self.assertRaises(Denied):
-            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": []})
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"request": "x", "roles": []})
         with self.assertRaises(Denied):
-            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["consult", "consult"]})
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"request": "x", "roles": ["consult", "consult"]})
         with self.assertRaises(Denied):
-            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["consult"], "role": "consult"})
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"request": "x", "roles": ["consult"], "role": "consult"})
 
     def test_consult_role_is_operator_chosen_not_hardcoded(self):
         import dataclasses
         from mizu.protocol import DEFINITIONS, validate
-        validate({"question": "q?", "role": "advisor"}, DEFINITIONS["consult"][1])
+        validate({"request": "q?", "role": "advisor"}, DEFINITIONS["consult"][1])
         role = dataclasses.replace(self.config.roles["consult"], name="advisor")
         config = dataclasses.replace(self.config, roles={**self.config.roles, "advisor": role})
         engine = Engine(config, driver=ScriptDriver())
-        result = self.admitted_call(engine, "consult", {"question": "q?", "role": "advisor"})
+        result = self.admitted_call(engine, "consult", {"request": "q?", "role": "advisor"})
         self.assertEqual(result["roles"], ["advisor"])
         self.assertNotIn("aggregation", result)
 
@@ -892,7 +674,7 @@ class EngineTests(Fixture):
             seen.append(profile)
             ctx.handle("finish", {"outcome": "wait", "summary": "Own model"})
         engine = Engine(self.config, driver=ScriptDriver(answer))
-        result = self.admitted_call(engine, "consult", {"question": "Which model answers?"})
+        result = self.admitted_call(engine, "consult", {"request": "Which model answers?"})
         self.assertEqual(result["roles"], [self.config.consult_role])
         self.assertEqual(len(result["answers"]), 1)
         own = self.config.roles[self.config.consult_role].profile
@@ -908,7 +690,7 @@ class EngineTests(Fixture):
                               "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
         config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
         engine = Engine(config, driver=ScriptDriver())
-        result = self.admitted_call(engine, "consult", {"question": "q?"})
+        result = self.admitted_call(engine, "consult", {"request": "q?"})
         self.assertEqual(result["roles"], [config.consult_role])
         self.assertEqual(result["answers"][0]["profile"], "primary")
         self.assertEqual(result["answers"][0]["role"], config.consult_role)
@@ -926,7 +708,7 @@ class EngineTests(Fixture):
                               "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
         config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
         engine = Engine(config, driver=ScriptDriver())
-        result = self.admitted_call(engine, "consult", {"question": "q?", "roles": ["outsider", "sel-outsider"]})
+        result = self.admitted_call(engine, "consult", {"request": "q?", "roles": ["outsider", "sel-outsider"]})
         self.assertEqual(result["roles"], ["outsider", "sel-outsider"])
         by_role = {a["role"]: a for a in result["answers"]}
         self.assertIn("answer", by_role["outsider"])
@@ -945,56 +727,12 @@ class EngineTests(Fixture):
         from mizu.errors import ConfigError
         engine = Engine(self.config, driver=ScriptDriver())
         with self.assertRaises(ConfigError):
-            engine.consult(self.context(), {"question": "q?", "role": "worker"})
+            engine.consult(self.context(), {"request": "q?", "role": "worker"})
         with self.assertRaises(ConfigError):
-            engine.consult(self.context(), {"question": "q?", "role": "ghost"})
+            engine.consult(self.context(), {"request": "q?", "role": "ghost"})
 
 
 class PromptProjectionTests(Fixture):
-    def test_open_work_items_projection_is_shared_bounded_and_fail_closed(self):
-        import dataclasses
-        import json
-        from mizu.runtime import prompt_for, prompt_delta_for
-        from support import history_write_json as write_json
-        for index in range(3):
-            proposal = self.project.insights.submit(
-                source="worker", title=f"Prompt item {index}", body="Open", base_snapshot=None)
-            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                         f"prompt-{index}", expected_rev=1)
-        legacy = {"action": "accept"}
-        write_json(self.project.root / "decision-history" / ("b" * 32 + ".json"), legacy, exclusive=True)
-        small = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, work_items_prompt=2))
-        ctx = self.context("consult")
-        ctx.config = small
-        # Without a work-item capability the inventory is offered only on explicit
-        # configuration; the projection itself needs no capability.
-        ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(
-            capability for capability in ctx.role.capabilities if capability != "work_items_read"),
-            context_include=("open_work_items",))
-        self.assertNotIn("work_items_read", ctx.role.capabilities)
-        full = json.loads(prompt_for(ctx))
-        delta = json.loads(prompt_delta_for(ctx))
-        page = full["open_work_items"]
-        self.assertEqual(delta["open_work_items"], page)
-        self.assertEqual(len(page["items"]), 2)
-        self.assertEqual(page["total"], 3)
-        self.assertEqual(page["overflow_count"], 1)
-        self.assertTrue(page["truncated"])
-        self.assertIsNotNone(page["next_cursor"])
-        self.assertEqual(page["unseeded_decisions"], 1)
-        self.assertFalse(page["coverage_complete"])
-        self.assertEqual(page, ctx._work_order_inputs["open_work_items"])
-        self.assertTrue(all("details_reference" not in row for row in page["items"]))
-        # Fail-closed is judged on a fresh unit: the frozen unit reuses
-        # its opening capture and does not reread the store.
-        fresh = self.context("consult")
-        fresh.config = small
-        fresh.role = ctx.role
-        with patch.object(self.project.work_items, "page_open", side_effect=Denied("unsafe store")):
-            with self.assertRaisesRegex(Denied, "unsafe store"):
-                prompt_for(fresh)
-
     def test_prompts_open_with_the_fixed_new_unit_statement(self):
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
@@ -1160,27 +898,6 @@ class PromptProjectionTests(Fixture):
         self.assertIn("tool:read", reported["record"]["activity_seconds"])
         self.assertIn("activity_since", reported["record"])
 
-    def test_pending_and_acceptance_are_capability_gated(self):
-        import json
-        from mizu.runtime import prompt_for
-        self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
-                                     base_snapshot=self.project.snapshots.get()["id"])
-        worker = json.loads(prompt_for(self.context("worker")))
-        self.assertEqual(len(worker["pending_insights"]), 1)
-        self.assertEqual(worker["acceptance_commands"], ["python3 -m unittest"])
-        searcher = json.loads(prompt_for(self.context("searcher")))
-        self.assertEqual(searcher["pending_insights"], [])
-        self.assertEqual(searcher["acceptance_commands"], [])
-        consult = json.loads(prompt_for(self.context("consult")))
-        self.assertEqual(consult["pending_insights"], [])
-        self.assertEqual(consult["acceptance_commands"], [])
-        reviewer = json.loads(prompt_for(self.context("reviewer")))
-        self.assertEqual(reviewer["pending_insights"], [])
-        self.assertEqual(reviewer["acceptance_commands"], [])
-        reporter = json.loads(prompt_for(self.context("reporter")))
-        self.assertEqual(len(reporter["pending_insights"]), 1)
-        self.assertEqual(reporter["acceptance_commands"], [])
-
     def test_exact_snapshot_references_are_pinned(self):
         import json
         from mizu.runtime import prompt_for
@@ -1192,36 +909,6 @@ class PromptProjectionTests(Fixture):
         for entry in prompt["recent_snapshots"]:
             self.assertIn("id", entry)
             self.assertIn("code_digest", entry)
-
-    def test_run_records_prompt_projection_evidence(self):
-        import dataclasses
-        from mizu.fs import read_json
-        from support import history_write_json as write_json
-        for index in range(3):
-            proposal = self.project.insights.submit(
-                source="worker", title=f"Audit item {index}", body="Open", base_snapshot=None)
-            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                         f"audit-{index}", expected_rev=1)
-        write_json(self.project.root / "decision-history" / ("b" * 32 + ".json"),
-                   {"action": "accept"}, exclusive=True)
-        config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, work_items_prompt=2))
-        before = self.project.snapshots.get()["id"]
-        def finish_with_handoff(context, *_):
-            (context.workspace / "prompt-projection-handoff.txt").write_text(context.run_dir.name)
-            context.handle("finish", {"outcome": "continue", "summary": "Projection recorded",
-                                       "state": context.snapshot["state"],
-                                       "next_step": "Reassess the accepted items"})
-        result = Engine(config, driver=ScriptDriver(finish_with_handoff)).run(self.project, "worker")
-        projection = read_json(self.project.root / "runs" / result["run"] / "prompt_projection.json")
-        self.assertEqual(projection["run"], result["run"])
-        self.assertEqual(projection["profile"], config.roles["worker"].profile)
-        self.assertEqual(projection["snapshot"], before)
-        self.assertGreaterEqual(projection["prompt_bytes"], 100)
-        self.assertGreaterEqual(projection["recent_snapshots"], 1)
-        self.assertEqual(projection["open_work_items"], {
-            "shown": 2, "total": 3, "overflow_count": 1,
-            "unseeded_decisions": 1, "coverage_complete": False})
 
 class PromptClockTests(Fixture):
     def test_prompt_carries_current_time_and_zone_last(self):
@@ -1296,95 +983,6 @@ class PreviousReportTests(Fixture):
         self.assertIsNotNone(previous)
         self.assertTrue(previous["body_truncated"])
         self.assertLessEqual(len(previous["body"].encode("utf-8")), PREVIOUS_REPORT_BYTES)
-
-class InsightRetrievalTests(Fixture):
-    def test_explicit_paging_reaches_beyond_prompt_selection(self):
-        from mizu.runtime import Context
-        snap = self.project.snapshots.get()["id"]
-        for n in range(35):
-            self.project.insights.submit(source="searcher", title=f"Idea {n:02d}",
-                                         body="Evidence", base_snapshot=snap)
-        ctx = self.context("worker")
-        first = ctx.handle("insights", {"offset": 0, "limit": 1000})
-        self.assertEqual(first["total"], 35)
-        self.assertEqual(len(first["insights"]), 35)
-        # Prompt selection stays bounded.
-        import json
-        from mizu.runtime import prompt_for
-        prompt = json.loads(prompt_for(ctx))
-        self.assertEqual(len(prompt["pending_insights"]), 30)
-        # Overflow page is discoverable without knowing IDs.
-        overflow = ctx.handle("insights", {"offset": 30, "limit": 1000})
-        self.assertEqual(overflow["total"], 35)
-        self.assertEqual(len(overflow["insights"]), 5)
-        self.assertFalse(overflow["selection_truncated"])
-        seen = [item["id"] for page in (first, overflow) for item in page["insights"]]
-        self.assertEqual(len(set(seen)), 35)
-
-    def test_small_pages_enumerate_each_pending_item_once(self):
-        snap = self.project.snapshots.get()["id"]
-        submitted = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
-                                                  body="Evidence", base_snapshot=snap)["id"]
-                     for n in range(5)]
-        ctx = self.context("worker")
-        seen, offset, pages = [], 0, 0
-        while True:
-            response = ctx.handle("insights", {"offset": offset, "limit": 2})
-            self.assertEqual(response["total"], 5)
-            seen.extend(item["id"] for item in response["insights"])
-            pages += 1
-            if response["next_offset"] is None:
-                break
-            offset = response["next_offset"]
-            self.assertLess(pages, 10)
-        self.assertEqual(sorted(seen), sorted(submitted))
-        self.assertEqual(len(set(seen)), 5)
-
-    def test_small_pages_enumerate_each_decided_item_once(self):
-        snap = self.project.snapshots.get()["id"]
-        ids = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
-                                            body="Evidence", base_snapshot=snap)["id"]
-               for n in range(4)]
-        for insight_id in ids[:3]:
-            self.project.insights.decide(insight_id, "accept", "sequenced", "", "test", expected_rev=1)
-        ctx = self.context("worker")
-        seen, offset, pages = [], 0, 0
-        while True:
-            response = ctx.handle("insights", {"action": "accept", "offset": offset, "limit": 1})
-            self.assertEqual(response["total"], 3)
-            seen.extend(item["id"] for item in response["insights"])
-            pages += 1
-            if response["next_offset"] is None:
-                break
-            offset = response["next_offset"]
-            self.assertLess(pages, 10)
-        self.assertEqual(sorted(seen), sorted(ids[:3]))
-        self.assertEqual(len(set(seen)), 3)
-
-    def test_accepted_work_lists_by_action_after_leaving_pending(self):
-        snap = self.project.snapshots.get()["id"]
-        ids = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
-                                            body="Evidence", base_snapshot=snap)["id"]
-               for n in range(3)]
-        self.project.insights.decide(ids[0], "accept", "sequenced", "", "test", expected_rev=1)
-        self.project.insights.decide(ids[1], "modify", "scoped", "", "test", expected_rev=1)
-        ctx = self.context("worker")
-        pending = ctx.handle("insights", {"offset": 0, "limit": 1000})
-        self.assertEqual(pending["total"], 1)
-        self.assertEqual([item["id"] for item in pending["insights"]], [ids[2]])
-        accepted = ctx.handle("insights", {"action": "accept", "offset": 0, "limit": 1000})
-        self.assertEqual(accepted["total"], 1)
-        self.assertEqual([item["id"] for item in accepted["insights"]], [ids[0]])
-        modified = ctx.handle("insights", {"action": "modify", "offset": 0, "limit": 1000})
-        self.assertEqual(modified["total"], 1)
-        self.assertEqual([item["id"] for item in modified["insights"]], [ids[1]])
-        rejected = ctx.handle("insights", {"action": "reject", "offset": 0, "limit": 1000})
-        self.assertEqual(rejected["total"], 0)
-        from mizu.errors import Denied
-        with self.assertRaises(Denied):
-            ctx.handle("insights", {"action": "withdraw"})
-        with self.assertRaises(Denied):
-            ctx.handle("insights", {"action": "bogus"})
 
 class ActivityEvidenceTests(Fixture):
     def test_activity_bucket_precedence_is_exclusive(self):
@@ -1726,60 +1324,4 @@ class WrapUpTests(Fixture):
             ctx.handle("_budget", {"sequence": 1})
         self.assertIsNone(ctx.bound_hit)
 
-    def test_read_resolves_unique_prefix(self):
-        snap = self.project.snapshots.get()["id"]
-        full = self.project.insights.submit(source="searcher", title="Idea",
-                                            body="Evidence", base_snapshot=snap)["id"]
-        record = self.project.insights.read(full[:8])
-        self.assertEqual(record["id"], full)
-        self.assertEqual(record["title"], "Idea")
-        # The full id still reads exactly.
-        self.assertEqual(self.project.insights.read(full)["id"], full)
 
-    def test_ambiguous_prefix_and_garbage_are_refused(self):
-        from mizu.errors import Denied
-        snap = self.project.snapshots.get()["id"]
-        first = "deadbeef" + "1" + "0" * 23
-        second = "deadbeef" + "2" + "0" * 23
-        self.project.insights.submit(source="searcher", title="One", body="Evidence",
-                                     base_snapshot=snap, insight_id=first)
-        self.project.insights.submit(source="searcher", title="Two", body="Evidence",
-                                     base_snapshot=snap, insight_id=second)
-        with self.assertRaises(Denied):
-            self.project.insights.read("deadbeef")
-        self.assertEqual(self.project.insights.read("deadbeef1")["id"], first)
-        with self.assertRaises(Denied):
-            self.project.insights.read("f" * 8)
-        with self.assertRaises(Denied):
-            self.project.insights.read("not an id!")
-        with self.assertRaises(Denied):
-            self.project.insights.read("a" * 32)
-
-
-class PromptOrderTests(Fixture):
-    def test_prompt_key_order_is_fixed(self):
-        # Stable key order keeps provider working caches warm: stable content
-        # first, then the volatile ready-work age, run identity and clock.
-        # Any reordering must update this test deliberately.
-        import json
-        from mizu.runtime import prompt_for, prompt_delta_for
-        ctx = self.context("worker")
-        self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "unit_tool_surface", "goal_digest", "admission", "external_check_wake",
-                          "published_snapshot", "recent_snapshots",
-                          "workspace", "workspace_mode", "review_authority", "publication_state",
-                          "pending_insights",
-                          "open_insights", "open_work_items", "operator_records",
-                          "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
-                          "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit", "ci_branch",
-                          "previous_report", "work_order", "run", "now", "timezone"])
-        self.assertEqual(
-            list(json.loads(prompt_delta_for(ctx)).keys()),
-            ["unit", "unit_tool_surface", "goal_digest", "admission", "external_check_wake",
-             "published_snapshot", "snapshot_delta",
-             "pending_insights", "open_insights", "open_work_items", "operator_records", "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
-             "research_state", "capture_limit", "workspace", "workspace_mode", "review_authority",
-             "publication_state",
-             "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands",
-             "ci_branch", "previous_report",
-             "work_order", "run", "now", "timezone"])

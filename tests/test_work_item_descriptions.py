@@ -120,62 +120,6 @@ class WorkItemDescriptionTests(Fixture):
                 write_json(path, doing)
                 self.assertEqual(self.store.get(item_id), blocked)
 
-    def test_decision_mapping_replay_and_tamper_rejection(self):
-        for action in ("accept", "modify"):
-            proposal, event = self.decision(action=action)
-            seed = event["work_item"]
-            self.assertEqual(seed["description"], event["reason"])
-            path = self.project.root / "decision-history" / f"{seed['id'][3:]}.json"
-            original = path.read_bytes()
-            retry = lambda: self.project.insights.decide(proposal["id"], action, event["reason"], "", "retry",
-                                                         expected_rev=1)
-            self.assertEqual(retry(), event)
-            self.assertEqual(path.read_bytes(), original)
-            for changed_field in ("description", "reason"):
-                tampered = copy.deepcopy(event)
-                if changed_field == "description":
-                    tampered["work_item"]["description"] = "Another scope"
-                else:
-                    tampered["reason"] = "Another scope"
-                write_json(path, tampered)
-                for read in (retry, lambda: self.store.get(seed["id"]), self.store.page_open_readonly):
-                    with self.subTest(action=action, changed_field=changed_field), self.assertRaises(Denied):
-                        read()
-            write_json(path, event)
-            self.assertEqual(retry(), event)
-
-    def test_legacy_decision_without_description_retries_and_extends_v1_chain(self):
-        proposal, event = self.decision()
-        # Emulate a published pre-description keyed decision, including a reason
-        # longer than new descriptions permit: do not revalidate it as v2.
-        del event["work_item"]["description"]
-        event["reason"] = "r" * 5000
-        seed = event["work_item"]
-        path = self.project.root / "decision-history" / f"{seed['id'][3:]}.json"
-        current = self.project.root / "decisions" / f"{proposal['id']}.json"
-        write_json(path, event)
-        write_json(current, event)
-        original = path.read_bytes()
-        doing = self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
-        self.assertEqual(self.event_fields(doing), DELIVERY_EVENT_FIELDS)
-        self.assertEqual(self.store.get(seed["id"]), doing)
-        self.assertEqual(self.project.insights.decide(proposal["id"], "accept", event["reason"], "", "retry",
-                                                     expected_rev=1), event)
-        self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(current.read_bytes(), original)
-
-    def test_new_decision_description_limit_is_atomic(self):
-        proposal = self.project.insights.submit(source="reviewer", title="Proposal", body="Evidence",
-                                                base_snapshot=None)
-        with self.assertRaises(Denied):
-            self.project.insights.decide(proposal["id"], "accept", "x" * 4001, "", "run", expected_rev=1)
-        self.assertFalse((self.project.root / "decision-history").exists())
-        self.assertFalse((self.project.root / "decisions" / f"{proposal['id']}.json").exists())
-        self.assertEqual(self.store.page_open()["total"], 0)
-        event = self.project.insights.decide(proposal["id"], "accept", "😀" * 4000, "", "run", expected_rev=1)
-        self.assertLess(len(canonical(event)), PREVIEW_BYTES)
-        self.assertEqual(event["work_item"]["description"], event["reason"])
-
     def test_runtime_omitted_description_keeps_v1_seed_shape(self):
         ctx = self.context("worker")
         result = ctx.handle("work_items_create", {"idempotency_key": "no-description", "title": "Work"})
@@ -232,24 +176,3 @@ class WorkItemDescriptionTests(Fixture):
         with self.assertRaises(LimitExceeded):
             events.pending(self.store, "reviewer", ("dropped",), sources="any")
 
-    def test_backup_restore_keeps_v1_v2_description_and_exact_receipts(self):
-        legacy = self.create()
-        described = self.store.create(idempotency_key="v2", title="Work", actor="worker", description="Scope")
-        proposal, decision = self.decision()
-        for result in (legacy, described):
-            self.store.transition(result["record"]["work_item"]["id"], expected_rev=1, status="dropped",
-                                  actor="worker", reason="Closed")
-        pending = events.pending(self.store, "reviewer", ("dropped",), sources="any")
-        events.acknowledge(self.store, "reviewer", pending["events"])
-        self.project.set_control(paused=True)
-        archive = self.root / "backup.tar.gz"
-        backup(self.project, archive)
-        restore(self.config, "restored", archive)
-        restored = Project(self.config, "restored")
-        for key, result, kwargs in (("key", legacy, {}), ("v2", described, {"description": "Scope"})):
-            self.assertEqual(restored.work_items.create(idempotency_key=key, title="Work", actor="worker", **kwargs),
-                             {"record": result["record"], "created": False})
-        self.assertEqual(restored.work_items.get(decision["work_item"]["id"])["description"], decision["reason"])
-        self.assertEqual(restored.insights.decide(proposal["id"], "accept", decision["reason"], "", "retry",
-                                                  expected_rev=1), decision)
-        self.assertEqual(events.pending(restored.work_items, "reviewer", ("dropped",), sources="any")["acknowledged"], 2)

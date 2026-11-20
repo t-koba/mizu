@@ -869,7 +869,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             projection = public_source_identity(captured.get("files", {}))
         except ValueError as exc:
             raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
-        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest,
+                                            queue=self.config.vcs.get("approval_queue"))
         review_approvals = reviews.require_approvals(self, code_digest)
         try:
             source = source_commit(
@@ -1214,7 +1215,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             approval = _vcs.require_go_approval(
                 self.project, args["branch"], code_digest,
                 endpoints={"target": args.get("target"), "id": args.get("id"),
-                           "sha": args.get("sha"), "base": args.get("base")})
+                           "sha": args.get("sha"), "base": args.get("base")},
+                queue=self.config.vcs.get("approval_queue"))
         parameters = {key: value for key, value in args.items() if key != "op"}
         if approval is not None:
             parameters.update(code_digest=code_digest, approval=approval["approval"])

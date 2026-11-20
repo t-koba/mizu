@@ -18,16 +18,13 @@ class WorkItemScopeTests(Fixture):
         self.store = self.project.work_items
         self.serial = 0
 
-    def proposal(self, title="Scoped work"):
-        self.serial += 1
-        return self.project.insights.submit(source="reviewer", title=title,
-                                            body="Evidence", base_snapshot=None)
-
     def decide(self, scope=None, action="accept", reason="reviewed"):
-        proposal = self.proposal()
+        """Create an item as a writer would after reading a message."""
+        self.serial += 1
         options = {} if scope is None else {"scope": scope}
-        return self.project.insights.decide(proposal["id"], action, reason, "", "run-1",
-                                            expected_rev=1, **options)
+        item = self.store.create(idempotency_key=f"scoped-{self.serial}", title="Scoped work",
+                                 actor="worker", description=reason, **options)["record"]["work_item"]
+        return {"work_item": item}
 
     def snapshot(self):
         """Publish one verified snapshot of the presented workspace."""
@@ -43,54 +40,11 @@ class WorkItemScopeTests(Fixture):
         return self.store.transition(item_id, expected_rev=rev, status=status,
                                      actor=kwargs.pop("actor", "worker"), **kwargs)
 
-    def test_decision_records_the_accepted_scope_in_its_seed(self):
-        scope = "Keep the CI cell timeout at 30 minutes."
-        proposal = self.proposal()
-        decision = self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                                "run-1", expected_rev=1, scope=scope)
-        self.assertEqual(decision["scope"], scope)
-        seed = decision["work_item"]
-        self.assertEqual(seed["scope"], scope)
-        self.assertEqual(self.store.get(seed["id"])["scope"], scope)
-        # The immutable decision event carries the same scope.
-        path = self.project.root / "decision-history" / f"{seed['id'][3:]}.json"
-        self.assertEqual(json.loads(path.read_text())["scope"], scope)
-        # The current decision pointer carries it too and stays readable.
-        status = self.store.submitter_status(proposal["id"])
-        self.assertIsNotNone(status)
-        self.assertEqual(status["status"], "open")
-
-    def test_scope_length_edges_are_accepted_and_preserved(self):
-        for index, scope in enumerate(("x", "x" * 4000)):
-            proposal = self.proposal(title=f"Scope edge {index}")
-            decision = self.project.insights.decide(
-                proposal["id"], "accept", "reviewed", "", f"run-{index}",
-                expected_rev=1, scope=scope)
-            self.assertEqual(decision["scope"], scope)
-            self.assertEqual(decision["work_item"]["scope"], scope)
-            self.assertEqual(self.store.get(decision["work_item"]["id"])["scope"], scope)
-
     def test_decision_without_a_scope_keeps_the_legacy_shape(self):
         decision = self.decide()
         self.assertNotIn("scope", decision)
         self.assertNotIn("scope", decision["work_item"])
         self.assertIsNone(self.store.get(decision["work_item"]["id"]).get("scope"))
-
-    def test_an_invalid_accepted_scope_is_refused(self):
-        for value in ("", " \n\t", "x" * 4001, 1, [], {"scope": "text"}):
-            with self.subTest(value_type=type(value)), self.assertRaises(Denied):
-                self.decide(scope=value)
-        with self.assertRaises(Denied):
-            self.project.insights.decide(self.proposal()["id"], "accept", "reviewed", "",
-                                         "run-1", expected_rev=1, scope="   ")
-
-    def test_a_stated_scope_is_validated_by_the_tool_schema(self):
-        schema = DEFINITIONS["decide"][1]
-        base = {"id": "x" * 32, "action": "accept", "reason": "ok", "rev": 1}
-        validate({**base, "scope": "Deliver the receipt"}, schema)
-        for value in ("", "  ", "x" * 4001, 5, None):
-            with self.subTest(value_type=type(value)), self.assertRaises(Denied):
-                validate({**base, "scope": value}, schema)
 
     def test_closure_inherits_the_accepted_scope(self):
         scope = "Keep the CI cell timeout at 30 minutes."
@@ -197,31 +151,6 @@ class WorkItemScopeTests(Fixture):
         self.assertNotIn("scope", seed)
         doing = self.change(seed["id"], 1)
         self.assertIsNone(doing["scope"])
-
-    def test_the_operator_cli_carries_the_accepted_scope(self):
-        from mizu.cli import _cmd_insight, parser
-        proposal = self.proposal()
-        args = parser().parse_args(["insight", "decide", self.project.name, "--id", proposal["id"],
-                                    "--decision", "accept", "--reason", "Work",
-                                    "--expected-rev", "1", "--work-item-intent", "create",
-                                    "--accepted-scope", "Deliver the bounded receipt."])
-        result = _cmd_insight(self.config, self.project, args)
-        self.assertEqual(result["scope"], "Deliver the bounded receipt.")
-        self.assertEqual(result["work_item"]["scope"], "Deliver the bounded receipt.")
-
-    def test_the_tool_carries_the_scope_through(self):
-        ctx = self.context("worker")
-        proposal = self.proposal()
-        record = ctx.handle("decide", {"id": proposal["id"], "action": "accept",
-                                       "reason": "reviewed", "rev": 1,
-                                       "scope": "Deliver the bounded receipt."})
-        self.assertEqual(record["scope"], "Deliver the bounded receipt.")
-        item_id = record["work_item"]["id"]
-        changed = ctx.handle("work_items_transition", {"id": item_id, "expected_rev": 1,
-                                                       "status": "doing",
-                                                       "reason": "Superseded the first scope",
-                                                       "scope": "Deliver the receipt and its summary."})
-        self.assertEqual(changed["scope"], "Deliver the receipt and its summary.")
 
     def test_the_page_rows_show_the_scope_in_force(self):
         scope = "Keep the CI cell timeout at 30 minutes."

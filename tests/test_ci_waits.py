@@ -282,36 +282,6 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(self.store.page_ready()["total"], 1)
         self.assertNotEqual(self.store.page_ready()["signature"], original_signature)
 
-    @patch("mizu.work_item_waits.now", return_value="2000-01-01T00:00:01+00:00")
-    def test_blocked_problem_rows_precede_pending_and_receipt_bound_rows(self, _clock):
-        with patch("mizu.work_items.now", return_value="2000-01-01T00:00:00+00:00"):
-            self.block("pending", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
-            self.block("ci")
-        with patch("mizu.work_items.now", return_value="2001-01-01T00:00:00+00:00"):
-            absent = self.block("absent", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
-            absent["wait"] = None  # Preserve legacy no-wait reads.
-            write_json(self.project.root / "work-items" / absent["id"] / "2.json", absent)
-            impossible = self.block("impossible", wait={"kind": "insight_decided", "insight": "f" * 32})
-            due = self.block("due", wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
-            target = self.project.insights.submit(source="worker", title="Unknown target",
-                                                  body="Evidence", base_snapshot=None)
-            unknown = self.block("unknown", wait={"kind": "insight_decided", "insight": target["id"]})
-        (self.project.root / "inbox" / f"{target['id']}.json").write_bytes(b"[]")
-        view = self.store.blocked_liveness_readonly(limit=4)
-        expected = sorted([absent, impossible, due, unknown], key=lambda item: item["id"])
-        self.assertEqual([row["id"] for row in view["items"]], [item["id"] for item in expected])
-        self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due", "unknown"})
-        self.assertEqual((view["overflow_count"], view["truncated"]), (2, True))
-        self.assertFalse(view["coverage_complete"])
-        self.assertIsNone(view["counts"])  # Unknown is still fail-closed.
-        self.store.transition(unknown["id"], expected_rev=2, status="open", actor="worker")
-        view = self.store.blocked_liveness_readonly(limit=3)
-        self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due"})
-        self.assertEqual(view["counts"], {"absent": 1, "impossible": 1, "due": 1,
-                                         "unknown": 0, "pending": 2, "receipt_bound": 0, "terminal": 0})
-        self.assertEqual((view["total"], view["overflow_count"], view["truncated"]), (5, 2, True))
-        self.assertTrue(view["coverage_complete"])
-
     def test_ci_wait_page_size_one_is_valid_and_zero_is_refused(self):
         self.block("first")
         self.block("second")
@@ -445,25 +415,6 @@ class CiWaitTests(CiWaitFixture):
         with patch.object(ci_waits, "_items", return_value=iter(other)):
             self.assertIsNone(ci_waits.status_diagnostics(self.store, "worker", self.receipt, {"checks": rows}))
 
-    def test_registration_is_work_item_only_and_pins_valid_receipt(self):
-        item = self.block()
-        self.assertEqual(item["wait"], {**self.wait, "checks": ["lint", "unit"],
-                                        "branch": "published", "sha": SHA})
-        self.assertEqual(self.store.get(item["id"])["wait"], item["wait"])
-        self.assertEqual(self.store.page_open()["items"][0]["wait"], item["wait"])
-        args = {"id": item["id"], "expected_rev": 2, "status": "blocked", "wait": self.wait}
-        validate(args, DEFINITIONS["work_items_transition"][1])
-        with self.assertRaises(Denied):
-            validate({"id": "proposal", "action": "defer", "reason": "wait", "rev": 1,
-                      "wait": self.wait}, DEFINITIONS["decide"][1])
-        with self.assertRaises(Denied):
-            self.project.insights._normalize_wait(self.wait, "defer")
-        # Stored wait reads revalidate the completed receipt, not just ID syntax.
-        self.publication.path("receipt").unlink()
-        forget_ledger(self.project.root)
-        with self.assertRaises(Denied):
-            self.store.get(item["id"])
-
     def test_publication_and_ci_evidence_survive_backup_restore(self):
         from mizu.storage import backup, restore
         item = self.block("backup-roundtrip")
@@ -586,23 +537,6 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "worker"))
         self.assertEqual(self.store.get(item["id"]), item)
-
-    def test_dispatch_uses_configured_wait_events_limit_for_each_source(self):
-        limit = 3
-        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, wait_events_limit=limit))
-        self.project.config = self.config
-        engine = Engine(self.config, driver=ScriptDriver())
-        role = self.config.roles["worker"]
-        with patch.object(self.project.insights, "due_waits", return_value=[]) as due_waits, \
-                patch.object(self.project.insights, "pending_obligations", return_value=[]) as obligations, \
-                patch("mizu.runtime.ci_waits.delivery", return_value=([], [])) as ci_delivery, \
-                patch("mizu.runtime.proposal_waits.delivery", return_value=([], [])) as proposal_delivery:
-            engine._dispatch_state(self.project, "worker", role, event_trigger=True)
-        due_waits.assert_called_once_with("worker", self.project.snapshots.get(), limit=limit)
-        obligations.assert_called_once_with("worker", limit=limit)
-        ci_delivery.assert_called_once_with(self.project.work_items, "worker", limit=limit)
-        proposal_delivery.assert_called_once_with(self.project.work_items, "worker", limit=limit)
 
     def test_dispatch_view_preserves_ci_delivery_and_rechecks_waiter(self):
         item = self.block()
@@ -985,29 +919,6 @@ class PublicationCiWaitTests(CiWaitFixture):
                 live = self.store.blocked_liveness_readonly()["items"][0]
                 self.assertEqual((live["state"], live["blocked_age_seconds"]), ("unknown", 10**9))
         self.assertEqual(self.store.get(item["id"]), item)
-
-    def test_pre_receipt_wait_pins_snapshot_digest_and_config_without_polling_or_releasing(self):
-        args = {"id": "wi_" + "a" * 32, "expected_rev": 1, "status": "blocked", "wait": self.wait}
-        validate(args, DEFINITIONS["work_items_transition"][1])
-        with self.assertRaises(Denied):
-            validate({"id": "a" * 32, "action": "defer", "reason": "CI", "wait": self.wait},
-                     DEFINITIONS["decide"][1])
-        with self.assertRaises(Denied):
-            self.project.insights._normalize_wait(self.wait, "defer")
-        item = self.block()
-        self.assertEqual(item["wait"], {**self.wait, "checks": ["lint", "unit"],
-                                        "code_digest": self.snapshot["code_digest"], "branch": "published"})
-        # Stored identities never rebase to config or a moving branch head.
-        self.store.vcs = {**self.store.vcs, "ci_branch": "moved"}
-        self.assertEqual(self.store.get(item["id"]), item)
-        result, reader = self.poll()
-        self.assertEqual(result["observed"], 0)
-        reader.assert_not_called()
-        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "pending")
-        self.assertEqual(self.store.page_ready()["total"], 0)
-        unrelated = self.store.create(actor="worker", idempotency_key="unrelated", title="Other work")
-        self.assertEqual(self.store.page_ready()["items"][0]["id"], unrelated["record"]["work_item"]["id"])
 
     def test_registration_refuses_overrides_unpublished_unknown_and_invalid_bindings(self):
         invalid = [dict(self.wait, snapshot_id="f" * 64), dict(self.wait, code_digest="c" * 64),

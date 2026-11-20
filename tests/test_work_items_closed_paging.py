@@ -22,12 +22,10 @@ class ClosedPagingTests(Fixture):
         self.store = self.project.work_items
 
     def make_open(self, title):
-        proposal = self.project.insights.submit(
-            source="worker", title=title, body="Body", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
-                                     f"run-{title}", expected_rev=1)
-        item_id = self.store.page_open()["items"][-1]["id"]
-        return proposal["id"], item_id
+        origin = f"{abs(hash(title)) % (1 << 128):032x}"
+        item_id = self.store.create(idempotency_key=title, title=title, actor="worker",
+                                    origin=origin)["record"]["work_item"]["id"]
+        return origin, item_id
 
     def drop(self, item_id, stamp):
         with patch.object(wi, "now", return_value=stamp):

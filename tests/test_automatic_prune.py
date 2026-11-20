@@ -129,40 +129,6 @@ class AutomaticPruneTests(Fixture):
         self.assertEqual(storage.maintain_automatic_prune(self.project), {"status": "unavailable"})
         self.assertTrue((self.project.root / "runs" / old).is_dir())
 
-    def test_incomplete_scan_is_refused_without_deletion_or_failure(self):
-        old = self.run_record()
-        bad = self.project.root / "inbox" / "bad.json"
-        bad.parent.mkdir(parents=True, exist_ok=True)
-        bad.write_bytes(b"{")
-        result = storage.maintain_automatic_prune(self.project)
-        self.assertEqual(result["status"], "refused")
-        self.assertIn("error", result)
-        self.assertTrue((self.project.root / "runs" / old).is_dir())
-        self.assertTrue(self.state.is_file())
-
-    def test_old_terminal_expires_without_pause_live_refs_and_artifacts_kept(self):
-        self.assertFalse(self.project.control().get("paused"))
-        free = self.run_record()
-        pinned = self.run_record()
-        write_json(self.project.root / "inbox" / "sample.json", {"run": pinned})
-        # Two dated artifacts: manual count-based deletion would drop one,
-        # but automatic retention must never enable that clock.
-        root = self.project.root / "artifacts"
-        for name in ("old-one", "old-two"):
-            child = root / name
-            child.mkdir(parents=True, exist_ok=True)
-            write_json(child / "evidence.json", {"published_at": "2020-01-01T00:00:00+00:00"})
-        snapshots_before = sorted((self.project.root / "snapshots").glob("*.json"))
-        self.assertTrue(snapshots_before)
-        result = storage.maintain_automatic_prune(self.project)
-        self.assertEqual(result["status"], "pruned", result)
-        self.assertFalse(self.project.control().get("paused"))
-        self.assertFalse((self.project.root / "runs" / free).exists())
-        self.assertTrue((self.project.root / "runs" / pinned).is_dir())
-        self.assertTrue((root / "old-one").is_dir())
-        self.assertTrue((root / "old-two").is_dir())
-        self.assertEqual(sorted((self.project.root / "snapshots").glob("*.json")), snapshots_before)
-
     def test_engine_run_attempts_automatic_prune_before_locks(self):
         from mizu.runtime import Engine
         from support import ScriptDriver

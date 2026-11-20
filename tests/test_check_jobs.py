@@ -763,7 +763,7 @@ class JobTests(Fixture):
         source = self.lifecycle_record(1, **stale)
         self.lifecycle_record(2, shared_job=source.name, **stale)
         waited = self.lifecycle_record(3, **stale)
-        with self.project.insights.ledger.write('check_jobs', ['retired-role.wait.json']):
+        with self.project.ledger.write('check_jobs', ['retired-role.wait.json']):
             write_indexed_json(check_jobs.root(self.project) / 'retired-role.wait.json',
                                {'id': waited.name, 'wait_until': 1})  # Expiry does not release the record.
         protected = [source, waited,
@@ -778,10 +778,10 @@ class JobTests(Fixture):
     def test_unknown_reference_or_unsafe_tree_prevents_release(self):
         path = self.lifecycle_record(1, code_digest='c' * 64)
         wait = check_jobs.root(self.project) / 'worker.wait.json'
-        with self.project.insights.ledger.write('check_jobs', [wait.name]):
+        with self.project.ledger.write('check_jobs', [wait.name]):
             write_indexed_json(wait, {'id': 'not an ID'})
         self.release_stale(); self.assertTrue(path.exists())
-        with self.project.insights.ledger.write('check_jobs', [wait.name]):
+        with self.project.ledger.write('check_jobs', [wait.name]):
             wait.unlink()
         corrupt = self.lifecycle_record(2, acknowledged='invalid')
         self.release_stale(); self.assertTrue(path.exists())
@@ -789,7 +789,7 @@ class JobTests(Fixture):
         # Rebuild only this derived domain after out-of-band fixture removal;
         # keep unrelated ledger domains and the database file intact.
         with lock(self.project.root / 'locks/check-jobs.lock'):
-            self.project.insights.ledger.rebuild('check_jobs')
+            self.project.ledger.rebuild('check_jobs')
         target = self.root / 'outside'; target.write_text('untouched')
         link = path / 'linked'
         try:

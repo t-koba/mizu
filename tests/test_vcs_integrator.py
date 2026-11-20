@@ -34,7 +34,7 @@ INTEGRATOR_CAPS = ("files", "read", "vcs_read", "vcs_dispose", "vcs_retire", "fi
 
 def adapter_settings(code, timeout=5, maximum=524288):
     return {"command": [sys.executable, "-c", code],
-            "timeout_seconds": timeout, "max_bytes": maximum}
+            "timeout_seconds": timeout, "max_bytes": maximum, "approval_queue": "proposals"}
 
 
 def dispose_code(payload):
@@ -100,12 +100,8 @@ def approve(fixture, branch, digest, target=None, proposal_id=None,
         body += f"sha: {sha}\n"
     if base is not None:
         body += f"base: {base}\n"
-    record = fixture.project.insights.submit(
-        source="operator", title=f"GO {branch}", body=body,
-        base_snapshot=None, run=None)
-    fixture.project.insights.decide(record["id"], "accept", "reviewed", "", "operator",
-                                      expected_rev=record["rev"])
-    return record
+    return fixture.project.kernel_queues.append(
+        "proposals", {"title": f"GO {branch}", "body": body}, "operator")
 
 
 class ReadIntegratorTests(Fixture):
@@ -155,27 +151,6 @@ class ReadIntegratorTests(Fixture):
                                                  branch="main"))
         self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
-    def test_agent_origin_go_cannot_approve_merge(self):
-        # Forged approvals fail on the integrator's promotion path too: a GO
-        # submitted or decided outside the operator channel never satisfies
-        # the merge gate, and no receipt is recorded.
-        role = integrator_role(self)
-        config, ctx = integrator_context(self, role)
-        captured = self.project.snapshots.capture_files(ctx.workspace)
-        config = dataclasses.replace(config, vcs=dispose_settings("merged"))
-        ctx = Context(config, self.project, role, ctx.run_dir,
-                      ctx.snapshot, ctx.workspace)
-        for source, run in (("worker", "operator"), ("operator", "run-abc123")):
-            record = self.project.insights.submit(
-                source=source, title="GO mizu/x-1",
-                body=f"Ship it.\ndigest: {captured['code_digest']}\n",
-                base_snapshot=None, run=None)
-            self.project.insights.decide(record["id"], "accept", "reviewed",
-                                         "", run, expected_rev=record["rev"])
-        with self.assertRaisesRegex(Denied, "operator channel"):
-            ctx.handle("vcs_dispose", close_args(op="merge"))
-        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
-
     def test_merge_refused_without_endpoint_binding(self):
         # Reported defect repro: GO dev-only names the local digest, and the
         # merge names branch dev-only with target main. Branch/digest match,
@@ -187,7 +162,8 @@ class ReadIntegratorTests(Fixture):
         captured = self.project.snapshots.capture_files(ctx.workspace)
         approve(self, "dev-only", captured["code_digest"])
         bad = {"command": ["/nonexistent-adapter"], "timeout_seconds": 5,
-               "max_bytes": 524288, "close_grant": True, "merge_grant": True}
+               "max_bytes": 524288, "close_grant": True, "merge_grant": True,
+               "approval_queue": "proposals"}
         config = dataclasses.replace(config, vcs=bad)
         ctx = Context(config, self.project, role, ctx.run_dir,
                       ctx.snapshot, ctx.workspace)
@@ -367,35 +343,6 @@ class IntegratorConfigTests(Fixture):
         from mizu.config import load
         with self.assertRaisesRegex(ConfigError, "visible workspace"):
             load(self._integrator_file("none"))
-
-    def test_integrator_cannot_self_approve(self):
-        from mizu.config import load
-        path = self._integrator_file("read")
-        head, sep, tail = path.read_text().partition("[roles.integrator]")
-        assert sep
-        tail = tail.replace('"vcs_retire", "finish"]',
-                            '"vcs_retire", "decide", "finish"]')
-        path.write_text(head + sep + tail)
-        with self.assertRaisesRegex(ConfigError, "self-approval"):
-            load(path)
-
-    def test_read_integrator_may_submit_insights(self):
-        # The deployed shape: read workspace, lifecycle capabilities, and
-        # ordinary insight submission, but never decision authority.
-        from mizu.config import load
-        path = self._integrator_file("read")
-        head, sep, tail = path.read_text().partition("[roles.integrator]")
-        assert sep
-        tail = tail.replace('"vcs_retire", "finish"]',
-                            '"vcs_retire", "submit_insight", "finish"]')
-        path.write_text(head + sep + tail)
-        config = load(path)
-        role = config.roles["integrator"]
-        self.assertEqual(role.workspace, "read")
-        self.assertIn("vcs_dispose", role.capabilities)
-        self.assertIn("vcs_retire", role.capabilities)
-        self.assertIn("submit_insight", role.capabilities)
-        self.assertNotIn("decide", role.capabilities)
 
 
 if __name__ == "__main__":

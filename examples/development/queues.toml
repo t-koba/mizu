@@ -1,144 +1,33 @@
 # Example userland queues (docs/kernel.md). Include from a deployment configuration.
 # Queue names, schemas and who reads or writes them are this example's choices;
-# what a reader does with a message is written in the role policy files.
+# what a reader does with a message is written in policies/messages.md.
 
-# Findings and proposals for the writer to judge.
-# Any configured role can be the addressee of an insight, and the queue has no
-# per-message filter: a role must be able to read the proposal that carries its
-# own pending attention before the adapter can reconstruct it. This is the
-# least grant that admits that read; writing and waking stay unchanged.
-[queues.proposals]
+[queues.proposals]       # knowledge and ideas for the product
 write = ["role:*", "operator", "host"]
-read = ["role:*", "operator"]
-wake = ["role:writer"]
+read = ["role:worker", "role:auditor", "operator"]
+wake = ["role:worker"]
 [queues.proposals.schema]
 title = {type = "string", max = 240, required = true}
 body = {type = "string", max = 65536, required = true}
-# Exact legacy decision-event metadata retained for a queue-backed decision
-# adapter: insight identity, revision and routing, plus current evidence.
-legacy_insight = {type = "id"}
-legacy_rev = {type = "string", max = 64}
-legacy_source = {type = "string", max = 65536}
-legacy_addressee = {type = "string", max = 65536}
-legacy_evidence = {type = "string", max = 65536}
-legacy_created_at = {type = "instant"}
-legacy_kind = {type = "string", values = ["proposal", "question"]}
-legacy_urgency = {type = "string", values = ["low", "normal", "high"]}
 
-# The writer's decision on a proposal: refs = [proposal id].
-# A deferral is the same decision with a revisit written as a delayed message
-# from the writer to itself.
-[queues.decisions]
-write = ["role:writer"]
-read = ["role:*", "operator"]
-[queues.decisions.schema]
-action = {type = "string", values = ["accept", "modify", "defer", "reject", "withdraw"], required = true}
-reason = {type = "string", max = 8192, required = true}
-revisit = {type = "string", max = 8192}
-# The same legacy metadata as proposals, plus the immutable decision history
-# event id (the filename in decision-history), its decision key when present,
-# the nullable run and the canonical JSON of that exact history record. All of
-# them are needed to rebuild the byte-exact legacy delivery token; every
-# decision and delayed revisit carries the same metadata.
-legacy_insight = {type = "id"}
-legacy_rev = {type = "string", max = 64}
-legacy_source = {type = "string", max = 65536}
-legacy_addressee = {type = "string", max = 65536}
-legacy_evidence = {type = "string", max = 65536}
-legacy_created_at = {type = "instant"}
-legacy_kind = {type = "string", values = ["proposal", "question"]}
-legacy_urgency = {type = "string", values = ["low", "normal", "high"]}
-legacy_event = {type = "id"}
-legacy_decision_key = {type = "id"}
-legacy_run = {type = "string", max = 256}
-legacy_decided_at = {type = "instant"}
-legacy_record = {type = "string", max = 1048576}
-
-# Questions to the operator, and the operator's answers
-# (refs = [question id or converted insight proposal id]).
-[queues.questions]
+[queues.questions]       # what only the operator can settle
 write = ["role:*"]
 read = ["operator", "role:*"]
 [queues.questions.schema]
 question = {type = "string", max = 8192, required = true}
-context = {type = "string", max = 65536}
-default = {type = "string", max = 8192}
-# Legacy projection metadata: canonical JSON of the exact original payload and
-# subject, plus its authenticated writer, id, envelope kind, creation instant
-# and digest. The kind and instant are required to rebuild the canonical
-# envelope byte for byte after the record authority switches to queues.
-legacy_payload = {type = "string", max = 65536}
-legacy_subject = {type = "string", max = 65536}
-legacy_writer = {type = "string", max = 65536}
-legacy_id = {type = "string", max = 65536}
-legacy_digest = {type = "digest"}
-legacy_kind = {type = "string", max = 65536}
-legacy_created_at = {type = "instant"}
+default = {type = "string", max = 8192, required = true}
+context = {type = "string", max = 16384}
 
-[queues.answers]
+[queues.answers]         # refs: the question
 write = ["operator"]
 read = ["role:*", "operator"]
-wake = ["role:writer"]
+wake = ["role:worker"]   # and any other role that asks
 [queues.answers.schema]
-body = {type = "string", max = 65536, required = true}
-legacy_addressee = {type = "string", max = 65536}
-legacy_subject = {type = "string", max = 65536}
-legacy_writer = {type = "string", max = 65536}
-legacy_id = {type = "string", max = 65536}
-legacy_digest = {type = "digest"}
-legacy_action = {type = "string", max = 65536}
-legacy_created_at = {type = "instant"}
+body = {type = "string", max = 16384, required = true}
 
-# Operator notices to roles.
-[queues.notices]
+[queues.notices]         # operator and host facts for the roles
 write = ["operator", "host"]
 read = ["role:*", "operator"]
-wake = ["role:writer"]
+wake = ["role:worker"]
 [queues.notices.schema]
-body = {type = "string", max = 65536, required = true}
-legacy_addressee = {type = "string", max = 65536}
-legacy_subject = {type = "string", max = 65536}
-legacy_writer = {type = "string", max = 65536}
-legacy_id = {type = "string", max = 65536}
-legacy_digest = {type = "digest"}
-legacy_action = {type = "string", max = 65536}
-legacy_target = {type = "string", max = 65536}
-legacy_created_at = {type = "instant"}
-
-# Results written by the host's check runner.
-[queues.checks]
-write = ["host"]
-read = ["role:*", "operator"]
-wake = ["role:writer"]
-[queues.checks.schema]
-snapshot = {type = "digest", required = true}
-status = {type = "string", values = ["passed", "failed", "cancelled"], required = true}
-
-# Converted legacy decision receipts, not kernel state: each message records
-# that one role has already settled one token-bound decision or pending event.
-[queues.receipts]
-write = ["host"]
-read = ["role:*", "operator", "host"]
-[queues.receipts.schema]
-ack_token = {type = "digest", required = true}
-legacy_role = {type = "string", max = 256, required = true}
-legacy_action = {type = "string", values = ["accept", "modify", "defer", "reject", "pending"], required = true}
-legacy_reason = {type = "string", values = ["malformed_json", "invalid_receipt", "invalid_timestamp"]}
-# Fixed-width 8-hex enumeration index preserving legacy diagnostic order:
-# decision-history glob order then pending-envelope order.
-legacy_order = {type = "string", max = 8}
-
-# Converted per-role, per-record SharedRecords acknowledgements. Host-writable
-# only; stable ids make an exact retry idempotent. These are conversion
-# messages: a future queue-backed record adapter could read them to suppress
-# already settled records and append settled receipts here. After the separate
-# record-authority.json activation, the queue adapter uses them for runtime
-# acknowledgements instead of the legacy per-role receipt files.
-[queues."record-receipts"]
-write = ["host"]
-read = ["role:*", "operator", "host"]
-[queues."record-receipts".schema]
-ack_token = {type = "digest", required = true}
-legacy_role = {type = "string", max = 256, required = true}
-legacy_record_id = {type = "string", max = 256, required = true}
-legacy_record_digest = {type = "digest", required = true}
+body = {type = "string", max = 16384, required = true}

@@ -21,7 +21,7 @@ from mizu.runtime import Context, Engine, check_consult_role
 
 def adapter_settings(code, timeout=5, maximum=524288):
     return {"command": [sys.executable, "-c", code],
-            "timeout_seconds": timeout, "max_bytes": maximum}
+            "timeout_seconds": timeout, "max_bytes": maximum, "approval_queue": "proposals"}
 
 
 READ_OK = ("import sys,json; req=json.load(sys.stdin); "
@@ -104,14 +104,10 @@ def current_digest(fixture):
     return captured["code_digest"]
 
 
-def approve(fixture, branch, digest, action="accept", source="operator", run="operator"):
-    record = fixture.project.insights.submit(
-        source=source, title=f"GO {branch}",
-        body=f"Ship it.\ndigest: {digest}\n",
-        base_snapshot=None, run=None)
-    fixture.project.insights.decide(record["id"], action, "reviewed", "", run,
-                                      expected_rev=record["rev"])
-    return record
+def approve(fixture, branch, digest, author="operator"):
+    """Write a ``GO <branch>`` approval message to the approval queue."""
+    return fixture.project.kernel_queues.append(
+        "proposals", {"title": f"GO {branch}", "body": f"Ship it.\ndigest: {digest}\n"}, author)
 
 
 class VcsPublishTests(PublishFixture):
@@ -131,25 +127,6 @@ class VcsPublishTests(PublishFixture):
         ctx = make_context(self, config, role)
         with self.assertRaisesRegex(Denied, "stale"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
-
-    def test_revised_go_requires_a_decision_for_the_current_revision(self):
-        original_digest, revised_digest = "a" * 64, "b" * 64
-        record = approve(self, "main", original_digest)
-        revised = self.project.insights.revise(
-            record["id"], source="operator", title=record["title"],
-            body=f"Ship it.\ndigest: {revised_digest}\n",
-            base_snapshot=record["base_snapshot"], run="operator",
-            expected_rev=record["rev"])
-        self.assertEqual(revised["rev"], 2)
-        self.assertIsNone(self.project.insights.read(record["id"]).get("decision"))
-        with self.assertRaisesRegex(Denied, "stale.*revision"):
-            vcs.require_go_approval(self.project, "main", revised_digest)
-
-        self.project.insights.decide(record["id"], "accept", "reviewed new digest", "",
-                                     "operator", expected_rev=revised["rev"])
-        approval = vcs.require_go_approval(self.project, "main", revised_digest)
-        self.assertEqual(approval["insight"], record["id"])
-        self.assertEqual(approval["code_digest"], revised_digest)
 
     def test_accepted_digest_publishes(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])
@@ -228,23 +205,6 @@ class VcsPublishTests(PublishFixture):
         with self.assertRaisesRegex(Denied, "[Ww]ritable"):
             ctx2.handle("vcs_publish", {"op": "push", "branch": "main"})
 
-    def test_publish_on_read_role_refused_at_load(self):
-        text = self.file.read_text()
-        needle = '[roles.reviewer]'
-        self.assertIn(needle, text)
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        self.assertIn('"submit_insight"', segment)
-        patched = text.replace(
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]',
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish", "vcs_publish"]',
-            1)
-        self.assertNotEqual(patched, text)
-        path = self.root / "config/publish-read.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        with self.assertRaises(ConfigError):
-            load(path)
-
     def test_consult_cannot_hold_publish(self):
         base = self.config.roles["consult"]
         bad = dataclasses.replace(base, capabilities=("files", "read", "finish", "vcs_publish"))
@@ -260,66 +220,22 @@ if __name__ == "__main__":
 
 
 class VcsApprovalChannelTests(Fixture):
-    def test_model_submitted_go_refused(self):
+    def test_role_written_go_refused(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])
         config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
-        approve(self, "main", current_digest(self), source="worker", run="operator")
+        approve(self, "main", current_digest(self), author="role:worker")
         ctx = make_context(self, config, role)
-        with self.assertRaisesRegex(Denied, "operator channel"):
+        with self.assertRaisesRegex(Denied, "must come from the operator"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
-    def test_model_decide_refused(self):
+    def test_missing_approval_queue_refused(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])
-        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
-        approve(self, "main", current_digest(self), source="operator", run="run-abc123")
+        settings = {k: v for k, v in adapter_settings(PUSH_OK).items() if k != "approval_queue"}
+        config = dataclasses.replace(config, vcs=settings)
+        approve(self, "main", current_digest(self))
         ctx = make_context(self, config, role)
-        with self.assertRaisesRegex(Denied, "operator channel"):
+        with self.assertRaisesRegex(Denied, "approval_queue"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
-
-    def test_publish_role_must_not_hold_decide(self):
-        text = self.file.read_text()
-        needle = '[roles.maintainer]'
-        self.assertIn(needle, text)
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        self.assertIn('"decide"', segment)
-        patched = text.replace(
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "work_items_read", "finish"]',
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "work_items_read", "finish", "vcs_publish"]',
-            1)
-        self.assertNotEqual(patched, text)
-        path = self.root / "config/publish-decide.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        with self.assertRaisesRegex(ConfigError, "self-approval"):
-            load(path)
-
-    def test_publish_role_may_submit_insights(self):
-        text = self.file.read_text()
-        needle = '[roles.maintainer]'
-        self.assertIn(needle, text)
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        patched = text.replace(
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "work_items_read", "finish"]',
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "submit_insight", "consult", "work_items_read", "finish", "vcs_publish"]',
-            1)
-        self.assertNotEqual(patched, text)
-        path = self.root / "config/publish-submit.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        config = load(path)
-        self.assertIn("vcs_publish", config.roles["maintainer"].capabilities)
-        self.assertIn("submit_insight", config.roles["maintainer"].capabilities)
-
-
-class VcsReservedRoleNameTests(Fixture):
-    def test_operator_vcs_editor_names_refused_at_load(self):
-        from mizu.config import load
-        for name in ("operator", "vcs", "editor"):
-            text = self.file.read_text() + f'\n[roles.{name}]\n'
-            path = self.root / f"config/reserved-{name}.toml"
-            path.write_text(text)
-            with self.assertRaisesRegex(ConfigError, "reserved"):
-                load(path)
 
 
 class VcsDigestBindingTests(PublishFixture):
@@ -544,7 +460,7 @@ class PublicationReceiptTests(PublishFixture):
             store.prepare(approval["id"], ctx.run_dir.name)
         before = store.path("intent").read_bytes()
         # The current gate supplies a different valid GO for the same pins.
-        with patch.object(vcs, "require_go_approval", return_value={"insight": "other-go"}), patch.object(vcs, "run") as adapter:
+        with patch.object(vcs, "require_go_approval", return_value={"approval": "other-go"}), patch.object(vcs, "run") as adapter:
             with self.assertRaisesRegex(Denied, "approval mismatch"):
                 ctx.handle("vcs_publish", args)
         adapter.assert_not_called()
@@ -554,7 +470,7 @@ class PublicationReceiptTests(PublishFixture):
         # Completed replay is evidence-only, even with a later approval.
         with patch.object(vcs, "run", side_effect=self.reply):
             original = ctx.handle("vcs_publish", args)
-        with patch.object(vcs, "require_go_approval", return_value={"insight": "other-go"}), patch.object(vcs, "run") as adapter:
+        with patch.object(vcs, "require_go_approval", return_value={"approval": "other-go"}), patch.object(vcs, "run") as adapter:
             replay = make_context(self, ctx.config, ctx.role).handle("vcs_publish", args)
         adapter.assert_not_called()
         self.assertEqual(replay["approval"], original["approval"])

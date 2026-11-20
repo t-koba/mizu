@@ -112,20 +112,6 @@ class StorageAuditTests(Fixture):
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
 
 
-    def synthetic_drop(self, serial):
-        """Create a synthetic legacy decision and its valid drop sidecar."""
-        event_id = f"{serial:032x}"
-        event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
-                 "reason": "Synthetic storage-audit coverage", "revisit": "",
-                 "run": "synthetic-run", "created_at": "2024-01-01T00:00:00+00:00"}
-        history = self.project.root / "decision-history" / f"{event_id}.json"
-        history.parent.mkdir(parents=True, exist_ok=True)
-        # The reconciliation below indexes exactly this event's entry.
-        fs.write_json(history, event)
-        record = self.project.work_items.reconcile(
-            event_id, expected_action="accept", outcome="drop",
-            reason="Synthetic drop for audit coverage", actor="worker")["record"]
-        return self.project.root / "work-items" / f"wi_{event_id}", record
 
     def unreferenced_snapshot(self):
         captured = self.project.snapshots.capture_files(self.project.workspace)
@@ -133,86 +119,9 @@ class StorageAuditTests(Fixture):
             captured, goal=self.project.goal, state="Synthetic storage audit",
             run=None, outcome="wait", summary="Synthetic unreferenced snapshot")
 
-    def test_synthetic_drop_sidecar_is_covered_by_audit_and_reclaim(self):
-        item_dir, _record = self.synthetic_drop(1)
-        snapshot = self.unreferenced_snapshot()
-
-        report = audit(self.project)
-        self.assertEqual(report["work_item_events_skipped"], 0)
-        self.assertIn(snapshot["id"], report["snapshots"]["unreferenced_sample"])
-        self.assertEqual(report["references"]["work_item_snapshots"], 0)
-
-        self.project.set_control(paused=True)
-        result = reclaim(self.project, apply=True)
-        self.assertEqual(result["work_item_events_skipped"], 0)
-        self.assertIn(f"snapshots/{snapshot['id']}.json", result["snapshots"])
-        self.assertFalse((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
-        self.assertTrue((item_dir / "decision-resolution.json").is_file())
-
-    def test_synthetic_open_legacy_sidecar_uses_item_reconstruction(self):
-        event_id = f"{5:032x}"
-        event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
-                 "reason": "Synthetic open-item coverage", "revisit": "",
-                 "run": "synthetic-run", "created_at": "2024-01-01T00:00:00+00:00"}
-        history = self.project.root / "decision-history" / f"{event_id}.json"
-        history.parent.mkdir(parents=True, exist_ok=True)
-        write_json(history, event)
-        opened = self.project.work_items.reconcile(
-            event_id, expected_action="accept", outcome="open",
-            reason="Synthetic open item", actor="worker",
-            title="Synthetic audited item")["record"]["work_item"]
-
-        captured = self.project.snapshots.capture_files(self.project.workspace)
-        verification = {"passed": True, "code_digest": captured["code_digest"],
-                        "run": "synthetic-run"}
-        snapshot = self.project.snapshots.create(
-            captured, goal=self.project.goal, state="Synthetic completion",
-            run="synthetic-run", outcome="done", summary="Synthetic completion evidence",
-            verification=verification)
-        self.project.snapshots.publish(snapshot)
-        bind_delivery(self.project, opened["id"], snapshot["id"])
-        self.project.work_items.transition(
-            opened["id"], expected_rev=3, status="done", actor="worker",
-            snapshot_id=snapshot["id"])
-
-        report = audit(self.project)
-        self.assertEqual(report["work_item_events_skipped"], 0)
-        self.assertGreaterEqual(report["references"]["work_item_snapshots"], 1)
-        self.assertNotIn(snapshot["id"], report["snapshots"]["unreferenced_sample"])
-
-    def test_synthetic_malformed_incomplete_and_unexpected_drop_records_fail_closed(self):
-        malformed_dir, _ = self.synthetic_drop(2)
-        incomplete_dir, record = self.synthetic_drop(3)
-        unexpected_dir, _ = self.synthetic_drop(4)
-        (malformed_dir / "decision-resolution.json").write_bytes(b"{not-json")
-        incomplete = dict(record)
-        incomplete.pop("reason")
-        write_json(incomplete_dir / "decision-resolution.json", incomplete)
-        temporary = unexpected_dir / ".new-abcdefgh"
-        temporary.write_bytes(b"synthetic interrupted append")
-        (unexpected_dir / "2.json").write_bytes(b"{}")
-
-        snapshot = self.unreferenced_snapshot()
-        self.project.set_control(paused=True)
-        report = audit(self.project)
-        self.assertGreaterEqual(report["work_item_events_skipped"], 3)
-        self.assertEqual(len(report["work_item_events_skipped_sample"]),
-                         report["work_item_events_skipped"])
-        self.assertEqual(report["work_item_events_skipped_sample"],
-                         sorted(report["work_item_events_skipped_sample"]))
-        self.assertFalse(report["work_item_events_skipped_truncated"])
-        with self.assertRaises(Denied):
-            reclaim(self.project, apply=True)
-        self.assertTrue((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
-        # Audit is read-only: unexpected history and its temporary remain.
-        self.assertTrue(temporary.exists())
-        self.assertTrue((unexpected_dir / "2.json").exists())
-
     def completed_work_item(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Retain evidence", body="Verify the snapshot reference", base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
+        decision = {"work_item": self.project.work_items.create(
+            idempotency_key="retain", title="Retain evidence", actor="worker")["record"]["work_item"]}
         captured = self.project.snapshots.capture_files(self.project.workspace)
         verification = {"passed": True, "code_digest": captured["code_digest"], "run": "run-work-item"}
         snapshot = self.project.snapshots.create(
@@ -242,42 +151,6 @@ class StorageAuditTests(Fixture):
         self.assertNotIn(f"snapshots/{completed_snapshot['id']}.json", result["snapshots"])
         self.assertTrue((self.project.root / "snapshots" / f"{completed_snapshot['id']}.json").is_file())
         self.assertEqual(self.project.work_items.get(item_id)["status"], "done")
-
-    def test_storage_audit_flags_temp_until_locked_work_item_recovery(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Interrupted append", body="Recover the temporary", base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
-        item_id = decision["work_item"]["id"]
-        item_dir = self.project.root / "work-items" / item_id
-        item_dir.mkdir(parents=True)
-        temporary = item_dir / ".new-leftover"
-        temporary.write_bytes(b"partial")
-        self.assertGreater(audit(self.project)["work_item_events_skipped"], 0)
-        forget_ledger(self.project.root)  # A locked rebuild or write recovers it.
-        self.assertEqual(self.project.work_items.get(item_id), decision["work_item"])
-        self.assertFalse(temporary.exists())
-        self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)
-
-    def test_unreadable_work_item_history_blocks_snapshot_reclaim(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Malformed history", body="Do not discard evidence", base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
-        item_path = self.project.root / "work-items" / decision["work_item"]["id"] / "2.json"
-        item_path.parent.mkdir(parents=True)
-        item_path.write_bytes(b"{not-json")
-        self.project.set_control(paused=True)
-        item = f"work-items/{decision['work_item']['id']}"
-        report = audit(self.project)
-        self.assertGreater(report["work_item_events_skipped"], 0)
-        self.assertEqual(report["work_item_events_skipped_sample"], [item])
-        self.assertFalse(report["work_item_events_skipped_truncated"])
-        preview = reclaim(self.project)
-        self.assertEqual(preview["work_item_events_skipped_sample"], [item])
-        with self.assertRaises(Denied) as refused:
-            reclaim(self.project, apply=True)
-        self.assertIn(item, str(refused.exception))
 
     def test_run_reference_protects_snapshot(self):
         from support import history_write_json as write_json
@@ -466,23 +339,6 @@ class StorageReclaimTests(Fixture):
             reclaim(self.project, apply=True)
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
 
-    def test_oversized_inbox_record_blocks_reclaim_of_hidden_reference(self):
-        snap = self.hidden_snapshot()
-        inbox = self.project.root / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
-        hidden = inbox / "hidden.json"
-        write_json(hidden, {"base_snapshot": snap["id"],
-                            "padding": "x" * (_AUDIT_JSON_BYTES + 128)})
-        self.assertGreater(hidden.stat().st_size, _AUDIT_JSON_BYTES)
-        report = audit(self.project)
-        self.assertGreaterEqual(report["reference_records_skipped"], 1)
-        preview = reclaim(self.project)
-        self.assertGreaterEqual(preview["reference_records_skipped"], 1)
-        self.project.set_control(paused=True)
-        with self.assertRaisesRegex(Denied, "reference records"):
-            reclaim(self.project, apply=True)
-        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
-
     def assert_reference_scan_blocked(self, skipped=1):
         """Every incomplete scan must stop before even the first removal."""
         self.assertEqual(audit(self.project)["reference_records_skipped"], skipped)
@@ -491,49 +347,6 @@ class StorageReclaimTests(Fixture):
         with mock.patch.object(Path, "unlink", side_effect=AssertionError("premature removal")):
             with self.assertRaisesRegex(Denied, "reference records"):
                 reclaim(self.project, apply=True)
-
-    def test_null_reference_records_are_skipped_not_missing(self):
-        current = self.project.root / "current.json"
-        pointer = json.loads(current.read_text())
-        history = self.project.root / "histories" / (pointer["history"] + ".json")
-        run = self.project.root / "runs" / "null-record"
-        run.mkdir(parents=True)
-        artifacts = self.project.root / "artifacts"
-        evidence = artifacts / "null-record" / "evidence.json"
-        inbox = self.project.root / "inbox" / "null-record.json"
-        inbox.parent.mkdir(exist_ok=True)
-        for path in (current, history, run / "result.json", artifacts / "latest.json", evidence, inbox):
-            with self.subTest(path=path.relative_to(self.project.root)):
-                original = path.read_bytes() if path.exists() else None
-                write_json(path, None)
-                self.assert_reference_scan_blocked()
-                if original is None:
-                    path.unlink()
-                else:
-                    path.write_bytes(original)
-                if path == evidence:
-                    path.parent.rmdir()
-
-    def test_invalid_reference_fields_are_skipped_but_null_is_optional(self):
-        root = self.project.root
-        paths = ((root / "runs" / "invalid" / "result.json", "snapshot"),
-                 (root / "artifacts" / "latest.json", "snapshot"),
-                 (root / "artifacts" / "invalid" / "evidence.json", "snapshot"),
-                 (root / "inbox" / "invalid.json", "base_snapshot"))
-        for path, field in paths:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            for value in ("bad-id", 7, [], {}):
-                with self.subTest(path=path.relative_to(root), value=value):
-                    write_json(path, {field: value})
-                    self.assert_reference_scan_blocked()
-            write_json(path, {field: None})
-            if "artifacts" in path.relative_to(root).parts:
-                self.assert_reference_scan_blocked()
-            else:
-                self.assertEqual(audit(self.project)["reference_records_skipped"], 0)
-            path.unlink()
-            if path.name == "evidence.json":
-                path.parent.rmdir()
 
     def test_oversized_snapshot_metadata_stops_before_reading_full_field(self):
         path = self.project.root / "snapshots" / ("a" * 64 + ".json")
@@ -1192,13 +1005,6 @@ class StorageReclaimTests(Fixture):
             self.skipTest("symlinks unavailable")
         self.assert_reference_scan_blocked()
         self.assertEqual(audit(self.project)["references"]["run_snapshots"], 0)
-
-    def test_invalid_archived_reference_marks_archive_incomplete(self):
-        live = self.project.snapshots.get()["id"]
-        with mock.patch("mizu.storage.insight_archive.snapshot_references",
-                        return_value=[None, "bad", {}, live]):
-            self.assert_reference_scan_blocked()
-            self.assertEqual(audit(self.project)["references"]["insight_snapshots"], 1)
 
     def test_clean_tree_reports_zero_reference_skips_and_reclaims(self):
         report = audit(self.project)

@@ -160,36 +160,12 @@ class CompletionTests(Fixture):
         self.assertTrue(list((self.project.root / "runs").glob("*/error.json")))
         self.assertFalse(list((self.project.root / "runs").glob("*/input")))
 
-    def test_insight_identity_survives_gc(self):
-        args = dict(source="searcher", title="a", body="b", base_snapshot=None, insight_id="retained")
-        self.project.insights.submit(**args)
-        decision = self.project.insights.decide("retained", "reject", "no", "", "test", expected_rev=1)
-        decision["created_at"] = (dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=40)).isoformat()
-        write_json(self.project.root / "decisions/retained.json", decision)
-        self.assertEqual(self.project.insights.gc_decided(), 1)
-        self.assertEqual(self.project.insights.submit(**args)["body"], "b")
-        self.assertFalse((self.project.root / "inbox/retained.json").exists())
-        with self.assertRaises(Denied):
-            self.project.insights.submit(**{**args, "body": "different"})
-
-    def test_missing_decision_identity_is_not_reused(self):
-        write_json(self.project.root / "decisions/old.json", {"action": "reject"})
-        with self.assertRaises(Denied):
-            self.project.insights.submit(source="searcher", title="a", body="b", base_snapshot=None, insight_id="old")
-
-    def test_old_proposal_new_decision_is_retained(self):
-        proposal = self.project.insights.submit(source="searcher", title="a", body="b", base_snapshot=None)
-        ancient = time.time()-40*86400
-        os.utime(self.project.root / "inbox" / (proposal["id"]+".json"), (ancient, ancient))
-        self.project.insights.decide(proposal["id"], "reject", "no", "", "test", expected_rev=1)
-        self.assertEqual(self.project.insights.gc_decided(), 0)
-
     def test_consultation_records_count_once(self):
         from mizu.usage import summarize
         def work(ctx, *_):
             ctx.handle("finish", {"outcome": "wait", "summary": "observed"})
         result = self.admitted_call(Engine(self.config, driver=ScriptDriver(work)),
-                                    "consult", {"question": "review"})
+                                    "consult", {"request": "review"})
         self.assertEqual(len(result["answers"]), 1)
         facts = summarize(self.project)
         self.assertEqual(facts["totals"]["runs"], 2)  # Caller plus child, not parent references.
@@ -198,7 +174,7 @@ class CompletionTests(Fixture):
     def test_unadmitted_consultation_refusal_before_request(self):
         driver = ScriptDriver()
         with self.assertRaises(Busy):
-            Engine(self.config, driver=driver).consult(self.context(), {"question": "review"})
+            Engine(self.config, driver=driver).consult(self.context(), {"request": "review"})
         self.assertEqual(driver.calls, [])
 
     def test_backup_retains_incomplete_ingest(self):

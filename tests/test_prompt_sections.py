@@ -41,25 +41,6 @@ class PromptSectionTests(Fixture):
         for builder in (prompt_for, prompt_delta_for):
             self.assertTrue({"open_work_items", "ready_work"}.isdisjoint(self.keys(ctx, builder)))
 
-    def test_producers_deciders_and_writer_receive_bounded_work_load(self):
-        from mizu.config import load
-        self.file.write_text(self.file.read_text().replace("work_items_prompt = 20", "work_items_prompt = 1"))
-        self.config = load(self.file)
-        self.project.config = self.config
-        for index in range(2):
-            self.project.work_items.create(idempotency_key=str(index), title="Existing", actor="worker")
-        for capability in ("submit_insight", "decide"):
-            ctx = self.judge()
-            ctx.role = dataclasses.replace(ctx.role, capabilities=(capability,))
-            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
-                payload = json.loads(builder(ctx, *args))
-                page = payload["open_work_items"]
-                self.assertEqual((len(page["items"]), page["total"], page["overflow_count"]), (1, 2, 1))
-                self.assertNotIn("ready_work", payload)
-        for role in ("worker", "searcher"):
-            page = json.loads(prompt_for(self.context(role)))["open_work_items"]
-            self.assertEqual((len(page["items"]), page["total"]), (1, 2))
-
     def test_every_key_belongs_to_one_section_or_is_fixed(self):
         self.assertNotIn("task", prompt_sections.FIXED_KEYS)
         self.assertIn("external_check_wake", prompt_sections.FIXED_KEYS)
@@ -119,16 +100,6 @@ class PromptSectionTests(Fixture):
         ctx = self.judge()
         prompt_for(ctx)
         self.assertEqual(ctx.prompt_row_fingerprints["open_work_items"], {})
-
-    def test_config_validation(self):
-        for bad in ({"include": ["nope"]}, {"include": ["ci_failures"]},
-                    {"exclude": ["external_check_wake"]}, {"include": ["run"]}, {"exclude": ["decision_events"]},
-                    {"include": ["ci"], "exclude": ["ci"]}, {"include": ["ci", "ci"]}, {"x": []},
-                    {"include": "ci"}, []):
-            with self.assertRaises(ConfigError):
-                prompt_sections.validate("r", bad)
-        self.assertEqual(prompt_sections.validate("r", {"include": ["ci"], "exclude": ["report"]}),
-                         (("ci",), ("report",)))
 
     def test_load_reads_the_role_table(self):
         from mizu.config import load

@@ -40,23 +40,6 @@ class DaemonProjectTests(Fixture):
         self.assertEqual(stop.wait.call_count, len(configs))
         return projects, ready, poll, output
 
-    def test_equal_reload_reuses_project_and_keeps_ingestion_and_polling_fresh(self):
-        configs = [dataclasses.replace(self.config) for _ in range(3)]
-        self.assertIsNot(configs[0], configs[1])
-        self.assertEqual(configs[0], configs[1])
-        projects, ready, poll, _ = self.run_polls(configs)
-        self.assertEqual(len(projects), 1)
-        project = projects[0]
-        self.assertEqual([args.args[0] for args in ready.call_args_list], [project] * 3)
-        project.insights.ingest_editor.assert_has_calls(
-            [call(keep_days=self.config.limits.retention_days,
-                  archive_interval_seconds=self.config.limits.automatic_insight_archive_interval_seconds)] * 3)
-        self.assertEqual(project.insights.ingest_editor.call_count, 3)
-        self.assertEqual(poll.call_count, 3)
-        for args, config in zip(poll.call_args_list, configs):
-            self.assertIs(args.args[0], config)
-            self.assertIs(args.args[1], project)
-
     def test_equal_reload_refreshes_project_settings_without_rebuilding_stores(self):
         settings = self.project.root / "project.toml"
         original = settings.read_text(encoding="utf-8")
@@ -118,31 +101,6 @@ class DaemonProjectTests(Fixture):
                 self.assertEqual(len(events), 2)
                 self.assertTrue(all(event["event"] == "run_deferred" for event in events))
 
-    def test_changed_config_rebuilds_project_and_validation_stores(self):
-        changed_limits = dataclasses.replace(
-            self.config, limits=dataclasses.replace(
-                self.config.limits, retention_days=self.config.limits.retention_days + 1))
-        changed_role = dataclasses.replace(
-            self.config, roles={**self.config.roles, "worker": dataclasses.replace(
-                self.config.roles["worker"], cooldown_seconds=60)})
-        for changed in (changed_limits, changed_role):
-            with self.subTest(config=changed):
-                projects, ready, poll, _ = self.run_polls(
-                    [self.config, changed, dataclasses.replace(changed)])
-                self.assertEqual(len(projects), 2)
-                first, second = projects
-                self.assertIs(second.config, changed)
-                self.assertIsNot(first.snapshots, second.snapshots)
-                self.assertIsNot(first.work_items, second.work_items)
-                self.assertEqual([args.args[0] for args in ready.call_args_list],
-                                 [first, second, second])
-                self.assertEqual([args.args[1] for args in poll.call_args_list],
-                                 [first, second, second])
-                second.insights.ingest_editor.assert_has_calls(
-                    [call(keep_days=changed.limits.retention_days,
-                          archive_interval_seconds=changed.limits.automatic_insight_archive_interval_seconds)] * 2)
-                self.assertEqual(second.insights.ingest_editor.call_count, 2)
-
     def test_data_directory_change_still_requires_restart(self):
         changed = dataclasses.replace(self.config, data=self.root / "other-data")
         projects, ready, poll, output = self.run_polls([self.config, changed])
@@ -155,29 +113,6 @@ class DaemonProjectTests(Fixture):
 
 
 class PausedProjectIdleTests(Fixture):
-    def test_paused_daemon_iteration_does_no_probe_ingest_poll_or_readiness(self):
-        self.project.set_control(paused=True)
-        stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        project = Project(self.config, "sample")
-        project.insights.ingest_editor = Mock()
-        with (patch("mizu.runtime.threading.Event", return_value=stop),
-              patch("mizu.runtime.signal.signal"),
-              patch("mizu.runtime.lock", return_value=nullcontext()),
-              patch("mizu.runtime.load", return_value=self.config),
-              patch("mizu.runtime.Project", return_value=project),
-              patch("mizu.runtime.should_run") as ready,
-              patch("mizu.runtime.vcs_poll_enabled", return_value=True),
-              patch("mizu.runtime.poll_project_vcs") as poll,
-              patch("mizu.probes.service_due") as probes,
-              patch("mizu.probes.next_deadline", return_value=None),
-              patch("mizu.runtime.Engine") as engine,
-              patch("builtins.print")):
-            daemon(self.config, "sample", "worker")
-        for fake in (ready, poll, probes, engine, project.insights.ingest_editor):
-            fake.assert_not_called()
-        self.assertEqual(stop.wait.call_count, 1)
-
     def test_paused_run_is_denied_before_maintenance_and_deferral(self):
         self.project.set_control(paused=True)
         with (patch("mizu.runtime.check_jobs.deferral") as deferral,

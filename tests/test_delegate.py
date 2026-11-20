@@ -119,7 +119,7 @@ class DelegateTests(Fixture):
             if ctx.role.name == "worker":
                 (self.project.root / "PROJECT.md").write_text("New live operator charter")
                 for operation, args in (
-                    ("consult", {"roles": ["consult"], "question": "Check the charter"}),
+                    ("consult", {"roles": ["consult"], "request": "Check the charter"}),
                     ("delegate", {"role": "helper", "task": "Check the charter"}),
                 ):
                     ctx.handle(operation, args)

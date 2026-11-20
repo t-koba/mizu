@@ -1110,11 +1110,6 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                             work_item_skipped_paths.add(work_items_dir / item_entry.name)
                             continue
                         try:
-                            # A drop-only legacy sidecar is covered evidence,
-                            # not a seeded item. Validate it read-only; open
-                            # sidecars continue through normal reconstruction.
-                            if project.work_items.is_drop_only(item_entry.name):
-                                continue
                             # Immutable append events make the internal read
                             # stable without taking the writer lock; reclaim
                             # calls this again under project quiescence.

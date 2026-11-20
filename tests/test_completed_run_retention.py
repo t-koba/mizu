@@ -86,36 +86,6 @@ class CompletedRunRetentionTests(Fixture):
                         load(self.file)
         self.file.write_text(original)
 
-    def test_zero_policy_skips_corrupt_live_references_but_prunes_projections(self):
-        old = self.run_record()
-        blocked = self.block({"kind": "deadline", "at": "2040-01-01T00:00:00+00:00"})
-        corrupt_paths = [self.project.root / "inbox" / "bad.json",
-                         self.project.root / "work-items" / blocked["id"] / "2.json"]
-        for path in corrupt_paths:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"{")
-        self.policy(0)
-        directory = self.project.root / "runs" / old
-        (directory / "input").mkdir()
-        (directory / "input" / "prompt").write_bytes(b"reproducible")
-        log = directory / "worker-events.jsonl"
-        log.write_bytes(b"old log")
-        os.utime(log, (CLOCK - 40 * DAY,) * 2)
-        cache = self.config.data / "web-cache" / ("a" * 64 + ".json")
-        write_json(cache, {"retrieved_epoch": CLOCK - 40 * DAY})
-        dry = prune(self.project)
-        self.assertTrue(dry["run_retention"]["complete"])
-        self.assertEqual(dry["run_retention"]["run_count"], 0)
-        self.assertTrue(log.exists())
-        self.assertFalse(self.project.control()["paused"])
-        applied = prune(self.project, apply=True)
-        self.assertTrue(applied["applied"])
-        self.assertFalse(log.exists())
-        self.assertFalse(cache.exists())
-        self.assertFalse((directory / "input").exists())
-        self.assertTrue((directory / "result.json").exists())
-        self.assertTrue(all(path.read_bytes() == b"{" for path in corrupt_paths))
-
     def test_strict_age_boundary_started_clock_and_unknown_envelopes(self):
         old, boundary, younger = self.run_record(31 + 1 / DAY), self.run_record(31), self.run_record(30)
         kept = [boundary, younger, self.run_record(-1), self.run_record(40, terminal=None),
@@ -203,60 +173,6 @@ class CompletedRunRetentionTests(Fixture):
         prune(self.project, apply=True)
         self.assertFalse((self.project.root / "runs" / valid).exists())
 
-    def test_runtime_prepared_and_final_result_envelopes(self):
-        # Engine.run's started/result dicts, including the durable prepared
-        # write before its final completed/waiting rewrite. Synthetic payloads
-        # are deliberately opaque; retention validates the lifecycle, not logs.
-        run = uuid.uuid4().hex
-        directory = self.project.root / "runs" / run
-        started = {"run": run, "role": "worker", "snapshot": "a" * 64,
-                   "started_at": stamp(CLOCK - 40 * DAY), "admission_elapsed_seconds": 0.0,
-                   "admission": {}, "decision_events": 0, "decision_receipt_diagnostics": 0,
-                   "work_item_events": 0, "wait_events": 0, "obligation_events": 0,
-                   "ci_failures": 0, "config_sha256": "b" * 64, "policy_sha256": "c" * 64}
-        finish = {"outcome": "continue", "summary": "Saved work", "state": "Next step",
-                  "wait_seconds": 60, "recorded_at": stamp(CLOCK - 40 * DAY + 1)}
-        result = {"run": run, "role": "worker", "status": "prepared",
-                  "finished_at": stamp(CLOCK - 40 * DAY + 1), "finish": finish,
-                  "model": {}, "snapshot": "d" * 64, "activity": {}, "ci_requests": {}}
-        write_json(directory / "started.json", started)
-        for status in ("prepared", "completed", "waiting"):
-            with self.subTest(status=status):
-                write_json(directory / "result.json", {**result, "status": status})
-                self.assertEqual(self.candidates(), set() if status == "prepared" else {run})
-        for fields in ({"finish": None}, {"finish": {**finish, "outcome": "unknown"}},
-                       {"snapshot": None}, {"role": "editor"}):
-            with self.subTest(fields=fields):
-                write_json(directory / "result.json", {**result, "status": "completed", **fields})
-                self.assertEqual(self.candidates(), set())
-        write_json(directory / "result.json", result)
-        prune(self.project, apply=True)
-        self.assertEqual(self.read(run, "result.json"), result)
-        write_json(directory / "result.json", {**result, "status": "completed"})
-        prune(self.project, apply=True)
-        self.assertFalse(directory.exists())
-
-    def test_current_inbox_evidence_active_and_selector_pins(self):
-        a, b, c, d, free = [self.run_record() for _ in range(5)]
-        write_json(self.project.root / "inbox" / "sample.json", {"run": a, "evidence": [{"run": b}]})
-        write_json(self.project.root / "active" / "worker.json", {"run": c})
-        self.change(d, "result.json", status="waiting", finish=None, selection={"profile": None})
-        write_json(self.project.root / "runs" / d / "selection.json", {"profile": None})
-        write_json(self.project.root / "selection" / "worker-wait.json",
-                   {"version": 1, "run": d, "fingerprint": "b" * 64})
-        self.assertEqual(self.candidates(), {free})
-        (self.project.root / "runs" / d / "selection.json").unlink()
-        self.assertEqual(self.candidates(), {free, d})
-
-    def test_prose_provider_names_and_permanent_audit_are_not_pins(self):
-        free = self.run_record()
-        write_json(self.project.root / "inbox" / "sample.json",
-                   {"run": None, "body": free, "origin": {"run": free},
-                    "evidence": [{"text": free}]})
-        write_json(self.project.root / "runs" / free / "vcs-status.json", {"run": free})
-        write_json(self.project.root / "maintenance" / "past.json", {"run": free})
-        self.assertEqual(self.candidates(), {free})
-
     def test_nested_links_and_young_or_incomplete_member_keep_component(self):
         a = self.run_record()
         b = self.run_record(parent=a, terminal="consultation.json")
@@ -284,108 +200,6 @@ class CompletedRunRetentionTests(Fixture):
         item = self.project.work_items.create(idempotency_key=uuid.uuid4().hex, title="Wait for evidence", actor="worker")
         return self.project.work_items.transition(item["record"]["work_item"]["id"], expected_rev=1, status="blocked",
                                                  actor="worker", wait=wait)
-
-    def test_blocked_insight_wait_pins_exact_target_decision(self):
-        pinned, free = self.run_record(), self.run_record()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "reviewed", "", pinned, expected_rev=1)
-        self.block({"kind": "insight_decided", "insight": proposal["id"]})
-        self.assertEqual(self.candidates(), {free})
-        self.assertTrue((self.project.root / "decisions" / (proposal["id"] + ".json")).exists())
-
-    def test_blocked_dependency_pins_exact_historical_revision_not_new_head(self):
-        pinned, new = self.run_record(), self.run_record()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "reviewed", "", pinned, expected_rev=1)
-        self.block({"kind": "dependency", "recipient": "reviewer",
-                    "requires": {"insight": proposal["id"], "rev": 1, "action": "reject"}})
-        self.project.insights.revise(proposal["id"], source="worker", title="Moved", body="Changed", base_snapshot=None, expected_rev=1)
-        self.project.insights.decide(proposal["id"], "reject", "new review", "", new, expected_rev=2)
-        self.assertEqual(self.candidates(), {new})
-
-    def test_operator_sentinel_pins_nothing_but_history_still_binds(self):
-        free = self.run_record()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "reviewed", "", "operator", expected_rev=1)
-        self.block({"kind": "insight_decided", "insight": proposal["id"]})
-        # No local run named "operator" exists, yet the scan stays complete.
-        self.assertEqual(self.candidates(), {free})
-        second = self.project.insights.submit(source="worker", title="Other", body="Result", base_snapshot=None)
-        self.project.insights.decide(second["id"], "reject", "reviewed", "", "operator", expected_rev=1)
-        self.block({"kind": "dependency", "recipient": "reviewer",
-                    "requires": {"insight": second["id"], "rev": 1, "action": "reject"}})
-        self.assertEqual(self.candidates(), {free})
-        # Exact historical evidence is still required for the dependency.
-        history = self.project.root / "decision-history"
-        saved = [(path, path.read_bytes()) for path in sorted(history.glob("*.json"))]
-        for path, _ in saved:
-            path.unlink()
-        self.assertEqual(prune(self.project)["run_retention"]["reason"],
-                         "Missing exact dependency decision evidence")
-        self.assert_refused_without_deletion([free])
-        for path, data in saved:
-            path.write_bytes(data)
-        self.assertEqual(self.candidates(), {free})
-
-    def test_near_miss_operator_and_arbitrary_run_refuse_apply(self):
-        free = self.run_record()
-        for invalid in ("Operator", "not-a-run"):
-            with self.subTest(invalid=invalid):
-                proposal = self.project.insights.submit(source="worker", title="Target", body="Result",
-                                                         base_snapshot=None)
-                self.project.insights.decide(proposal["id"], "reject", "reviewed", "", invalid, expected_rev=1)
-                self.block({"kind": "insight_decided", "insight": proposal["id"]})
-                self.assert_refused_without_deletion([free])
-
-    def test_insight_wait_without_current_decision_is_valid(self):
-        free = self.run_record()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.block({"kind": "insight_decided", "insight": proposal["id"]})
-        self.assertEqual(self.candidates(), {free})
-
-    def test_exact_dependency_requires_one_historical_decision(self):
-        pinned, free = self.run_record(), self.run_record()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "reviewed", "", pinned, expected_rev=1)
-        self.block({"kind": "dependency", "recipient": "reviewer",
-                    "requires": {"insight": proposal["id"], "rev": 1, "action": "reject"}})
-        self.assertEqual(self.candidates(), {free})
-        history = self.project.root / "decision-history"
-        path, = history.glob("*.json")
-        original = path.read_bytes()
-        path.unlink()
-        # Even a matching current decision cannot replace the exact history.
-        self.assertEqual(prune(self.project)["run_retention"]["reason"],
-                         "Missing exact dependency decision evidence")
-        self.assert_refused_without_deletion([pinned, free])
-        path.write_bytes(original)
-        event = json.loads(original)
-        # Legacy events are valid without a decision key, but cannot duplicate
-        # the exact historical binding that a live dependency requires.
-        event.pop("decision_key")
-        duplicate = history / (uuid.uuid4().hex + ".json")
-        write_json(duplicate, event)
-        self.assertEqual(prune(self.project)["run_retention"]["reason"],
-                         "Duplicate exact dependency decision evidence")
-        self.assert_refused_without_deletion([pinned, free])
-        duplicate.unlink()
-        self.assertEqual(self.candidates(), {free})
-
-    def test_bad_reference_refuses_all_apply_including_old_projection_prune(self):
-        old = self.run_record()
-        input_dir = self.project.root / "runs" / old / "input"
-        input_dir.mkdir()
-        path = self.project.root / "inbox" / "bad.json"
-        path.parent.mkdir(exist_ok=True)
-        for body in (b"{", b"null", b'{"evidence": [null]}', b'{"run": "../escape"}',
-                     b" " * (runs.RECORD_BYTES + 1)):
-            with self.subTest(body=body[:30]):
-                path.write_bytes(body)
-                self.assertFalse(prune(self.project)["run_retention"]["complete"])
-                with self.assertRaises(Denied):
-                    prune(self.project, apply=True)
-                self.assertTrue(input_dir.exists())
-                self.assertTrue((self.project.root / "runs" / old).exists())
 
     def test_symlink_and_hardlink_reference_fail_closed(self):
         old = self.run_record()
@@ -451,37 +265,6 @@ class CompletedRunRetentionTests(Fixture):
             backup(self.project, self.root / "backup.tgz")
         with self.assertRaises(Denied):
             reclaim(self.project, apply=True)
-
-    def test_interrupted_staging_rolls_back_whole_component_before_new_scan(self):
-        a, b = self.run_record(), self.run_record()
-        write_json(self.project.root / "runs" / a / "delegations" / "one.json", {"run": b})
-        rename = type(self.project.root).rename
-        moved = []
-        def interrupt(path, target):
-            if path.parent == self.project.root / "runs":
-                if moved:
-                    raise OSError("interrupted staging")
-                moved.append(path.name)
-            return rename(path, target)
-        with mock.patch("pathlib.Path.rename", interrupt):
-            with self.assertRaisesRegex(OSError, "interrupted staging"):
-                prune(self.project, apply=True)
-        self.assertEqual(len(runs.quarantines(self.project)), 1)
-        self.assertFalse(prune(self.project)["run_retention"]["complete"])
-        # Restoration can precede a failed scan, but even quarantine intent
-        # must remain until that scan is complete (no apply deletion at all).
-        corrupt = self.project.root / "inbox" / "bad.json"
-        corrupt.parent.mkdir(exist_ok=True)
-        corrupt.write_bytes(b"{")
-        with self.assertRaises(Denied):
-            prune(self.project, apply=True)
-        self.assertEqual(len(runs.quarantines(self.project)), 1)
-        self.assertTrue(all((self.project.root / "runs" / r).exists() for r in (a, b)))
-        corrupt.unlink()
-        write_json(self.project.root / "active" / "worker.json", {"run": b})
-        prune(self.project, apply=True)
-        self.assertEqual(runs.quarantines(self.project), [])
-        self.assertTrue(all((self.project.root / "runs" / r).exists() for r in (a, b)))
 
     def test_partial_quarantine_deletion_resumes_without_claiming_success(self):
         old = self.run_record()
@@ -568,24 +351,6 @@ class CompletedRunRetentionTests(Fixture):
         self.change(malformed, "consultation.json", status="interrupted", error="not a consultation schema")
         free = self.run_record()
         self.assertEqual(self.candidates(), {free})
-
-    def test_missing_typed_pins_refuse_unrelated_deletion(self):
-        free = self.run_record()
-        missing = uuid.uuid4().hex
-        for path, record in (
-                ("active/worker.json", {"run": missing}),
-                ("inbox/pin.json", {"run": missing}),
-                ("inbox/pin.json", {"evidence": [{"run": missing}]}),
-                ("selection/worker-wait.json", {"version": 1, "run": missing, "fingerprint": "b" * 64})):
-            with self.subTest(path=path, record=record):
-                target = self.project.root / path
-                write_json(target, record)
-                self.assert_refused_without_deletion([free])
-                target.unlink()
-        proposal = self.project.insights.submit(source="worker", title="Target", body="Result", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "reviewed", "", missing, expected_rev=1)
-        self.block({"kind": "insight_decided", "insight": proposal["id"]})
-        self.assert_refused_without_deletion([free])
 
     def test_physical_run_budget_is_separate_from_usage_report_limit(self):
         self.project.config = dataclasses.replace(
@@ -687,21 +452,3 @@ class CompletedRunRetentionTests(Fixture):
             directory.mkdir()
         self.assert_refused_without_deletion([old, free])
 
-    def test_success_audit_binds_full_component_plan_and_permanent_ledgers_stay(self):
-        a, b = self.run_record(), self.run_record()
-        write_json(self.project.root / "runs" / a / "delegations" / "one.json", {"run": b})
-        proposal = self.project.insights.submit(source="worker", title="Historical", body="Completed", base_snapshot=None)
-        # An unrelated historical decision run is not a live pin.
-        self.project.insights.decide(proposal["id"], "reject", "finished", "", a, expected_rev=1)
-        before = {p: p.read_bytes() for name in ("decisions", "decision-history", "work-items", "snapshots", "objects")
-                  for p in (self.project.root / name).rglob("*") if p.is_file()}
-        dry = self.preview()
-        result = prune(self.project, apply=True)
-        view = result["run_retention"]
-        intent = json.loads((self.project.root / view["intent"]).read_bytes())
-        self.assertEqual(intent["components"], [sorted([a, b])])
-        self.assertEqual(view["plan_sha256"], dry["plan_sha256"])
-        audit = json.loads((self.project.root / result["audit"]).read_bytes())
-        self.assertEqual(audit["run_retention"]["run_count"], 2)
-        self.assertEqual(before, {p: p.read_bytes() for p in before})
-        self.assertEqual(prune(self.project, apply=True)["run_retention"]["run_count"], 0)

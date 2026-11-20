@@ -71,30 +71,6 @@ class PolicyContractTests(unittest.TestCase):
                 ):
                     self.assertNotIn(manual, text)
 
-    def test_role_specific_reconsideration_workspace_and_ci_guidance_remains(self):
-        editor = (ROOT / "policies/editor.md").read_text()
-        self.assertIn("no shared-code write authority", editor)
-        self.assertIn("submit_insight", editor)
-        self.assertIn("Only the exported snapshot and proposal outbox", editor)
-        self.assertIn("Do not claim access to the live Worker workspace", editor)
-
-        for name in ("reviewer", "searcher"):
-            text = (ROOT / f"policies/{name}.md").read_text()
-            with self.subTest(role=name):
-                self.assertIn("## Reconsideration on rejection", text)
-                self.assertIn("Never pursue a\nwithdrawn finding", text)
-
-        publisher = (ROOT / "policies/publisher.md").read_text()
-        self.assertIn("GO <branch>", publisher)
-        self.assertIn("current `code_digest`", publisher)
-        self.assertIn("never holds `submit_insight`", publisher)
-
-        reporter = (ROOT / "policies/reporter.md").read_text()
-        self.assertIn("supplied `ci_branch` context", reporter)
-        self.assertIn("run evidence for every CI claim", reporter)
-        self.assertNotIn("previous-code", reporter)
-        self.assertNotIn("previous-report", reporter)
-
     def test_shared_policy_is_canonical_and_architecture_rationale_is_general(self):
         shared = (ROOT / "policies/shared.md").read_text()
         self.assertEqual(shared.count("## Trust and evidence"), 1)
@@ -109,24 +85,6 @@ class PolicyContractTests(unittest.TestCase):
         architecture = (ROOT / "docs/architecture.md").read_text()
         self.assertIn("Keeping scheduled resolution opt-in", architecture)
         self.assertNotIn("scheduled-resolver experiment", architecture)
-
-    def test_publisher_ships_only_approved_tree(self):
-        text = (ROOT / "policies/publisher.md").read_text()
-        self.assertIn("GO <branch>", text)
-        self.assertIn("vcs_publish", text)
-        self.assertIn("vcs_read", text)
-        self.assertIn("never holds `submit_insight`", text)
-        example = (ROOT / "config/config.example.toml").read_text()
-        self.assertIn('[roles.publisher]', example)
-        self.assertIn('policies/publisher.md', example)
-        self.assertIn('vcs_publish', example)
-        head, tail = example.split('[roles.publisher]')
-        comment = head.split('Dedicated publisher for external publication only')[1]
-        self.assertIn('required plumbing', comment)
-        stanza = tail.split('\n\n')[0]
-        self.assertIn('workspace = "write"', stanza)
-        self.assertNotIn('"exec"', stanza)
-        self.assertIn('required plumbing', text)
 
 
 if __name__ == "__main__":

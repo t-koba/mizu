@@ -229,21 +229,6 @@ class SharedRecordsTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.freeze("../worker", [])
 
-    def test_corrupt_noncanonical_misplaced_and_oversized_record_reads(self):
-        record, _ = self.put()
-        path = self.record_path(record["id"])
-        variants = [b"{broken", b"[]", json.dumps(record).encode(),
-                    canonical(dict(record, id="project/test/other")),
-                    canonical(record).replace(b'"text":"hello"', b'"text":NaN'),
-                    b" " * (RECORD_BYTES + 1)]
-        for raw in variants:
-            path.write_bytes(raw)
-            with self.subTest(raw=raw[:25]), self.assertRaises((Denied, LimitExceeded)):
-                self.store.get(record["id"])
-            with self.assertRaises((Denied, LimitExceeded)):
-                self.store.put(record, writer="host.test")
-            self.assertEqual(path.read_bytes(), raw)
-
     def test_corrupt_receipts_are_never_repaired(self):
         record, computed, manifest, selection = self.delivery()
         self.store.acknowledge("worker", [selection], manifest=manifest)

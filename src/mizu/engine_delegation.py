@@ -25,17 +25,16 @@ if TYPE_CHECKING:
 
 
 #: Capabilities a delegation child must never hold. The child works in the
-#: caller's live workspace, so decide/insight-write/vcs-mutating grants
+#: caller's live workspace, so queue-write/vcs-mutating grants
 #: and redelegation stay with the caller: verification and publication
 #: never leave it. Implementation grants (files/read/exec/search/fetch and
 #: the child's own profile/selector/policy) stay operator choice. finish
 #: stays allowed: every configured role carries it so the child can seal,
 #: and delegation ensures it (idempotent when already present).
-DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
-                                "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
+DELEGATE_FORBIDDEN = frozenset({"delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reopen",
-                                "work_order", "record_write", "objects", "events", "review_verdict"})
+                                "work_order", "queues", "review_verdict"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -54,13 +53,12 @@ def check_delegate_role(role_name: str, role) -> None:
 
 #: Capabilities that let a consultation role change shared state or execute
 #: code. Consultation must stay read-only and advisory: workspace "read" plus
-#: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
+#: none of these. Read-only grants (files/read/diff/fetch/probe/search)
 #: stay operator choice, plus the required finish.
-CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
+CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen",
-                               "work_order", "record_write", "objects", "events", "review_verdict"})
+                               "work_order", "queues", "review_verdict"})
 
 
 def check_consult_role(role_name: str, role) -> None:

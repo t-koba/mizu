@@ -697,7 +697,7 @@ class DeadlineTests(Fixture):
                         if ctx.role.name == "worker":
                             seen["parent"] = ctx
                             args = ({"role": "helper", "task": "Independent deadline"} if operation == "delegate"
-                                    else {"role": "consult", "question": "Independent deadline?"})
+                                    else {"role": "consult", "request": "Independent deadline?"})
                             response = ctx.handle(operation, args)
                             self.assertTrue(response)
                             ctx.handle("finish", FINISH)
@@ -728,7 +728,7 @@ class DeadlineTests(Fixture):
                         if ctx.role.name == "worker":
                             seen["parent"] = ctx
                             args = ({"role": "helper", "task": "Finish after parent expiry"} if operation == "delegate"
-                                    else {"role": "consult", "question": "Finish after parent expiry?"})
+                                    else {"role": "consult", "request": "Finish after parent expiry?"})
                             answer = ctx.handle(operation, args)
                             if operation == "delegate":
                                 self.assertEqual(answer["answer"], FINISH["summary"])

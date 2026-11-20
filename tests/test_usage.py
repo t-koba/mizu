@@ -127,7 +127,7 @@ class UsageTests(Fixture):
         mkdir(run_dir)
         model = {"provider": "acme", "model": "m2", "requests": 2,
                  "usage": [{"input_tokens": 3, "output_tokens": 4}]}
-        write_json(run_dir / "consultation.json", {"question": "q", "answers": [{"run": "child", "model": model}]})
+        write_json(run_dir / "consultation.json", {"request": "q", "answers": [{"run": "child", "model": model}]})
         child = self.project.root / "runs" / "child"
         mkdir(child)
         write_json(child / "consultation.json", {"run": "child", "parent_run": run_dir.name,

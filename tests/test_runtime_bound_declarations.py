@@ -3566,76 +3566,6 @@ def sibling():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
 
-    def test_record_wait_catalog_scan_bound_is_declared_and_used(self):
-        from mizu.config import TOML_INTEGER_MAX, _LIMIT_RANGES
-
-        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        limits = next(node for node in config_tree.body
-                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
-        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
-                    if isinstance(node, ast.AnnAssign)}
-        for name, (expression, category, rationale) in WORK_ITEM_RECORD_WAIT_SCAN.items():
-            self.assertEqual(defaults[name], expression)
-            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
-            self.assertEqual(category, 'configured policy')
-            self.assertTrue(rationale.strip())
-        source = ast.parse((ROOT / 'operator_records.py').read_text(encoding='utf-8'))
-        lookup = next(node for node in source.body
-                      if isinstance(node, ast.FunctionDef) and node.name == 'record_question_lookup')
-        attrs = {node.attr for node in ast.walk(lookup) if isinstance(node, ast.Attribute)}
-        self.assertIn('operator_record_catalog_scan_entries', attrs)
-
-    def test_wait_event_limit_is_configured_and_used_by_prompt_projections(self):
-        from mizu.config import _LIMIT_RANGES
-
-        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        limits = next(node for node in config_tree.body
-                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
-        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
-                    if isinstance(node, ast.AnnAssign)}
-        self.assertEqual(defaults['wait_events_limit'], '10')
-        self.assertEqual(_LIMIT_RANGES['wait_events_limit'], (1, 100))
-
-        engine_dispatch = ast.parse((ROOT / 'engine_dispatch.py').read_text(encoding='utf-8'))
-        dispatch = next(node for node in ast.walk(engine_dispatch)
-                        if isinstance(node, ast.FunctionDef) and node.name == '_dispatch_state')
-        self.assertIn('wait_limit = project.config.limits.wait_events_limit',
-                      {ast.unparse(node) for node in ast.walk(dispatch)
-                       if isinstance(node, (ast.Assign, ast.AnnAssign))})
-        configured_calls = {
-            ast.unparse(call.func): {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
-            for call in ast.walk(dispatch) if isinstance(call, ast.Call)
-            and ast.unparse(call.func) in {
-                'ci_waits.delivery', 'proposal_waits.delivery',
-                'project.insights.due_waits', 'project.insights.pending_obligations'}
-        }
-        self.assertEqual(configured_calls, {
-            'ci_waits.delivery': {'limit': 'wait_limit'},
-            'proposal_waits.delivery': {'limit': 'wait_limit'},
-            'project.insights.due_waits': {'limit': 'wait_limit'},
-            'project.insights.pending_obligations': {'limit': 'wait_limit'},
-        })
-        work_order = ast.parse((ROOT / 'work_order.py').read_text(encoding='utf-8'))
-        fresh = next(node for node in ast.walk(work_order)
-                     if isinstance(node, ast.FunctionDef) and node.name == '_fresh_generation_for_role')
-        self.assertIn('wait_limit = project.config.limits.wait_events_limit',
-                      {ast.unparse(node) for node in ast.walk(fresh)
-                       if isinstance(node, (ast.Assign, ast.AnnAssign))})
-        fresh_calls = {
-            ast.unparse(call.func): {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
-            for call in ast.walk(fresh) if isinstance(call, ast.Call)
-            and ast.unparse(call.func) in {
-                'project.insights.due_waits',
-                'project.insights.pending_obligations',
-                '_ciw.pending', '_pww.pending'}
-        }
-        self.assertEqual(fresh_calls, {
-            'project.insights.due_waits': {'limit': 'wait_limit'},
-            'project.insights.pending_obligations': {'limit': 'wait_limit'},
-            '_ciw.pending': {'limit': 'wait_limit'},
-            '_pww.pending': {'limit': 'wait_limit'},
-        })
-
     def test_editor_search_bounds_are_declared_and_used(self):
         tree = ast.parse((ROOT / 'editor.py').read_text(encoding='utf-8'))
         capsule = next(node for node in tree.body
@@ -3683,56 +3613,6 @@ def sibling():
             '_UnixBridgeServer': 'BRIDGE_BACKLOG_LIMIT',
             '_TCPBridgeServer': 'BRIDGE_BACKLOG_LIMIT',
         })
-
-    def test_selected_comparison_bound_inventory(self):
-        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
-        for expression, category, rationale in COMPARISON_BOUND_ARGUMENTS.values():
-            self.assertIn(category, categories)
-            self.assertTrue(rationale.strip())
-        found = {}
-        for filename in (
-                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
-                'ci_costs.py', 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'authority_marker.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py',
-                'mcp_loop.py',
-                'mcp_proxy.py',
-                'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
-                'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
-                'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'model_catalog.py',
-                'pi_durable.py', 'platform.py', 'work_item_seed.py',
-                'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py', 'work_item_events.py',
-                'usage.py', 'config.py', 'runtime.py', 'engine_admission.py', 'unit_finish.py',
-                'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'producer_admission.py',
-                'services.py', 'vcs.py',
-                'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
-                'queue_record_delivery.py', 'record_reconciliation.py',
-                'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
-                'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
-            tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-            minimum = (1 if filename in {
-                'bridge.py', 'pi_durable.py', 'engine_admission.py', 'unit_finish.py', 'work_item_seed.py',
-                'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py', 'work_item_events.py', 'work_items.py', 'fs.py',
-                'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
-                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'authority_marker.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', 'role_state.py', 'snapshot.py'}
-                       else 2 if filename == 'admission.py' else 3)
-            for site, expression in comparison_argument_inventory(
-                    tree, minimum_magnitude=minimum).items():
-                found[(filename, *site)] = expression
-        # Audit these selected check_jobs comparisons at magnitude one without
-        # broadening the threshold for the module's unrelated comparisons.
-        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
-        for scope_name in ('purpose_label', '_mount_fingerprint', 'cache_input', 'submit', 'logs', '_execute'):
-            function = next(node for node in tree.body
-                            if isinstance(node, ast.FunctionDef) and node.name == scope_name)
-            scoped = ast.Module(body=[function], type_ignores=[])
-            for site, expression in comparison_argument_inventory(scoped, minimum_magnitude=1).items():
-                found[('check_jobs.py', *site)] = expression
-        self.assertEqual(found, {
-            site: entry[0] for site, entry in COMPARISON_BOUND_ARGUMENTS.items()})
 
     def test_comparison_detector_operand_scope_and_drift(self):
         source = (

@@ -55,16 +55,6 @@ class DedupContractTests(unittest.TestCase):
         config=dataclasses.replace(fixture.config,profiles={**fixture.config.profiles,profile:raw})
         with self.assertRaises(ConfigError):effective(config,ctx.role,profile)
 
-    def test_dispatch_and_cli_are_tabled(self):
-        from mizu.runtime import Context
-        for op in ("diff", "files", "read", "exec", "experiment", "verify",
-                   "fetch", "search", "insights", "decide", "submit_insight",
-                   "consult", "report", "finish"):
-            self.assertIn(op, Context._DISPATCH)
-        from mizu.cli import _PROJECT_COMMANDS
-        for cmd in ("status", "arm", "run", "insight", "backup", "prune"):
-            self.assertIn(cmd, _PROJECT_COMMANDS)
-
     def test_services_share_scheduling(self):
         import mizu.services
         self.assertTrue(callable(mizu.services._scheduled_roles))
@@ -87,25 +77,6 @@ class ProtocolWordingTests(unittest.TestCase):
         validate({"script": "x", "question": "q", "comparison": "c", "measure": "m"},
                  DEFINITIONS["experiment"][1])
 
-    def test_decide_still_requires_reason_and_defer_revisit(self):
-        # Protocol schema keeps length bounds; the non-empty/revisit rules live
-        # in the decision mechanism (insights.decide), not in wording.
-        from mizu.protocol import DEFINITIONS, validate
-        validate({"id": "x", "action": "accept", "reason": "ok", "rev": 2}, DEFINITIONS["decide"][1])
-        import tempfile
-        from pathlib import Path as _P
-        from mizu.insights import Insights
-        tmp = _P(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        for sub in ("inbox", "decisions", "decision-history", "locks"):
-            (tmp / sub).mkdir(parents=True, exist_ok=True)
-        store = Insights(tmp)
-        rec = store.submit(source="s", title="T", body="b", base_snapshot=None)
-        with self.assertRaises(Denied):
-            store.decide(rec["id"], "accept", "   ", "", "test", expected_rev=1)
-        with self.assertRaises(Denied):
-            store.decide(rec["id"], "defer", "later", "   ", "test", expected_rev=1)
-
 
 class ConsultGateTests(Fixture):
     def test_single_shared_gate(self):
@@ -119,50 +90,19 @@ class ConsultGateTests(Fixture):
                 smoke.live(self.config,role_name='consult')
             gate.assert_called_once_with('consult',self.config.roles['consult'])
 
-    def test_readonly_insights_and_diff_allowed(self):
-        import dataclasses
-        from mizu.runtime import Engine, check_consult_role
-        from support import ScriptDriver
-        base = self.config.roles["consult"]
-        for caps in (("files", "read", "finish", "insights"),
-                     ("files", "read", "finish", "diff"),
-                     ("files", "read", "finish", "insights", "diff", "fetch", "search")):
-            role = dataclasses.replace(base, name="advisor", capabilities=caps)
-            check_consult_role("advisor", role)  # must not raise
-            config = dataclasses.replace(self.config, roles={**self.config.roles, "advisor": role})
-            result = self.admitted_call(Engine(config, driver=ScriptDriver()), "consult", {"question": "q?", "role": "advisor"})
-            self.assertEqual(result["roles"], ["advisor"])
-
-    def test_write_caps_still_refused_before_model(self):
-        from mizu.runtime import Engine, check_consult_role
-        import dataclasses
-        from support import ScriptDriver
-        base = self.config.roles["consult"]
-        for caps in (("files", "read", "finish", "exec"),
-                     ("files", "read", "finish", "decide"),
-                     ("files", "read", "finish", "report"),
-                     ("files", "read", "finish", "consult")):
-            role = dataclasses.replace(base, name="bad", capabilities=caps)
-            with self.assertRaises(ConfigError):
-                check_consult_role("bad", role)
-        worker = self.config.roles["worker"]
-        with self.assertRaises(ConfigError):
-            Engine(self.config, driver=ScriptDriver()).consult(
-                self.context(), {"question": "q?", "role": "worker"})
-
     def test_consult_default_is_configuration_fail_closed(self):
         import dataclasses
         from mizu.errors import ConfigError, Denied
         from mizu.runtime import Engine
         from support import ScriptDriver
         # Configured default answers when the caller names no role.
-        result = self.admitted_call(Engine(self.config, driver=ScriptDriver()), "consult", {"question": "q?"})
+        result = self.admitted_call(Engine(self.config, driver=ScriptDriver()), "consult", {"request": "q?"})
         self.assertEqual(result["roles"], [self.config.consult_role])
         # Unset default fails closed instead of naming a role.
         bare = dataclasses.replace(self.config, consult_role="")
         with self.assertRaises(Denied):
             Engine(bare, driver=ScriptDriver()).consult(
-                self.context(), {"question": "q?"})
+                self.context(), {"request": "q?"})
         # Unknown configured default fails at load, not at call time.
         text = self.file.read_text()
         path = self.root / "config/unknown-consult-role.toml"
@@ -195,63 +135,6 @@ class ConsultGateTests(Fixture):
 
 
 class InsightRetentionTests(Fixture):
-    def test_list_keeps_newest_behind_bound(self):
-        import json
-        ids = []
-        for n in range(35):
-            item = self.project.insights.submit(
-                source="searcher", title=f"T{n:02d}", body="b", base_snapshot=None)
-            ids.append(item["id"])
-        # Give distinct, sortable timestamps so "newest" is well-defined
-        # (now() has second precision; rapid submits would tie).
-        for n, insight_id in enumerate(ids):
-            path = self.project.root / "inbox" / f"{insight_id}.json"
-            record = json.loads(path.read_text())
-            record["created_at"] = f"2026-01-01T00:00:{n:02d}+00:00"
-            path.write_text(json.dumps(record))
-        from support import forget_ledger
-        forget_ledger(self.project.root)
-        listed = self.project.insights.list(limit=30)
-        self.assertEqual(len(listed), 30)
-        titles = [r["title"] for r in listed]
-        self.assertIn("T34", titles)
-        self.assertNotIn("T00", titles)
-
-    def test_pending_insights_knob_controls_prompt(self):
-        import dataclasses
-        import json
-        from mizu.runtime import prompt_for
-        for n in range(5):
-            self.project.insights.submit(source="searcher", title=f"K{n}", body="b",
-                                         base_snapshot=None)
-        small = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, pending_insights=2))
-        ctx = self.context("worker")
-        ctx.config = small
-        prompt = json.loads(prompt_for(ctx))
-        self.assertEqual(len(prompt["pending_insights"]), 2)
-
-    def test_retention_days_knob_and_zero_disables(self):
-        import os
-        import time
-        old = self.project.insights.submit(source="s", title="Old", body="b", base_snapshot=None)
-        self.project.insights.decide(old["id"], "reject", "no", "", "test", expected_rev=1)
-        ancient = time.time() - 32 * 86400
-        from mizu.fs import read_json, write_json, mkdir
-        import datetime
-        decision_path = self.project.root / "decisions" / f"{old['id']}.json"
-        decision = read_json(decision_path)
-        decision["created_at"] = datetime.datetime.fromtimestamp(ancient, datetime.timezone.utc).isoformat()
-        write_json(decision_path, decision)
-        self.assertEqual(self.project.insights.gc_decided(keep_days=60), 0)
-        self.assertEqual(self.project.insights.gc_decided(keep_days=31), 1)
-        # Zero disables: file must survive even when old.
-        again = self.project.insights.submit(source="s", title="Old2", body="b", base_snapshot=None)
-        self.project.insights.decide(again["id"], "reject", "no", "", "test", expected_rev=1)
-        os.utime(self.project.root / "inbox" / f"{again['id']}.json", (ancient, ancient))
-        self.assertEqual(self.project.insights.gc_decided(keep_days=0), 0)
-        self.assertTrue((self.project.root / "inbox" / f"{again['id']}.json").exists())
-
     def test_budget_retention_knob(self):
         import datetime as dt
         import tempfile
@@ -878,16 +761,6 @@ class PresentationSeparationTests(Fixture):
         self.assertTrue(text.startswith("# T\n\nplain body"))
         self.assertNotIn("Snapshot:", text)
         self.assertNotIn("As of:", text)
-
-    def test_prompt_respects_pending_knob(self):
-        import dataclasses
-        for n in range(5):
-            self.project.insights.submit(source="s", title=f"D{n}", body="b", base_snapshot=None)
-        small = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, pending_insights=2, retention_days=60))
-        self.project.config = small
-        projection = self.project.insights.projection(limit=small.limits.pending_insights)
-        self.assertLessEqual(len(projection["items"]), 2)
 
     def test_cli_single_role_fallback(self):
         import dataclasses

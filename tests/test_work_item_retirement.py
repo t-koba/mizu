@@ -22,11 +22,9 @@ class RetirementTests(Fixture):
     def setUp(self):
         super().setUp()
         self.store = self.project.work_items
-        proposal = self.project.insights.submit(source="reviewer", title="Exhaustion",
-                                                body="Retain the scope", base_snapshot=None)
         self.seed = self.store.create(
             idempotency_key="exhaustion", title="Bounded lifecycle", actor="worker",
-            origin={"insight_id": proposal["id"], "rev": 1}, scope="Keep accepted scope",
+            origin="0" * 32, scope="Keep accepted scope",
             description="Retain immutable description")["record"]["work_item"]
         self.item_id = self.seed["id"]
         self.directory = self.project.root / "work-items" / self.item_id
@@ -120,7 +118,7 @@ class RetirementTests(Fixture):
         for page in (self.store.page_open(), self.store.page_open_readonly(), self.store.page_ready()):
             self.assertNotIn(self.item_id, [r["id"] for r in page["items"]])
         self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], self.item_id)
-        self.assertEqual(work_item_events.pending(self.store, "reviewer", ["dropped"])["pending"], 1)
+        self.assertEqual(work_item_events.pending(self.store, "worker", ["dropped"])["pending"], 1)
         claimed = self.store.transition(other["id"], expected_rev=1, status="doing", actor="worker")
         self.assertEqual(claimed["holder"], "worker")
 

@@ -304,57 +304,6 @@ class SnapshotRetentionTests(Fixture):
         self.assertTrue((self.project.root / 'objects' / shared).exists())
         self.project.snapshots.materialize(self.project.snapshots.get(), self.root / 'materialized')
 
-    def test_durable_roots_and_unreferenced_control(self):
-        snaps = [self.snapshot() for _ in range(12)]
-        root = self.project.root
-        write_json(root / 'runs/probe/started.json', {'snapshot': snaps[0]['id']})
-        write_json(root / 'runs/probe/delegation.json', {'snapshot': snaps[1]['id']})
-        from mizu.report import publish
-        publish(self.project, snaps[2])
-        insight = self.project.insights.submit(source='worker', title='Pinned', body='old revision',
-                                               base_snapshot=snaps[3]['id'])
-        self.project.insights.revise(insight['id'], source='worker', title='Pinned', body='live revision',
-                                     base_snapshot=snaps[4]['id'], expected_rev=1)
-        archived = self.project.insights.submit(source='worker', title='Archived', body='permanent',
-                                                base_snapshot=snaps[5]['id'])
-        self.project.insights.decide(archived['id'], 'reject', 'reviewed', '', 'operator', expected_rev=1)
-        with mock.patch('mizu.insights.time.time', return_value=CLOCK):
-            self.project.insights.gc_decided(keep_days=1)
-        self.assertFalse((root / 'inbox' / (archived['id'] + '.json')).exists())
-        write_json(root / 'spool/editor/queued.json', {'base_snapshot': snaps[6]['id']})
-        write_json(root / '.ingest/claimed.json', {'base_snapshot': snaps[7]['id']})
-        write_json(root / 'runs/probe/consultations/reference.json', {'snapshot': snaps[9]['id']})
-        write_json(root / 'runs/probe/delegations/reference.json', {'snapshot': snaps[10]['id']})
-        pointer = read_json(root / 'current.json')
-        source = '1' * 32
-        pointer['continuations'] = {'version': 1, 'entries': [{
-            'role': 'worker', 'source_run': source, 'snapshot': snaps[8]['id'],
-            'successor': continuations._successor('worker', source, snaps[8]['id']), 'state': 'committed'}]}
-        write_json(root / 'current.json', pointer)
-        result = self.collect()
-        self.assertEqual(result['status'], 'collected', result)
-        self.assertTrue(all(self.path(s).exists() for s in snaps[:-1]))
-        self.assertFalse(self.path(snaps[-1]).exists())
-
-    def test_historical_delivery_and_done_bindings_survive_history_expiry(self):
-        proposal = self.project.insights.submit(source='worker', title='Delivery', body='Keep all bindings',
-                                                 base_snapshot=None)
-        decision = self.project.insights.decide(proposal['id'], 'accept', 'reviewed', '', 'operator', expected_rev=1)
-        item = decision['work_item']['id']
-        first = self.snapshot(publish=True)
-        bind_delivery(self.project, item, first['id'])
-        second = self.snapshot(publish=True)
-        bind_delivery(self.project, item, second['id'], expected_rev=3)
-        self.project.work_items.transition(item, expected_rev=4, status='done', actor='worker',
-                                           snapshot_id=second['id'])
-        self.snapshot(publish=True)
-        self.snapshot(publish=True)
-        self.age_histories()
-        self.assertEqual(self.collect()['status'], 'collected')
-        self.assertTrue(self.path(first).exists())
-        self.assertTrue(self.path(second).exists())
-        self.assertEqual(self.project.work_items.get(item)['status'], 'done')
-
     def test_safe_point_fence_pins_both_snapshots(self):
         base, sealed, garbage = [self.snapshot() for _ in range(3)]
         write_json(self.project.root / 'safe-point.json', {
@@ -364,37 +313,6 @@ class SnapshotRetentionTests(Fixture):
         self.assertTrue(self.path(base).exists())
         self.assertTrue(self.path(sealed).exists())
         self.assertFalse(self.path(garbage).exists())
-
-    def test_malformed_or_incomplete_scans_delete_nothing(self):
-        old = self.snapshot()
-        root = self.project.root
-        cases = [(root / 'inbox/bad.json', None),
-                 (root / 'insight-revisions/bad.json', {'base_snapshot': 'invalid'}),
-                 (root / 'runs/probe/result.json', {'snapshot': 'invalid'}),
-                 (root / 'histories' / ('f' * 64 + '.json'), [old['id']]),
-                 (root / 'artifacts/probe/evidence.json', []),
-                 (root / 'current.json', None)]
-        pointer = (root / 'current.json').read_bytes()
-        for path, value in cases:
-            with self.subTest(path=path.relative_to(root)):
-                write_json(path, value)
-                os.utime(path, (CLOCK - 50 * DAY,) * 2)
-                self.assertEqual(self.collect()['status'], 'refused')
-                self.assertTrue(self.path(old).exists())
-                path.unlink()
-                if path.parent.name == 'probe':
-                    path.parent.rmdir()
-                (root / 'current.json').write_bytes(pointer)
-        listing = storage.os.scandir
-        def fail(path):
-            if path == root / 'inbox':
-                raise OSError('unavailable')
-            return listing(path)
-        with mock.patch.object(storage.os, 'scandir', side_effect=fail):
-            self.assertEqual(self.collect()['status'], 'refused')
-        with mock.patch.object(storage.insight_archive, 'snapshot_references', side_effect=ValueError):
-            self.assertEqual(self.collect()['status'], 'refused')
-        self.assertTrue(self.path(old).exists())
 
     def test_product_staging_leftover_never_disables_retention(self):
         old = self.snapshot()
@@ -489,83 +407,6 @@ class SnapshotRetentionTests(Fixture):
             self.assertEqual(self.collect()['status'], 'collected')
         self.assertFalse(self.path(old).exists())
 
-    def test_cli_reference_writers_hold_publication_from_read_through_write(self):
-        args = cli.parser().parse_args(['insight', 'submit', 'sample', '--title', 'Test', '--body', '-'])
-        original_get = self.project.snapshots.get
-        def probe_get(*a, **kw):
-            with self.assertRaises(Busy):
-                self.collect()
-            return original_get(*a, **kw)
-        def submitted(*a, **kw):
-            with self.assertRaises(Busy):
-                self.collect()
-            return {'ok': True}
-        with mock.patch.object(self.project.snapshots, 'get', side_effect=probe_get), \
-             mock.patch.object(self.project.insights, 'submit', side_effect=submitted), \
-             mock.patch('sys.stdin', new=io.StringIO('body')):
-            self.assertEqual(cli._cmd_insight(self.config, self.project, args), {'ok': True})
-        args.action, args.id, args.expected_rev = 'revise', 'probe', 1
-        with mock.patch.object(self.project.snapshots, 'get', side_effect=probe_get), \
-             mock.patch.object(self.project.insights, 'revise', side_effect=submitted), \
-             mock.patch('sys.stdin', new=io.StringIO('revision')):
-            self.assertEqual(cli._cmd_insight(self.config, self.project, args), {'ok': True})
-        with mock.patch.object(self.project.snapshots, 'get', side_effect=probe_get), \
-             mock.patch('mizu.report.publish', side_effect=submitted):
-            self.assertEqual(cli._cmd_report(self.config, self.project, SimpleNamespace()), {'ok': True})
-        with mock.patch('mizu.editor.export', side_effect=submitted):
-            args = SimpleNamespace(destination=self.root / 'export')
-            self.assertEqual(cli._cmd_editor_export(self.config, self.project, args), {'ok': True})
-
-    def test_cli_and_capsule_writers_refuse_busy_kernel_locks_without_references(self):
-        from mizu import editor, fs
-        bundle = self.root / 'bundle'
-        editor.export(self.project, bundle)
-        capsule = editor.Capsule(bundle, self.project.root / 'spool/editor')
-        ctx = multiprocessing.get_context('spawn')
-        ready, release = ctx.Event(), ctx.Event()
-        paths = [self.project.root / 'locks/publication.lock', capsule.outbox / '.submit.lock']
-        holder = ctx.Process(target=_hold_reference_locks, args=(paths, ready, release))
-        holder.start()
-        try:
-            self.assertTrue(ready.wait(60), 'reference-lock holder did not start')
-            args = cli.parser().parse_args(['insight', 'submit', 'sample', '--title', 'Test', '--body', '-'])
-            revised = cli.parser().parse_args(['insight', 'revise', 'sample', '--id', 'probe',
-                                             '--title', 'Test', '--body', '-'])
-            calls = [
-                lambda: cli._cmd_insight(self.config, self.project, args),
-                lambda: cli._cmd_insight(self.config, self.project, revised),
-                lambda: cli._cmd_report(self.config, self.project, SimpleNamespace()),
-                lambda: cli._cmd_editor_export(self.config, self.project,
-                                               SimpleNamespace(destination=self.root / 'busy-export')),
-                lambda: capsule.call('submit_insight', {'title': 'Queue', 'body': 'Citation'}),
-            ]
-            # Assert nonblocking before entering the real kernel acquire, so a
-            # regression cannot hang the test on POSIX. The holder remains locked
-            # throughout: each call must return Busy before it is released.
-            acquire = fs._platform.lock_fd
-            def nonblocking(fd, *, blocking, timeout=None,
-                            retry_interval_ms=fs._platform.LOCK_RETRY_INTERVAL_MS):
-                self.assertFalse(blocking)
-                return acquire(fd, blocking=blocking, timeout=timeout,
-                               retry_interval_ms=retry_interval_ms)
-            with mock.patch.object(fs._platform, 'lock_fd', side_effect=nonblocking), \
-                 mock.patch.object(self.project.snapshots, 'get', side_effect=AssertionError('snapshot read')), \
-                 mock.patch('sys.stdin', new=io.StringIO('body')):
-                for i, call in enumerate(calls):
-                    with self.subTest(writer=i), self.assertRaises(Busy):
-                        call()
-            self.assertEqual(list((self.project.root / 'inbox').glob('*.json')), [])
-            self.assertEqual(list(capsule.outbox.glob('*.json')), [])
-            self.assertFalse((self.project.root / 'artifacts').exists())
-            self.assertFalse((self.root / 'busy-export').exists())
-        finally:
-            release.set()
-            holder.join(60)
-            if holder.is_alive():
-                holder.terminate()
-                holder.join(60)
-        self.assertEqual(holder.exitcode, 0)
-
     def test_due_boundary_reuses_cadence_and_records_bounded_result(self):
         old = self.snapshot()
         with mock.patch.object(storage.time, 'time', return_value=CLOCK):
@@ -576,20 +417,6 @@ class SnapshotRetentionTests(Fixture):
             self.assertEqual(storage.maintain_automatic_prune(self.project), {'status': 'not-due'})
         self.assertLess(len(json.dumps(result)), storage._AUTOMATIC_PRUNE_STATE_BYTES)
         self.assertFalse(self.project.control()['paused'])
-
-    def test_capsule_submission_serializes_its_durable_outbox_reference(self):
-        from mizu import editor
-        bundle = self.root / 'bundle'
-        editor.export(self.project, bundle)
-        capsule = editor.Capsule(bundle, self.project.root / 'spool/editor')
-        original = editor.write_json
-        def write(*a, **kw):
-            with self.assertRaises(Busy):
-                self.collect()
-            return original(*a, **kw)
-        with mock.patch.object(editor, 'write_json', side_effect=write):
-            result = capsule.call('submit_insight', {'title': 'Queue', 'body': 'Citation'})
-        self.assertTrue((self.project.root / 'spool/editor' / (result['id'] + '.json')).exists())
 
     def test_snapshot_writer_finishes_capture_and_publication_before_gc(self):
         # Controlled interleaving: no sleeps and no host-speed assumption.

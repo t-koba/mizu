@@ -537,7 +537,7 @@ class FinishSealTests(Fixture):
         engine = Engine(config, driver=driver)
         records = []
         def caller(ctx, *_):
-            records.append((engine.consult(ctx, {"role": "consult", "question": "review"})["answers"][0], "consultation.json"))
+            records.append((engine.consult(ctx, {"role": "consult", "request": "review"})["answers"][0], "consultation.json"))
             records.append((engine.delegate(ctx, {"role": "searcher", "task": "inspect"}), "delegation.json"))
             self.assertIsNone(ctx.admission_error)
         Engine(config, driver=ScriptDriver(caller)).run(self.project, "reporter")

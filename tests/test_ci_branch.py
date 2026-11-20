@@ -181,25 +181,6 @@ class CiWakeTests(Fixture):
         started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
         self.assertEqual(started["admission"], "ci")
 
-    def test_event_trigger_labels_substantive_reason(self):
-        import dataclasses
-        from mizu.fs import read_json
-        from mizu.runtime import Engine
-        from support import ScriptDriver
-        config = _red_config(self)
-        roles = dict(config.roles)
-        roles["worker"] = dataclasses.replace(roles["worker"], decision_events=("reject",))
-        config = dataclasses.replace(config, roles=roles)
-        item = self.project.insights.submit(
-            source="worker", title="Finding", body="v1",
-            base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(item["id"], "reject", "not material", "", "test", expected_rev=1)
-        admitted = Engine(config, driver=ScriptDriver()).run(
-            self.project, "worker", event_trigger=True)
-        self.assertEqual(admitted["status"], "completed")
-        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
-        self.assertEqual(started["admission"], "decision")
-
     def test_should_run_parks_writer_without_ci_wake(self):
         import dataclasses
         import time

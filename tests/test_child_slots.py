@@ -26,7 +26,7 @@ class ChildSlotTests(Fixture):
             self.config.limits, parallel_runs=parallel_runs, parallel_consults=parallel_consults))
 
     def args(self, operation):
-        return ({"role": "consult", "question": "Review this tree"} if operation == "consult"
+        return ({"role": "consult", "request": "Review this tree"} if operation == "consult"
                 else {"role": "helper", "task": "Inspect this tree"})
 
     def test_both_children_run_in_the_single_held_caller_slot(self):
@@ -209,7 +209,7 @@ class ChildSlotTests(Fixture):
             nonlocal active, peak
             if ctx.role.name == "worker":
                 with slot(config):  # Fill the other slot; children need none.
-                    response = ctx.handle("consult", {"roles": names, "question": "Review"})
+                    response = ctx.handle("consult", {"roles": names, "request": "Review"})
                 self.assertEqual(len(response["answers"]), len(names))
                 self.assertTrue(all(a.get("answer") == FINISH["summary"] for a in response["answers"]))
                 ctx.handle("finish", FINISH)

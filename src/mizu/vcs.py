@@ -437,7 +437,7 @@ def _approval_text(body) -> str | None:
 
 
 def require_go_approval(project, branch: str, code_digest: str,
-                        endpoints: dict | None = None) -> dict:
+                        endpoints: dict | None = None, *, queue: str | None) -> dict:
     """Require an operator ``GO <branch>`` approval message for this digest.
 
     Schema: ``branch`` per ``check_branch``; ``code_digest`` 64 hex of the
@@ -446,7 +446,7 @@ def require_go_approval(project, branch: str, code_digest: str,
     branch and digest themselves) or ``{"target", "id", "sha", "base"}``
     for a proposal merge: the destination and assessed proposal endpoints
     the merge will act on.
-    Trust: a message in the queue named by ``vcs.approval_queue`` whose
+    Trust: a message in ``queue`` (the configured ``vcs.approval_queue``) whose
     author the kernel bound as ``operator`` (``mizu queue PROJECT write``).
     Its ``title`` and ``body`` strings together must hold the line
     ``GO <branch>`` and a ``digest: <code digest>`` line; a merge approval
@@ -477,7 +477,6 @@ def require_go_approval(project, branch: str, code_digest: str,
             if (not isinstance(endpoints.get(_key), str)
                     or not _SHA.fullmatch(endpoints[_key])):
                 raise Denied(f"Invalid merge proposal {_key} for publication approval")
-    queue = project.config.vcs.get("approval_queue")
     if not queue:
         raise Denied("Publication approval requires vcs.approval_queue")
     store = project.kernel_queues
@@ -516,7 +515,7 @@ def require_go_approval(project, branch: str, code_digest: str,
         raise Denied("Publication approval must come from the operator")
     if saw_line:
         raise Denied("Publication approval is not recorded for this code digest")
-    raise Denied(f"No operator approval {want!r} in queue {queue}")
+    raise Denied(f"No recorded human approval {want!r} from the operator in queue {queue}")
 
 
 MAX_ACQUIRE_CONTENT = 524288

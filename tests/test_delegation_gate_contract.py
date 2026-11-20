@@ -82,7 +82,7 @@ class DelegationGateContractTests(Fixture):
 
     def test_consult_gate_requires_exact_source_and_valid_parameters(self):
         source = self.view["request"]["source_snapshot"]
-        args = {"question": "Pinned?", "source_snapshot": source}
+        args = {"request": "Pinned?", "source_snapshot": source}
         handler = Mock(return_value={"allowed": True})
         with patch.dict(Context._DISPATCH, consult=handler):
             self.assertEqual(self.ctx.handle("consult", args), {"allowed": True})
@@ -92,7 +92,7 @@ class DelegationGateContractTests(Fixture):
                        {"source_snapshot": []}, {"source_snapshot": "invalid"},
                        {"unexpected": True}, {"roles": "consult"}):
             self.assert_refused_without_effects("consult", {**args, **change})
-        self.assert_refused_without_effects("consult", {"question": "Missing source"})
+        self.assert_refused_without_effects("consult", {"request": "Missing source"})
         self.ctx._reservation_view = None
         self.assert_refused_without_effects("consult", args)
 
@@ -125,7 +125,7 @@ class DelegationGateContractTests(Fixture):
              patch.object(engine, "resolve"), patch.object(engine, "_execute", side_effect=execute), \
              patch("mizu.classification.prepare", return_value={"profile": "primary"}) as preview, \
              patch.object(self.project.snapshots, "get", wraps=self.project.snapshots.get) as get:
-            result = self.ctx.handle("consult", {"question": "Pinned?", "source_snapshot": source["id"]})
+            result = self.ctx.handle("consult", {"request": "Pinned?", "source_snapshot": source["id"]})
         self.assertEqual(seen, [source["id"]])
         self.assertEqual(result["snapshot"], source["id"])
         self.assertEqual(result["answers"][0]["answer"], "Pinned answer")
@@ -139,7 +139,7 @@ class DelegationGateContractTests(Fixture):
         engine = Engine(self.config)
         self.ctx._slot_lease = True
         source = self.view["request"]["source_snapshot"]
-        args = {"question": "Pinned?", "source_snapshot": source}
+        args = {"request": "Pinned?", "source_snapshot": source}
         path = self.project.snapshots.root / "snapshots" / f"{source}.json"
         original = path.read_bytes()
         with patch.object(self.ctx, "close_exec") as close, \
@@ -147,7 +147,7 @@ class DelegationGateContractTests(Fixture):
              patch.object(self.project.snapshots, "create") as create, \
              patch.object(engine, "_execute") as execute, \
              patch("mizu.classification.prepare") as preview:
-            for bad in ({"question": "Missing"}, {**args, "source_snapshot": "b" * 64},
+            for bad in ({"request": "Missing"}, {**args, "source_snapshot": "b" * 64},
                         {**args, "source_snapshot": None}, {**args, "unexpected": True}):
                 with self.subTest(args=bad), self.assertRaises(Denied):
                     engine.consult(self.ctx, bad)
@@ -185,7 +185,7 @@ class DelegationGateContractTests(Fixture):
         with patch.object(self.ctx, "close_exec", wraps=self.ctx.close_exec) as close, \
              patch.object(self.project.snapshots, "capture_files", wraps=self.project.snapshots.capture_files) as capture, \
              patch.object(engine, "resolve"), patch.object(engine, "_execute", side_effect=execute):
-            result = engine.consult(self.ctx, {"question": "Ordinary?"})
+            result = engine.consult(self.ctx, {"request": "Ordinary?"})
         close.assert_called_once_with()
         capture.assert_called_once_with(self.ctx.workspace)
         self.assertNotEqual(result["snapshot"], self.view["request"]["source_snapshot"])
@@ -250,7 +250,7 @@ class DelegationGateContractTests(Fixture):
         self.ctx._slot_lease = True
         with patch.object(self.project.snapshots, "capture_files", side_effect=AssertionError("live capture")):
             with self.assertRaises(Denied):
-                engine.consult(self.ctx, {"question": "pinned?"})
+                engine.consult(self.ctx, {"request": "pinned?"})
             with self.assertRaisesRegex(Denied, "Delegation capture"):
                 engine.delegate(self.ctx, {"role": "reporter", "task": "test"})
         self.assertFalse(self.ctx.closed)

@@ -84,51 +84,6 @@ class DaemonEvaluatorTests(unittest.TestCase):
             self.assertEqual(evaluate(dataclasses.replace(facts, goal_changed=True)).reason, "goal")
             self.assertEqual(evaluate(dataclasses.replace(facts, operator_woke=True)).reason, "operator")
 
-    def test_table(self):
-        cases = [
-            # Control closes before any wake, even with every signal set.
-            ("control-disarmed", _daemon(armed=False, goal_changed=True, operator_woke=True,
-                                         outcome="continue", inbox_changed=True, routed_events_due=True,
-                                         ci_due=True, wait_expired=True, progress_admits=True),
-             False, "control"),
-            ("control-paused", _daemon(paused=True, inbox_changed=True), False, "control"),
-            ("control-draining", _daemon(draining=True, inbox_changed=True), False, "control"),
-            # Goal and operator wakes precede the saved done outcome.
-            ("goal-before-done", _daemon(goal_changed=True, outcome="done", inbox_changed=True,
-                                         routed_events_due=True, ci_due=True, wait_expired=True),
-             True, "goal"),
-            ("operator-before-done", _daemon(operator_woke=True, outcome="done", inbox_changed=True),
-             True, "operator"),
-            # Receipt-pinned work-item waits wake their holder even after done.
-            ("ci-wait-before-done", _daemon(outcome="done", ci_wait_due=True), True, "ci_wait"),
-            # Done ignores inbox/events/general CI/insight wait/progress.
-            ("done-ignores-news", _daemon(outcome="done", inbox_changed=True, routed_events_due=True,
-                                          ci_due=True, wait_expired=True, progress_admits=True),
-             False, "done"),
-            # Ordered wakes for non-done outcomes.
-            ("inbox", _daemon(outcome="wait", inbox_changed=True), True, "inbox"),
-            ("events", _daemon(outcome="wait", routed_events_due=True), True, "events"),
-            ("ci", _daemon(outcome="wait", ci_due=True), True, "ci"),
-            ("wait-expired", _daemon(outcome="wait", wait_expired=True), True, "wait"),
-            # Runtime resolves source liveness, timer and ready work for wait fallback.
-            ("wait-fallback", _daemon(outcome="wait", progress_admits=True), True, "progress"),
-            ("wait-not-expired", _daemon(outcome="wait", progress_admits=False), False, "parked"),
-            ("other-outcome", _daemon(outcome="failed", progress_admits=True), False, "outcome"),
-            # Progress self-admission for continue/bounded.
-            ("continue-admits", _daemon(outcome="continue", progress_admits=True), True, "progress"),
-            ("continue-parked", _daemon(outcome="continue", progress_admits=False), False, "parked"),
-            ("bounded-admits", _daemon(outcome="bounded", progress_admits=True), True, "progress"),
-            ("bounded-parked", _daemon(outcome="bounded", progress_admits=False), False, "parked"),
-            # Inbox precedes parked progress.
-            ("inbox-before-parked", _daemon(outcome="continue", inbox_changed=True,
-                                            progress_admits=False), True, "inbox"),
-        ]
-        for name, facts, ready, reason in cases:
-            with self.subTest(name=name):
-                decision = evaluate(facts)
-                self.assertEqual((decision.ready, decision.reason), (ready, reason), name)
-                self.assertEqual(evaluate_daemon(facts), decision)
-
 
 class DispatchEvaluatorTests(unittest.TestCase):
     def test_writer_next_bypasses_unchanged_but_is_not_an_event(self):
@@ -236,42 +191,6 @@ class DispatchEvaluatorTests(unittest.TestCase):
 
 
 class SchedulingParityTests(Fixture):
-    def test_done_ignores_news_but_operator_wakes(self):
-        snap = {**self.project.snapshots.get(), "outcome": "done", "wake_generation": "test-wake"}
-        self.project.insights.submit(source="searcher", title="News", body="interesting",
-                                     base_snapshot=snap["id"])
-        self.assertFalse(should_run(self.project, snap))
-        self.project.set_control(wake_generation="operator-new")
-        self.assertTrue(should_run(self.project, snap))
-
-    def test_done_does_not_read_lower_priority_signals(self):
-        snap = {**self.project.snapshots.get(), "outcome": "done",
-                "wake_generation": "test-wake", "progress": {}}
-        with patch.object(self.project.insights, "generation",
-                          side_effect=AssertionError("done must not read inbox generation")), \
-             patch("mizu.role_admission._role_events_due",
-                   side_effect=AssertionError("done must not read routed events")), \
-             patch("mizu.role_admission._ci_due_for",
-                   side_effect=AssertionError("done must not query CI")), \
-             patch("mizu.role_admission.validate_progress",
-                   side_effect=AssertionError("done must not inspect progress")):
-            self.assertFalse(should_run(self.project, snap, role_name="worker"))
-            self.project.set_control(wake_generation="operator-new")
-            self.assertTrue(should_run(self.project, snap, role_name="worker"))
-            changed_goal = {**snap, "goal_digest": "stale-goal"}
-            self.assertTrue(should_run(self.project, changed_goal, role_name="worker"))
-
-    def test_control_parity(self):
-        snap = self.project.snapshots.get()
-        self.project.insights.submit(source="searcher", title="News", body="interesting",
-                                     base_snapshot=snap["id"])
-        self.assertTrue(should_run(self.project, self.project.snapshots.get()))
-        for armed, paused, draining in ((False, False, False), (True, True, False), (True, False, True)):
-            self.project.set_control(armed=armed, paused=paused, draining=draining)
-            with self.subTest(armed=armed, paused=paused, draining=draining):
-                self.assertFalse(should_run(self.project, self.project.snapshots.get()))
-        self.project.set_control(armed=True, paused=False, draining=False)
-
     def test_event_trigger_no_event_creates_no_run(self):
         Engine(self.config, driver=ScriptDriver()).run(self.project, "searcher")
         before = {path.name for path in (self.project.root / "runs").iterdir()} if (
@@ -282,28 +201,6 @@ class SchedulingParityTests(Fixture):
         after = {path.name for path in (self.project.root / "runs").iterdir()} if (
             self.project.root / "runs").exists() else set()
         self.assertEqual(before, after)
-
-    def test_read_unchanged_ignores_inbox(self):
-        engine = Engine(self.config, driver=ScriptDriver())
-        engine.run(self.project, "reviewer")
-        self.assertEqual(engine.run(self.project, "reviewer")["skipped"], "unchanged")
-        snap = self.project.snapshots.get()
-        self.project.insights.submit(source="searcher", title="News", body="interesting",
-                                     base_snapshot=snap["id"])
-        # Read-only on-change roles keep skipping despite the inbox wake.
-        self.assertEqual(engine.run(self.project, "reviewer")["skipped"], "unchanged")
-
-    def test_write_unchanged_uses_inbox(self):
-        self.config.roles["worker"] = dataclasses.replace(
-            self.config.roles["worker"], on_change=True)
-        engine = Engine(self.config, driver=ScriptDriver())
-        engine.run(self.project, "worker")
-        self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
-        snap = self.project.snapshots.get()
-        self.project.insights.submit(source="searcher", title="News", body="interesting",
-                                     base_snapshot=snap["id"])
-        result = engine.run(self.project, "worker")
-        self.assertNotIn("skipped", result)
 
     def test_change_and_schedule_labels(self):
         from mizu.fs import read_json
@@ -318,31 +215,3 @@ class SchedulingParityTests(Fixture):
         self.assertEqual(admissions.get("reviewer"), "change")
         self.assertEqual(admissions.get("searcher"), "schedule")
 
-    def test_parked_progress_needs_inbox(self):
-        import time
-        from mizu.fs import now
-        from mizu.runtime import _progress_obligations_digest
-        from mizu.snapshot import PROGRESS_SIGNALS, validate_progress
-        current = self.project.snapshots.get()
-        progress = validate_progress({
-            "schema": 1,
-            "signals": {name: False for name in PROGRESS_SIGNALS},
-            "selected": list(self.config.limits.progress_signals),
-            "role": "worker", "has_progress": False, "no_progress_count": 1,
-            "obligations_digest": _progress_obligations_digest(
-                self.project.insights.pending_obligations("worker")),
-            "recorded_at": now(),
-        })
-        snapshot = self.project.snapshots.create(
-            self.project.snapshots.capture_files(self.project.workspace),
-            goal=self.project.goal, state=current["state"], run=None,
-            outcome="continue", summary="Parked progress parity",
-            wake_generation=self.project.control().get("wake_generation", ""),
-            progress=progress, parent=current["id"])
-        self.project.snapshots.publish(snapshot)
-        snap = self.project.snapshots.get()
-        # Default allowance parks a no-progress continuation.
-        self.assertFalse(should_run(self.project, snap, role_name="worker"))
-        self.project.insights.submit(source="searcher", title="News", body="interesting",
-                                     base_snapshot=snap["id"])
-        self.assertTrue(should_run(self.project, snap, role_name="worker"))

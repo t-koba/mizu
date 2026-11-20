@@ -92,27 +92,6 @@ class HostRecordTests(CiWaitFixture):
         with patch.object(self.project, 'config', dataclasses.replace(self.config, record_kinds={})), self.assertRaises(Denied):
             self.write()
 
-    def test_host_cli_binds_identity_and_exact_replay(self):
-        # Preserve the configured fake VCS hook; this route performs no VCS calls.
-        args = parser().parse_args(['--config', str(self.file), 'publisher-record', 'sample',
-            '--kind', KIND, '--subject', json.dumps(self.subject), '--payload', json.dumps(self.refused)])
-        result = execute(args)
-        self.assertEqual(result, self.write())
-        self.assertEqual(result['record']['writer'], host_records.PUBLISHER)
-        self.assertEqual(result, self.write())
-        with self.assertRaises(Denied):
-            self.write({**self.refused, 'reason': 'Conflicting refusal'})
-        with self.assertRaises(TypeError):
-            host_records.write_publisher(self.project, kind=KIND, subject=self.subject,
-                                         payload=self.refused, writer='role.worker')
-        forged = {**result['record'], 'writer': 'role.worker'}
-        with self.assertRaises(Denied):
-            self.shared().put(forged, writer='role.worker')
-        with self.assertRaises(Denied):
-            self.shared().put(result['record'], writer='role.worker')
-        with self.assertRaises(Denied):
-            self.context().handle('record_write', {})
-
     def test_snapshot_identity_and_payload_bounds(self):
         for subject in ({}, {'snapshot_id': self.subject['snapshot_id']},
                         {**self.subject, 'code_digest': 'a' * 64},

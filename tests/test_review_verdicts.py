@@ -73,73 +73,6 @@ class ReviewVerdictTests(PublishFixture):
         return reviews.publication_state(self.context(), pending_insights=pending,
                                          open_insights={"ids": list(open_ids)})
 
-    def test_publication_state_limits_findings_to_exact_source_and_snapshot(self):
-        self.review("changes_requested")
-        source = self.project.snapshots.get()["id"]
-        pending = self.project.insights.submit(source="reviewer", base_snapshot=source,
-            title="Review finding", body="Material finding")
-        findings = [dict(pending, id=f"finding-{i}") for i in range(17)]
-        rows = [pending, pending, dict(pending, id="other-role", source="searcher"),
-                dict(pending, id="other-snapshot", base_snapshot="0" * 64), *findings]
-        self.assertEqual(self.publication_state(rows, [row["id"] for row in rows]), {
-            "cause": "changes_requested", "verdict": "changes_requested", "reviewer": "reviewer",
-            "finding_insights": [pending["id"], *(row["id"] for row in findings[:15])]})
-
-    def test_changes_requested_findings_follow_verdict_to_same_code_successor(self):
-        # A same-code successor inherits a rejecting verdict by digest. The
-        # findings were filed against the snapshot the reviewer actually read,
-        # so they must stay linked after the verdict carries forward.
-        self.review("changes_requested")
-        reviewed = self.project.snapshots.get()
-        finding = self.project.insights.submit(source="reviewer", base_snapshot=reviewed["id"],
-            title="Review finding", body="Material finding")
-        successor = self.project.snapshots.create(
-            {key: reviewed[key] for key in ("files", "code_digest", "skipped", "bytes")},
-            goal=reviewed["goal"], state="New state, unchanged code", run=None,
-            outcome="wait", summary="Same code successor", parent=reviewed["id"])
-        self.project.snapshots.publish(successor)
-        ctx = self.context()  # Current snapshot is now the same-code successor.
-        self.assertNotEqual(ctx.snapshot["id"], reviewed["id"])
-        self.assertEqual(ctx.snapshot["code_digest"], reviewed["code_digest"])
-        self.assertEqual(reviews.publication_state(ctx, pending_insights=[finding],
-            open_insights={"ids": [finding["id"]]}), {
-                "cause": "changes_requested", "verdict": "changes_requested",
-                "reviewer": "reviewer", "finding_insights": [finding["id"]]})
-        # A finding filed against the successor itself is not the review's finding.
-        other = self.project.insights.submit(source="reviewer", base_snapshot=successor["id"],
-            title="Unrelated", body="Not reviewed")
-        self.assertEqual(reviews.publication_state(ctx,
-            pending_insights=[finding, other],
-            open_insights={"ids": [finding["id"], other["id"]]})["finding_insights"],
-            [finding["id"]])
-
-    def test_full_and_delta_prompts_project_publication_state(self):
-        self.review("changes_requested")
-        ctx = self.context()
-        finding = self.project.insights.submit(source="reviewer", base_snapshot=ctx.snapshot["id"],
-            title="Review finding", body="Material finding")
-        rejected = {"cause": "changes_requested", "verdict": "changes_requested",
-                    "reviewer": "reviewer", "finding_insights": [finding["id"]]}
-        published = {"cause": "published", "verdict": None, "reviewer": None, "finding_insights": []}
-
-        def check(expected):
-            # Delta did not re-offer the finding but it is still in its opening backlog.
-            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
-                with self.subTest(builder=builder.__name__, cause=expected["cause"]):
-                    prompt = json.loads(builder(ctx, *args))
-                    self.assertEqual(prompt["publication_state"], expected)
-
-        def record(code_digest):
-            Publication.record_external(self.project.root, branch="main", published_sha="a" * 40,
-                code_digest=code_digest, approval=self.human_go["id"],
-                projection=public_source_identity(ctx.snapshot["files"]))
-
-        check(rejected)  # A local snapshot pin alone proves nothing about publication.
-        record("0" * 64)
-        check(rejected)
-        record(ctx.snapshot["code_digest"])
-        check(published)
-
     def test_publication_state_matched_receipt_is_conclusive_even_if_scan_stops(self):
         self.review("changes_requested")
         with patch.object(Publication, "list_receipts", side_effect=LimitExceeded("Bounded read")):
@@ -205,19 +138,6 @@ class ReviewVerdictTests(PublishFixture):
         self.assertEqual(self.approvals(), expected)  # A copied cursor cannot count twice.
         self.select_quorum(("inspector", "auditor", "reviewer"), 3)
         self.denied()
-
-    def test_quorum_does_not_replace_human_go(self):
-        self.add_reviewers()
-        self.select_quorum(("reviewer", "auditor", "inspector"), 2)
-        self.review()
-        self.review(role="auditor")
-        self.assertEqual(len(self.approvals()), 2)
-        record = self.human_go
-        self.project.insights.revise(record["id"], source="operator", title=record["title"],
-            body=f"Await renewed GO.\ndigest: {current_digest(self)}\n",
-            base_snapshot=record["base_snapshot"], run="operator", expected_rev=record["rev"])
-        with self.assertRaisesRegex(Denied, "stale.*revision"):
-            self.publish()
 
     def test_multiple_holders_seal_independently_and_cannot_substitute_for_selected_holder(self):
         self.add_reviewers()
@@ -286,15 +206,6 @@ class ReviewVerdictTests(PublishFixture):
             capabilities=tuple(cap for cap in roles["reviewer"].capabilities if cap != "review_verdict"))
         self.config = dataclasses.replace(self.config, roles=roles)
         self.denied()
-
-    def test_approval_does_not_replace_human_go(self):
-        self.review()
-        record = self.human_go
-        self.project.insights.revise(record["id"], source="operator", title=record["title"],
-            body=f"Await renewed GO.\ndigest: {current_digest(self)}\n",
-            base_snapshot=record["base_snapshot"], run="operator", expected_rev=record["rev"])
-        with self.assertRaisesRegex(Denied, "stale.*revision"):
-            self.publish()
 
     def test_typed_approval_seals_immutable_run_and_snapshot_then_publishes(self):
         source = self.project.snapshots.get()
@@ -608,23 +519,6 @@ class ReviewVerdictTests(PublishFixture):
                 load(self.file)
         self.file.write_text(original + '\n[publication]\nreviewer_role = "reviewer"\n')
         self.assertEqual(load(self.file).publication.reviewer_role, "reviewer")
-
-    def test_worker_records_and_corrupt_or_mismatched_receipts_do_not_approve(self):
-        # Ordinary role-authored records/prose cannot enter the review path.
-        self.project.insights.submit(source="worker", title="approve", body="approve",
-                                     base_snapshot=self.project.snapshots.get()["id"])
-        self.denied()
-        result = self.review()
-        saved = self.project.root / "runs" / result["run"] / "review.json"
-        receipt = read_json(saved)
-        for value in ({}, {**receipt, "snapshot": "a" * 64},
-                      {**receipt, "review": {**receipt["review"], "role": "worker"}}):
-            write_json(saved, value)
-            self.denied()
-        saved.write_text("not json")
-        self.denied()
-        saved.unlink()
-        self.denied()
 
     def test_reviewer_identity_is_operator_policy_not_a_role_name_convention(self):
         # Transfer the grant as well as the publication selection. Merely

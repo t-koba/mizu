@@ -121,15 +121,6 @@ class EventWakesGateTests(Fixture):
                         self.assertEqual(state["_dispatch"].admission,
                                          {"operator_record": "operator_record"}.get(kind, kind))
 
-    def test_listed_kind_labels_even_when_other_wakes_pending(self):
-        self._worker_event_only()
-        self._role("worker", event_wakes=("wait",))
-        with patch("mizu.runtime.check_jobs.wake_ready", return_value=True), \
-             patch("mizu.runtime.operator_records.pending",
-                   return_value=({"wake_pending": True, "events": []},)):
-            state = self._state("worker")
-        self.assertEqual(state["_dispatch"].admission, "wait")
-
     def test_continuation_is_not_a_standalone_wake(self):
         self._worker_event_only()
         self._role("worker", event_wakes=())

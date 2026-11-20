@@ -38,55 +38,6 @@ class DispatchPreflightTests(Fixture):
         self.assertEqual(len(driver.calls), 1)
         self.assertEqual(len(list((self.project.root / 'runs').iterdir())), 1)
 
-    def test_check_grant_alone_does_not_start_unrequested_project_work(self):
-        # A role with only a result subscription remains explicit-run only.
-        self.config.roles['worker'] = dataclasses.replace(
-            self.config.roles['worker'], daemon=False, interval_seconds=0,
-            calendar='', decision_events=(), work_item_events=(),
-            capabilities=('check_job', 'files', 'read', 'finish'))
-        self.project.work_items.create(idempotency_key='unrelated',
-            title='Unrelated project work', actor='worker')
-        engine = Engine(self.config, driver=ScriptDriver())
-        with patch.object(engine, '_admit', side_effect=AssertionError('unsolicited work')):
-            result = engine.run(self.project, 'worker', event_trigger=True, retry_busy=True)
-        self.assertEqual(result['skipped'], 'no-event')
-        self.assertFalse((self.project.root / 'runs').exists())
-
-    def test_explicit_run_and_owned_check_result_keep_their_authority(self):
-        self.config.roles['worker'] = dataclasses.replace(
-            self.config.roles['worker'], daemon=False, interval_seconds=0,
-            calendar='', decision_events=(), work_item_events=())
-        # The scripted writer parks immediately; keep this fixture free of
-        # ready work so it tests check-result authority, not parking policy.
-        engine = Engine(self.config, driver=ScriptDriver())
-        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        # A completed result remains discoverable, but only an exact explicit
-        # wait may make it a scheduler/admission wake.
-        with patch('mizu.runtime.check_jobs.pending', return_value=[{'id': 'owned-result'}]), \
-             patch('mizu.runtime.check_jobs.wake_ready', return_value=False):
-            state = engine._dispatch_state(self.project, 'worker',
-                self.config.roles['worker'], event_trigger=True)
-            self.assertIn('skip', state)
-            self.assertEqual(state['skip']['skipped'], 'no-event')
-            normal = engine._dispatch_state(self.project, 'worker',
-                self.config.roles['worker'], event_trigger=False)
-            if '_dispatch' in normal:
-                self.assertNotEqual(normal['_dispatch'].admission, 'wait')
-            self.assertFalse(should_run(self.project, self.project.snapshots.get(),
-                                        role_name='worker', config=self.config))
-        with patch('mizu.runtime.check_jobs.pending', return_value=[{'id': 'owned-result'}]), \
-             patch('mizu.runtime.check_jobs.wake_ready', return_value=True):
-            state = engine._dispatch_state(self.project, 'worker',
-                self.config.roles['worker'], event_trigger=True)
-            self.assertNotIn('skip', state)
-            self.assertEqual(state['_dispatch'].admission, 'wait')
-            normal = engine._dispatch_state(self.project, 'worker',
-                self.config.roles['worker'], event_trigger=False)
-            self.assertNotIn('skip', normal)
-            self.assertIn(normal['_dispatch'].admission, ('wait', 'schedule'))
-            self.assertTrue(should_run(self.project, self.project.snapshots.get(),
-                                       role_name='worker', config=self.config))
-
 
 class CodeChangeEventTests(Fixture):
     def _unscheduled_on_change(self):

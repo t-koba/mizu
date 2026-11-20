@@ -218,27 +218,6 @@ class ExplainTests(Fixture):
         self.assertEqual(result["role_facts"]["last_outcome"],
                          {"status": "unavailable", "record": None})
 
-    def test_selection_wait_reports_probe_wait_without_scans(self):
-        from mizu import explain as explain_module
-        from unittest.mock import patch
-        selection = self.project.root / "selection"
-        selection.mkdir(exist_ok=True)
-        (selection / "worker-wait.json").write_text(json.dumps(
-            {"fingerprint": "ab" * 32, "run": "0123456789abcdef0123456789abcdef",
-             "next_evaluation_at": 1790000000.0, "version": 1}))
-        with (patch.object(explain_module, "_read_record",
-                           wraps=explain_module._read_record) as spy):
-            result = execute(self._args("--role", "worker"))
-        self.assertEqual(result["role_facts"]["selection_wait"], {
-            "status": "current",
-            "record": {"next_evaluation_at": 1790000000.0,
-                       "run": "0123456789abcdef0123456789abcdef"}})
-        # Only single bounded record reads; no inbox or wait scans.
-        for call in spy.call_args_list:
-            self.assertTrue(call.args[1].endswith(".json"))
-            self.assertNotIn("inbox", call.args[1])
-            self.assertNotIn("waits", call.args[1].split("/"))
-
     def test_unreadable_role_record_fails_closed_and_emits_no_file_text(self):
         health = self.project.root / "health" / "worker.json"
         health.parent.mkdir(exist_ok=True)

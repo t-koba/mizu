@@ -142,35 +142,6 @@ class ProposalToolTests(Fixture):
 
 
 class ProposalRecordTests(Fixture):
-    def test_record_creates_dedupes_and_revises_on_change(self):
-        first = vcs.record_proposal_state(self.project, proposal())
-        self.assertTrue(first["changed"])
-        stored = self.project.insights.read(first["id"])
-        self.assertEqual(stored["source"], "vcs")
-        self.assertIn(SHA_A, stored["body"])
-        self.assertNotIn("https://forge", stored["body"])
-        # Identical facts are a read-only no-op: same id, no rev bump.
-        repeat = vcs.record_proposal_state(
-            self.project, proposal(url="https://forge/x/rerun/9"))
-        self.assertEqual(repeat, {"id": first["id"], "changed": False})
-        self.assertEqual(self.project.insights.read(first["id"])["rev"],
-                         stored["rev"])
-        # Head movement revises under the stable id with a rev bump.
-        moved = vcs.record_proposal_state(
-            self.project, proposal(head_sha=SHA_B))
-        self.assertEqual(moved["id"], first["id"])
-        self.assertTrue(moved["changed"])
-        self.assertEqual(self.project.insights.read(first["id"])["rev"],
-                         stored["rev"] + 1)
-        # Terminal state change revises too, keeping one record per proposal.
-        merged = vcs.record_proposal_state(
-            self.project, proposal(head_sha=SHA_B, state="merged"))
-        self.assertEqual(merged["id"], first["id"])
-        self.assertIn("merged", self.project.insights.read(first["id"])["title"])
-        pending = [i for i in self.project.insights.list(pending=True, limit=1000)
-                   if i["id"] == first["id"]]
-        self.assertEqual(len(pending), 1)
-
     def test_record_rejects_bad_proposals(self):
         with self.assertRaises(Denied):
             vcs.record_proposal_state(self.project, dict(proposal(), id=""))
@@ -232,20 +203,6 @@ class ProposalSchemaV2Tests(Fixture):
             row["head"] = head
             with self.assertRaises(Denied, msg=json.dumps(head)):
                 vcs.parse_proposals({"proposals": [row]})
-
-    def test_deleted_fork_does_not_block_open_proposals(self):
-        payload = {"proposals": [tombstoned_proposal(), proposal()],
-                   "complete": True}
-        config = dataclasses.replace(
-            self.config, vcs=adapter_settings(proposals_code(payload)))
-        out = vcs.read_via(config.vcs, "proposals", {})
-        self.assertEqual(len(out["proposals"]), 2)
-        self.assertTrue(out["complete"])
-        # The open row still records under its stable id.
-        recorded = vcs.record_proposal_state(self.project, out["proposals"][1])
-        self.assertTrue(recorded["changed"])
-        stored = self.project.insights.read(recorded["id"])
-        self.assertIn(SHA_A, stored["body"])
 
     def test_reviews_are_revision_bound(self):
         config = dataclasses.replace(
@@ -379,41 +336,6 @@ class ProposalPollingTests(Fixture):
         self.assertTrue(event["ok"])
         self.assertEqual(calls, [("proposals", {})])
 
-    def test_complete_observations_dedupe_and_revise_on_changed_facts(self):
-        config = self._config()
-        state = {}
-        rows = [proposal(), proposal(), proposal(head_sha=SHA_B)]
-        calls = []
-
-        def reader(settings, op, params):
-            calls.append((op, params))
-            return {"proposals": [rows.pop(0)], "complete": True,
-                    "cursor": None}
-
-        first = poll_proposals(config, self.project, state, now=0,
-                                interval=10, reader=reader)
-        self.assertEqual(first["event"], "proposal_poll")
-        self.assertTrue(first["ok"])
-        self.assertEqual(first["observed"], 1)
-        self.assertEqual(first["changed"], 1)
-        insight_id = vcs.proposal_insight_id("forge:owner/repo#1")
-        initial = self.project.insights.read(insight_id)
-        self.assertEqual(initial["source"], "vcs")
-
-        duplicate = poll_proposals(config, self.project, state, now=10,
-                                   interval=10, reader=reader)
-        self.assertEqual(duplicate["changed"], 0)
-        self.assertEqual(self.project.insights.read(insight_id)["rev"],
-                         initial["rev"])
-
-        revised = poll_proposals(config, self.project, state, now=20,
-                                 interval=10, reader=reader)
-        self.assertEqual(revised["changed"], 1)
-        current = self.project.insights.read(insight_id)
-        self.assertEqual(current["rev"], initial["rev"] + 1)
-        self.assertIn(SHA_B, current["body"])
-        self.assertEqual(len(calls), 3)
-
     def test_complete_inventory_survives_restart_and_pages_without_event_exposure(self):
         row = proposal()
         title, body = vcs.proposal_facts(row, enumeration_complete=True)
@@ -446,118 +368,6 @@ class ProposalPollingTests(Fixture):
             refresh_poll_state(state, shared)
             self.assertEqual(state["proposal_complete_facts"],
                              shared.get("proposal_complete_facts") if isinstance(shared, dict) else None)
-
-    def test_large_valid_checks_are_bounded_and_omitted_changes_revise(self):
-        row = proposal()
-        row["head"] = {"repo": "r" * 256, "ref": "h" * 256, "sha": SHA_A}
-        row["base"] = {"repo": "r" * 256, "ref": "b" * 256, "sha": SHA_B}
-        row["reviews"] = [
-            {"reviewer": "\\" * 128, "verdict": "approved", "sha": SHA_A}
-            for _ in range(64)
-        ]
-        row["checks"] = [
-            {"check": f"{index:04d}" + "n" * 252,
-             "state": "s" * 64, "sha": SHA_A}
-            for index in range(500)
-        ]
-        row["checks"][-1]["state"] = "failure"
-        self.assertLess(len(canonical(row)), 524288)
-        changed = {**row, "checks": [dict(check) for check in row["checks"]]}
-        changed["checks"][-1]["state"] = "x" * 64
-        responses = [row, changed]
-        config = self._config()
-        state = {}
-
-        def reader(settings, op, params):
-            return {"proposals": [responses.pop(0)], "complete": True}
-
-        first = poll_proposals(config, self.project, state, now=0.0,
-                               interval=10.0, reader=reader)
-        self.assertTrue(first["ok"], first)
-        self.assertEqual(first["recorded"], 1)
-        insight_id = vcs.proposal_insight_id(row["id"])
-        stored = self.project.insights.read(insight_id)
-        body = stored["body"]
-        self.assertIn("checks: total=500 sha256=", body)
-        self.assertIn("omitted=", body)
-        self.assertIn(f"check: {row['checks'][-1]['check']} failure {SHA_A}", body)
-        self.assertLessEqual(len(canonical({
-            "id": stored["id"], "source": stored["source"],
-            "title": stored["title"], "body": body,
-            "base_snapshot": stored["base_snapshot"],
-            "run": stored["run"], "origin": stored["origin"],
-        })), PREVIEW_BYTES)
-
-        second = poll_proposals(config, self.project, state, now=10.0,
-                                interval=10.0, reader=reader)
-        self.assertTrue(second["ok"], second)
-        self.assertEqual(second["changed"], 1)
-        updated = self.project.insights.read(insight_id)
-        self.assertEqual(updated["rev"], stored["rev"] + 1)
-        self.assertNotEqual(updated["body"], body)
-
-    def test_partial_page_cursor_persists_and_resumes_across_daemon_state(self):
-        open_row = json.dumps(proposal())
-        merged_row = json.dumps(proposal(state="merged"))
-        code = f'''import json, sys
-request = json.load(sys.stdin)
-open_row = json.loads({open_row!r})
-merged_row = json.loads({merged_row!r})
-if request["op"] == "fetch":
-    response = {{"refs": {{}}}}
-elif request["op"] == "status":
-    response = {{"checks": []}}
-elif request["op"] == "proposals":
-    if request.get("cursor") == "next-page-token":
-        response = {{"proposals": [merged_row], "complete": True}}
-    else:
-        response = {{"proposals": [open_row], "complete": False,
-                    "cursor": "next-page-token"}}
-else:
-    raise SystemExit("unexpected operation")
-print(json.dumps(response))
-'''
-        config = dataclasses.replace(
-            self.config,
-            vcs={**self.config.vcs, "command": [sys.executable, "-c", code],
-                 "poll_enabled": True, "poll_proposals_enabled": True})
-        first_state = {"last_fetch": None}
-        first_events = poll_project_vcs(config, self.project, first_state,
-                                        now=100.0, interval=15.0)
-        first_proposal = next(e for e in first_events
-                              if e["event"] == "proposal_poll")
-        self.assertTrue(first_proposal["ok"])
-        self.assertTrue(first_proposal["has_cursor"])
-        shared = json.loads((self.project.root / "vcs-poll.json").read_text())
-        self.assertEqual(shared["proposal_cursor"], "next-page-token")
-
-        # A new in-memory daemon state must resume from the persisted token.
-        second_state = {"last_fetch": None}
-        second_events = poll_project_vcs(config, self.project, second_state,
-                                         now=115.0, interval=15.0)
-        second_proposal = next(e for e in second_events
-                               if e["event"] == "proposal_poll")
-        self.assertTrue(second_proposal["ok"])
-        self.assertFalse(second_proposal["has_cursor"])
-        stored = self.project.insights.read(
-            vcs.proposal_insight_id("forge:owner/repo#1"))
-        self.assertIn("Proposal forge:owner/repo#1 merged", stored["title"])
-        shared = json.loads((self.project.root / "vcs-poll.json").read_text())
-        self.assertIsNone(shared["proposal_cursor"])
-
-    def test_missing_proposal_row_does_not_change_open_observation(self):
-        existing = vcs.record_proposal_state(self.project, proposal())
-        before = self.project.insights.read(existing["id"])
-        event = poll_proposals(
-            self._config(), self.project, {}, now=1.0, interval=15.0,
-            reader=lambda settings, op, params: {
-                "proposals": [], "complete": True, "cursor": None})
-        self.assertTrue(event["ok"])
-        after = self.project.insights.read(existing["id"])
-        self.assertEqual(after["title"], before["title"])
-        self.assertEqual(after["body"], before["body"])
-        self.assertEqual(after["rev"], before["rev"])
-        self.assertIn("open", after["title"])
 
     def test_non_advancing_cursor_is_visible_and_preserves_cursor(self):
         state = {"proposal_cursor": "same-token"}
@@ -650,47 +460,6 @@ print(json.dumps(response))
         event = next(item for item in events if item["event"] == "proposal_poll")
         self.assertFalse(event["ok"])
         self.assertIn("Could not persist proposal poll state", event["error"])
-
-    def test_partial_recording_failure_retries_and_deduplicates_first_row(self):
-        state = {"proposal_cursor": "input-token"}
-        first = proposal()
-        first["id"] = "forge:owner/repo#first"
-        second = proposal(head_sha=SHA_B)
-        second["id"] = "forge:owner/repo#second"
-        calls = []
-        original = vcs.record_proposal_state
-        fail_second = True
-
-        def record(project, row, *, origin, enumeration_complete=False):
-            nonlocal fail_second
-            calls.append(row["id"])
-            if row["id"].endswith("#second") and fail_second:
-                fail_second = False
-                raise OSError("second record failed")
-            return original(project, row, origin=origin, enumeration_complete=enumeration_complete)
-
-        def reader(settings, op, params):
-            return {"proposals": [first, second], "complete": False,
-                    "cursor": "next-token"}
-
-        with mock.patch("mizu.vcs.record_proposal_state", side_effect=record):
-            failed = poll_proposals(self._config(), self.project, state,
-                                    now=1.0, interval=15.0, reader=reader)
-            self.assertFalse(failed["ok"])
-            self.assertEqual(failed["recorded"], 1)
-            self.assertEqual(state["proposal_cursor"], "input-token")
-            retried = poll_proposals(self._config(), self.project, state,
-                                     now=20.0, interval=15.0, reader=reader)
-
-        self.assertTrue(retried["ok"], retried)
-        self.assertEqual(retried["recorded"], 2)
-        self.assertEqual(retried["changed"], 1)
-        self.assertEqual(state["proposal_cursor"], "next-token")
-        self.assertEqual(calls, [first["id"], second["id"], first["id"], second["id"]])
-        self.assertIsNotNone(self.project.insights.read(
-            vcs.proposal_insight_id(first["id"])))
-        self.assertIsNotNone(self.project.insights.read(
-            vcs.proposal_insight_id(second["id"])))
 
 
 if __name__ == "__main__":

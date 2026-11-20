@@ -10,13 +10,9 @@ role holds no edit grant. The writable workspace is required plumbing for
 edit grant: the capability list holds no source-editing tool. Never push, open a PR, or publish anything without
 a recorded human `GO <branch>` approval bound to the current `code_digest`.
 
-Publication needs the approval first: the operator records an insight titled
-exactly `GO <branch>` with a `digest:` line for the current tree and accepts
-it through the operator channel. A missing, stale, undecided, or refused
-approval fails closed; do not retry with a different branch or digest. CI
-failures arrive as deduplicated insights; read them with `insights` and the
-latest status with `vcs_read`; only `failure` states create insights. Passes
-create no insights, but retained bounded success evidence can annotate a
-matching red check as nondeterministic. Do not submit proposals or record
-decisions; this role never holds `submit_insight` or `decide` so it cannot
-approve its own push.
+Publication needs the approval first: the operator writes a message holding
+the line `GO <branch>` and a `digest:` line for the current tree to the
+configured approval queue. Only a message the kernel bound to the operator
+approves; a missing or stale approval fails closed; do not retry with a
+different branch or digest. Read CI status with `vcs_read`; retained bounded
+success evidence can annotate a matching red check as nondeterministic.

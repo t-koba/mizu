@@ -26,8 +26,7 @@ Record the actual result and evidence, not only intentions. Do not manufacture
 work. When state is requested, summarize the result, unresolved questions, and
 next useful action; refer to stored records instead of copying full reports.
 
-For delivered `decision_events`, terminal `work_item_events`, structured insight
-`wait_events` and dependency `obligations`, select only the
+For delivered terminal `work_item_events` and CI `wait_events`, select only the
 rows you handled by including their host-issued `ack_token` values in
 `finish.ack_events`. You may select tokens from these sources in one unique list.
 Omitted or empty selection acknowledges none; finishing, a summary, an outcome,
@@ -38,5 +37,15 @@ rows also appear in `wait_events` and always carry identity-bound `ack_token`s;
 only exact explicitly selected tokens are receipted after successful completion.
 Finishing alone never handles CI rows, and legacy per-item auto-ack files are
 not imported. CI/status and check jobs
-do not use this token contract. Acknowledging a dependency observation records
-handling only: it neither assigns work nor satisfies the dependency.
+do not use this token contract.
+
+## Messages
+
+The unit opening's `queues` lists, for each queue you may read, the due
+messages you have not acknowledged: their count and the newest of them. Read
+them with `queue_read` and record what you read with `queue_ack`; acknowledging
+answers or accepts nothing. Write a `proposals` message when you learned
+something about the product that the worker does not know yet: what you
+observed, the evidence and why it matters. Ask the operator through
+`questions` only what the operator alone can settle, with the default you
+follow meanwhile; an answer arrives in `answers` referring to the question.

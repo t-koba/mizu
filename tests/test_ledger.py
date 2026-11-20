@@ -24,13 +24,8 @@ def index_rows(root):
     """The complete derived contents of an index file, for equality checks."""
     with contextlib.closing(sqlite3.connect(Path(root) / ledger_module.NAME)) as db, db:
         items = db.execute(f"SELECT {', '.join(COLUMNS)} FROM items ORDER BY id").fetchall()
-        unseeded = db.execute("SELECT event_id FROM unseeded ORDER BY event_id").fetchall()
-        legacy_drops = db.execute("SELECT event_id FROM legacy_drops ORDER BY event_id").fetchall()
         intents = db.execute("SELECT key FROM intents").fetchall()
-        insights = db.execute("SELECT * FROM insights ORDER BY id").fetchall() if db.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='insights'").fetchone() else []
-        decisions = db.execute("SELECT * FROM decisions ORDER BY insight_id").fetchall() if insights else []
-    return items, unseeded, intents, insights, decisions, legacy_drops
+    return items, intents
 
 
 class LedgerPathTests(unittest.TestCase):
@@ -108,17 +103,15 @@ class LedgerTests(Fixture):
                                  actor="worker")["record"]["work_item"]
 
     def decided(self, title="Decided"):
-        proposal = self.project.insights.submit(source="worker", title=title, body="Body",
-                                                base_snapshot=None)
-        return self.project.insights.decide(proposal["id"], "accept", "reviewed", "", "run-1",
-                                            expected_rev=1)["work_item"]
+        self.counter += 1
+        return self.store.create(idempotency_key=f"decided-{self.counter}", title=title,
+                                 actor="reviewer")["record"]["work_item"]
 
     def rebuilt(self):
         """Rows of a fresh index built from the files, in a separate store."""
         expected = index_rows(self.project.root)
         forget_ledger(self.project.root)
         WorkItems(self.project.root, self.project.snapshots, self.project.ledger).count_open()
-        self.project.insights.unresolved_counts([])
         return expected, index_rows(self.project.root)
 
     def test_rebuild_equals_incremental_index_on_random_history(self):
@@ -143,32 +136,8 @@ class LedgerTests(Fixture):
                 pass  # Invalid random transitions write nothing.
         incremental, rebuilt = self.rebuilt()
         self.assertEqual(incremental, rebuilt)
-        self.assertEqual(incremental[2], [])
+        self.assertEqual(incremental[1], [])
         self.assertTrue(self.store.audit()["consistent"])
-
-    def test_retirement_and_legacy_rows_match_rebuild(self):
-        item = self.item()
-        template = self.store.transition(item["id"], expected_rev=1, status="doing", actor="worker")
-        directory = self.project.root / "work-items" / item["id"]
-        previous = template
-        for rev in range(3, MAX_REVISIONS + 1):
-            status = "open" if previous["status"] == "doing" else "doing"
-            previous = {**template, "rev": rev, "status": status,
-                        "holder": "worker" if status == "doing" else None,
-                        "transition": {"from": previous["status"], "to": status}}
-            write_json(directory / f"{rev}.json", previous)
-        forget_ledger(self.project.root)
-        self.store.transition(item["id"], expected_rev=MAX_REVISIONS, status="dropped",
-                              actor="worker", reason="Exhausted")
-        self.assertEqual(self.store.get(item["id"])["status"], "dropped")
-        legacy = {"id": "a" * 32, "action": "accept", "reason": "old", "revisit": "",
-                  "run": "run-1", "created_at": "2026-01-01T00:00:00+00:00", "rev": 1}
-        self.project.insights.submit(source="worker", title="Old", body="Body", base_snapshot=None)
-        write_json(self.project.root / "decision-history" / f"{'b' * 32}.json", legacy)
-        forget_ledger(self.project.root)
-        self.assertEqual(self.store.page_open()["unseeded_decisions"], 1)
-        incremental, rebuilt = self.rebuilt()
-        self.assertEqual(incremental, rebuilt)
 
     def test_missing_outdated_and_partial_index_rebuild(self):
         item = self.item()
@@ -269,12 +238,12 @@ project.work_items.transition({item_id!r}, expected_rev={rev - 1}, status="doing
         item = self.item()
         before = self.store.page_open_readonly()
         self.crash_after_commit(item["id"], 2)
-        self.assertEqual(len(index_rows(self.project.root)[2]), 1)
+        self.assertEqual(len(index_rows(self.project.root)[1]), 1)
         # A reader replays the announced item privately and sees the commit.
         page = self.store.page_open_readonly()
         self.assertNotEqual(page, before)
         self.assertEqual([row["status"] for row in page["items"]], ["doing"])
-        self.assertEqual(len(index_rows(self.project.root)[2]), 1)
+        self.assertEqual(len(index_rows(self.project.root)[1]), 1)
         # The next locked use repairs exactly that item in the index itself.
         # Elapsed-age fields are recomputed at read time and can tick between pages.
         dynamic_fields = {"doing_age_seconds", "doing_stale", "blocked_age_seconds"}
@@ -286,7 +255,7 @@ project.work_items.transition({item_id!r}, expected_rev={rev - 1}, status="doing
         repaired = self.store.page_open()["items"]
         self.assertEqual(stable_rows(repaired), stable_rows(page["items"]))
         incremental, rebuilt = self.rebuilt()
-        self.assertEqual(incremental[2], [])
+        self.assertEqual(incremental[1], [])
         self.assertEqual(incremental, rebuilt)
 
     def test_failed_write_leaves_index_equal_to_files(self):
@@ -294,7 +263,7 @@ project.work_items.transition({item_id!r}, expected_rev={rev - 1}, status="doing
         with patch("mizu.work_items.write_json", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 self.store.transition(item["id"], expected_rev=1, status="doing", actor="worker")
-        self.assertEqual(index_rows(self.project.root)[2], [])
+        self.assertEqual(index_rows(self.project.root)[1], [])
         self.assertEqual(self.store.get(item["id"])["rev"], 1)
 
     def test_concurrent_writers_and_readers_observe_only_committed_states(self):
@@ -359,7 +328,7 @@ for _ in range(12):
             "count_open": self.store.count_open, "count_open_readonly": self.store.count_open_readonly,
             "get": lambda: self.store.get(item["id"]), "current": lambda: self.store.current(item["id"]),
             "current_items": self.store.current_items, "projection": lambda: self.store.projection(item["id"]),
-            "unseeded_decisions": self.store.unseeded_decisions,
+            "creators": self.store.creators,
             "closed_items": lambda: self.store.closed_items(limit=10),
         }
         refuse = AssertionError("current-state read touched history")
@@ -370,60 +339,6 @@ for _ in range(12):
             for name, reader in readers.items():
                 with self.subTest(reader=name):
                     reader()
-
-    def test_audit_detects_each_corruption_class_and_divergence(self):
-        item = self.item()
-        doing = self.store.transition(item["id"], expected_rev=1, status="doing", actor="worker")
-        decided = self.decided()
-        self.assertEqual(self.store.audit(), {
-            "items": 2, "unseeded_decisions": 0, "index": "complete", "consistent": True,
-            "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
-            "divergent_count": 0, "divergent_unseeded": [], "divergent_unseeded_count": 0,
-            "divergent_drops": [], "divergent_drop_count": 0,
-            "insights": {"insights": 1, "decisions": 1, "index": "complete", "consistent": True,
-                         "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
-                         "divergent_count": 0},
-            "check_jobs": {"jobs": 0, "index": "outdated", "consistent": True, "repaired": False,
-                           "corrupt": [], "corrupt_count": 0, "divergent": [], "divergent_count": 0}})
-        revision = self.project.root / "work-items" / item["id"] / "2.json"
-        create = self.project.root / "work-items" / item["id"] / "create.json"
-        seed = self.project.root / "decision-history" / f"{decided['id'][3:]}.json"
-        original = {path: path.read_bytes() for path in (revision, create, seed)}
-        corruptions = {
-            "revision fields": (revision, lambda: write_json(revision, {**doing, "holder": "other"})),
-            "malformed revision": (revision, lambda: revision.write_text("{")),
-            "gap": (revision, lambda: revision.rename(revision.with_name("3.json"))),
-            "seed binding": (create, lambda: create.write_text(create.read_text().replace(
-                '"Work"', '"Forged"'))),
-        }
-        for name, (path, corrupt) in corruptions.items():
-            with self.subTest(corruption=name):
-                corrupt()
-                result = self.store.audit(repair=True)
-                self.assertFalse(result["consistent"])
-                self.assertFalse(result["repaired"])
-                self.assertEqual(result["corrupt_count"], 1)
-                # A rebuild of the index fails closed on the same history.
-                forget_ledger(self.project.root)
-                with self.assertRaises(Denied):
-                    self.store.page_open_readonly()
-                for leftover in path.parent.glob("3.json"):
-                    leftover.unlink()
-                path.write_bytes(original[path])
-                self.store.page_open()
-                self.assertTrue(self.store.audit()["consistent"])
-        # A self-consistent rewrite of a seed passes validation but not the comparison.
-        seed.write_text(seed.read_text().replace('"Decided"', '"Forged"', 1))
-        result = self.store.audit()
-        self.assertEqual((result["divergent"], result["corrupt_count"]), ([decided["id"]], 0))
-        seed.write_bytes(original[seed])
-        # The index alone disagreeing with valid history is divergence, repaired on request.
-        with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
-            db.execute("UPDATE items SET status='done' WHERE id=?", (item["id"],))
-        result = self.store.audit()
-        self.assertEqual((result["divergent"], result["consistent"]), ([item["id"]], False))
-        self.assertTrue(self.store.audit(repair=True)["repaired"])
-        self.assertTrue(self.store.audit()["consistent"])
 
     def test_audit_validates_delivery_manifests_strictly(self):
         item = self.item()

@@ -57,6 +57,7 @@ def main():
         configure(config_file, None)
         config = load(config_file)
         config = dataclasses.replace(config, data=root/'projects',
+            editor=dataclasses.replace(config.editor, queue='proposals'),
             limits=dataclasses.replace(config.limits, free_disk_mb=0,
                 snapshot_files=max(args.files, config.limits.snapshot_files),
                 snapshot_bytes=max(args.files*args.bytes_per_file, config.limits.snapshot_bytes)))
@@ -65,11 +66,7 @@ def main():
         stamp = '2026-10-03T00:00:00+00:00'
         # Dataset setup is excluded from measurements; all records are synthetic.
         for n in range(args.records):
-            item_id=f'item-{n:05d}'
-            project.insights.submit(source='benchmark',title='synthetic',body='x'*128,
-                                    base_snapshot=None,insight_id=item_id)
-            project.insights.decide(item_id, 'reject', 'synthetic', 'never', 'benchmark',
-                                    expected_rev=1)
+            project.kernel_queues.append('proposals', {'title':'synthetic','body':'x'*128}, 'operator')
             write_json(project.root/'runs'/f'run-{n:05d}'/'result.json',
                        {'run':f'run-{n:05d}','finished_at':stamp,'status':'completed',
                         'model':{'engine':'codex','provider':'synthetic','model':'synthetic',
@@ -79,15 +76,15 @@ def main():
             snapshots.publish(snap)
         _, history = timed(lambda:snapshots.history(snap['id']))
         _, difference = timed(lambda:snapshots.changes(snap['id']))
-        _, insights = timed(lambda:project.insights.projection(limit=30))
+        _, queue_facts = timed(lambda:project.kernel_queues.pending('proposals','role:worker',newest=3))
         _, usage = timed(lambda:summarize(project))
-        _, generation = timed(project.insights.generation)
-        _, gc = timed(project.insights.gc_decided)
+        _, queue_read = timed(lambda:project.kernel_queues.read('proposals','role:worker'))
         for n in range(args.records):
-            write_json(project.root/'spool/editor'/f'spool-{n:05d}.json',{'title':'synthetic','body':'synthetic','base_snapshot':None})
+            write_json(project.root/'spool/editor'/f'{n:032x}.json',{'title':'synthetic','body':'synthetic'})
             write_json(project.root/'artifacts'/f'artifact-{n:05d}'/'evidence.json',{'published_at':stamp})
             path=project.root/'runs'/f'run-{n:05d}'/'input';path.mkdir();(path/'temporary').write_bytes(b'x')
-        _, ingest = timed(project.insights.ingest_editor)
+        from mizu.editor import ingest as editor_ingest
+        _, ingest = timed(lambda:editor_ingest(project))
         inventory_files, inventory = timed(lambda:list(source_files(ROOT)))
         budget=Budget(root/'budget',daily=1)
         import datetime as dt
@@ -102,11 +99,11 @@ def main():
         _, restored = timed(lambda:restore(config,'restored',archive))
         receipt = {'kind':'local-filesystem-and-evidence-benchmark',
                           'files':args.files,'bytes_per_file':args.bytes_per_file,
-                          'records_per_insight_decision_run':args.records,'spool_artifact_budget_records':args.records,'history_records':min(args.records,128),
+                          'queue_messages':args.records,'spool_artifact_budget_records':args.records,'history_records':min(args.records,128),
                           'measurements':{'initial_capture':initial,'unchanged_capture':unchanged,
                                           'materialize':materialize,'history':history,'diff':difference,
-                                          'insight_projection':insights,'usage_scan':usage,
-                                          'backup':archived,'restore':restored,'insight_generation':generation,'insight_gc':gc,
+                                          'queue_opening_facts':queue_facts,'usage_scan':usage,
+                                          'backup':archived,'restore':restored,'queue_read':queue_read,
                                           'editor_ingest':ingest,'source_inventory':inventory,'budget_gc':budget_gc,'prune_dry_run':pruning},
                           'objects_after_two_captures':objects,'public_source_files':len(inventory_files),
                           'note':'Synthetic local data; Python allocation peaks, not process RSS. No provider/container/competitor claim.'}

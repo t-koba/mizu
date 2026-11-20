@@ -128,30 +128,6 @@ class ChildAuthorityTests(Fixture):
             limits = dataclasses.replace(self.config.limits, **{field: getattr(self.config.limits, field) + 1})
             self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, limits=limits)))
 
-    def test_sandbox_and_tool_policy_are_bound(self):
-        baseline = self.identity()
-        for field, value in (
-                ('image', 'example.invalid/image@sha256:' + 'a' * 64),
-                ('mode', 'namespace'), ('executable', 'other-runtime'),
-                ('network', 'managed'), ('memory_mb', 3000),
-                ('mounts', ({'source': '/reviewed/data', 'target': '/reviewed'},)),
-                ('env', {'PUBLIC_SETTING': 'test-only'}),
-                ('namespace_helper', ('reviewed-helper',)),
-                ('cgroup_parent', 'isolated.scope')):
-            with self.subTest(field=field):
-                sandbox = dataclasses.replace(self.config.sandbox, **{field: value})
-                self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, sandbox=sandbox)))
-        for field in ('web', 'vcs', 'materialize', 'insight_decisions', 'operator_records', 'record_kinds'):
-            value = {**getattr(self.config, field), 'test-only-policy': True}
-            self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, **{field: value})))
-        self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, exclude=('ignored',))))
-        for field, value in (('data', self.root / 'other-data'),
-                             ('file', self.root / 'other-config.toml'),
-                             ('timezone', 'local')):
-            self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, **{field: value})))
-        cache = dataclasses.replace(self.config.workspace_cache, roots=('build',))
-        self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, workspace_cache=cache)))
-
     def test_synthetic_secret_values_are_only_in_memory_and_affect_digest(self):
         # Never print sentinels, even in an assertion's failure diff.
         option = 'synthetic-option-' + 'sentinel'

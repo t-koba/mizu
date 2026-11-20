@@ -24,7 +24,7 @@ PROPOSAL_ID = "forge:owner/repo#1"
 
 def adapter_settings(code, timeout=5, maximum=524288):
     return {"command": [sys.executable, "-c", code],
-            "timeout_seconds": timeout, "max_bytes": maximum}
+            "timeout_seconds": timeout, "max_bytes": maximum, "approval_queue": "proposals"}
 
 
 def dispose_code(payload):
@@ -89,12 +89,8 @@ def approve(fixture, branch, digest, target=None, proposal_id=None,
         body += f"sha: {sha}\n"
     if base is not None:
         body += f"base: {base}\n"
-    record = fixture.project.insights.submit(
-        source="operator", title=f"GO {branch}", body=body,
-        base_snapshot=None, run=None)
-    fixture.project.insights.decide(record["id"], "accept", "reviewed", "", "operator",
-                                      expected_rev=record["rev"])
-    return record
+    return fixture.project.kernel_queues.append(
+        "proposals", {"title": f"GO {branch}", "body": body}, "operator")
 
 
 class VcsDisposeTests(Fixture):
@@ -263,40 +259,6 @@ class VcsDisposeTests(Fixture):
 
 
 class VcsDisposeRoleTests(Fixture):
-    def test_dispose_role_must_not_hold_decide(self):
-        text = self.file.read_text()
-        needle = '[roles.maintainer]'
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        self.assertIn('"decide"', segment)
-        patched = text.replace(
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]',
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish", "vcs_dispose"]',
-            1)
-        if patched == text:
-            self.skipTest("maintainer capability line shape changed")
-        path = self.root / "config/dispose-decide.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        with self.assertRaisesRegex(ConfigError, "self-approval"):
-            load(path)
-
-    def test_dispose_role_may_submit_insights(self):
-        text = self.file.read_text()
-        needle = '[roles.maintainer]'
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        patched = text.replace(
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]',
-            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "submit_insight", "consult", "finish", "vcs_dispose"]',
-            1)
-        if patched == text:
-            self.skipTest("maintainer capability line shape changed")
-        path = self.root / "config/dispose-submit.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        config = load(path)
-        self.assertIn("vcs_dispose", config.roles["maintainer"].capabilities)
-        self.assertIn("submit_insight", config.roles["maintainer"].capabilities)
-
     def test_dispose_grants_load(self):
         text = self.file.read_text()
         self.assertIn("[vcs]", text)

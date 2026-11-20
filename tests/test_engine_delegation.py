@@ -54,22 +54,6 @@ class EngineDelegationBoundaryTests(Fixture):
         runtime_check("helper", dataclasses.replace(base, capabilities=("files", "read")))
         runtime_check("helper", dataclasses.replace(base, capabilities=("files", "read", "finish")))
 
-    def test_moved_delegate_role_uses_the_moved_gate(self):
-        base = self.config.roles["searcher"]
-        forbidden = dataclasses.replace(base, name="helper", capabilities=("files", "decide", "finish"))
-        engine = Engine(dataclasses.replace(
-            self.config, roles={**self.config.roles, "helper": forbidden}))
-        with self.assertRaises(ConfigError):
-            engine._delegate_role(base, "helper")
-
-        clean = dataclasses.replace(base, name="helper", capabilities=("files", "read", "finish"))
-        engine = Engine(dataclasses.replace(
-            self.config, roles={**self.config.roles, "helper": clean}))
-        child = engine._delegate_role(base, "helper")
-        self.assertEqual(child.name, "helper")
-        self.assertIn("finish", child.capabilities)
-        self.assertFalse(set(child.capabilities) & GATE_FORBIDDEN)
-
     def test_admission_mixin_stays_first_in_engine_mro(self):
         self.assertTrue(issubclass(Engine, EngineDelegationMixin))
         self.assertTrue(issubclass(Engine, EngineAdmissionMixin))

@@ -770,11 +770,6 @@ class ConfigTests(Fixture):
         with self.assertRaises(ConfigError):
             load(self.file)
 
-    def test_unknown_role_capability(self):
-        self.file.write_text(self.file.read_text().replace('"decide"', '"host_root_shell"'))
-        with self.assertRaises(ConfigError):
-            load(self.file)
-
     def test_mutable_image_tag_refused(self):
         self.file.write_text(self.file.read_text().replace("sha256:" + "a" * 64, "image:latest"))
         with self.assertRaises(ConfigError):

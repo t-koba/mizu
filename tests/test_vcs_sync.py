@@ -66,26 +66,6 @@ class VcsSyncTests(Fixture):
             ctx.handle("sync", {})
         self.assertEqual(vcs.list_refs(self.project.root), [])
 
-    def test_sync_on_read_role_refused_at_load(self):
-        text = self.file.read_text()
-        # reviewer is read-only; granting sync must fail validation.
-        needle = '[roles.reviewer]'
-        self.assertIn(needle, text)
-        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
-        self.assertIn('"submit_insight"', segment)
-        patched = text.replace(
-            'capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]',
-            'capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish", "sync"]',
-            1)
-        # Only proceed if the exact reviewer line matched; otherwise edit explicitly.
-        if patched == text:
-            self.skipTest("reviewer capability line shape changed")
-        path = self.root / "config/sync-read.toml"
-        path.write_text(patched)
-        from mizu.config import load
-        with self.assertRaises(ConfigError):
-            load(path)
-
     def test_sync_unconfigured_refused(self):
         worker = self.config.roles["worker"]
         synced = dataclasses.replace(

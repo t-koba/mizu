@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkSmokeTests(unittest.TestCase):
-    def test_minimal_benchmark_restores_synthetic_decisions(self):
+    def test_minimal_benchmark_restores_synthetic_records(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "benchmark.py"),
              "--files", "1", "--bytes-per-file", "128", "--records", "10"],

@@ -50,43 +50,6 @@ class EngineDispatchOwnerTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "Role is not enabled"):
             engine.preview(project, "absent")
 
-    def test_event_trigger_without_relevant_facts_is_skipped(self):
-        snapshot = {"id": "snapshot", "code_digest": "a" * 64, "goal_digest": "b" * 64}
-        role = SimpleNamespace(
-            capabilities=(), on_change=False, decision_events=(), decision_sources="own",
-            work_item_events=(), work_item_sources="own", ci_wake=False, scheduled_inputs=False,
-            daemon=False, interval_seconds=0, calendar="", workspace="read",
-            event_wakes=EVENT_WAKE_KINDS)
-        project = SimpleNamespace(
-            work_items=object(), control=lambda: {},
-            config=SimpleNamespace(limits=SimpleNamespace(wait_events_limit=10,
-                                                           work_item_events_limit=20)),
-            snapshots=SimpleNamespace(get=lambda: snapshot),
-            insights=SimpleNamespace(due_waits=lambda *a, **k: [],
-                                     pending_obligations=lambda *a, **k: []))
-        engine = Engine(SimpleNamespace(roles={"reader": role}))
-        record_state = [{"wake_pending": False, "events": []}]
-        with (patch("mizu.engine_dispatch._role_cursor", return_value={}),
-              patch("mizu.engine_dispatch._on_change_observed", return_value=False),
-              patch("mizu.engine_dispatch._record_delivery") as delivery,
-              patch("mizu.engine_dispatch._decision_delivery_state",
-                    return_value={"events": [], "diagnostics": []}),
-              patch("mizu.engine_dispatch._reconcile_work_item_waits", return_value=(False, False)),
-              patch("mizu.engine_dispatch.work_item_events.pending", return_value=[]),
-              patch("mizu.engine_dispatch.work_item_events.delivery", return_value={"events": []}),
-              patch("mizu.engine_dispatch.check_jobs.wake_ready", return_value=False),
-              patch("mizu.engine_dispatch.ci_waits.delivery", return_value=([], [])),
-              patch("mizu.engine_dispatch.proposal_waits.delivery", return_value=([], [])),
-              patch("mizu.engine_dispatch._ci_due_for", return_value=[]),
-              patch("mizu.engine_dispatch._ci_due_for_with_facts", return_value=([], [])),
-              patch("mizu.engine_dispatch.selected_ci_failures_present", return_value=False),
-              patch("mizu.engine_dispatch._ready_work_observation", return_value=(False, False, False)),
-              patch("mizu.engine_dispatch._operator_woke", return_value=False)):
-            delivery.return_value.pending.return_value = record_state
-            state = engine._dispatch_state(project, "reader", role, event_trigger=True)
-        self.assertEqual(state["skip"], {"skipped": "no-event", "snapshot": "snapshot",
-                                         "code_digest": "a" * 64})
-
     def test_run_refuses_flat_records_and_delegates_with_the_same_keywords(self):
         limits = SimpleNamespace(lock_diagnostics="diagnostic-setting")
         config = SimpleNamespace(runtime_policy=contextlib.nullcontext, limits=limits)

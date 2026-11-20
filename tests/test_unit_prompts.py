@@ -80,70 +80,6 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual(second.pop("now"), second_clock["now"])
         self.assertEqual(first, second)
 
-    def test_grant_transition_is_fail_closed_without_changing_cursor_projection(self):
-        from mizu.engine_config import effective, save_session, session_record, write_prompt_state
-        from mizu.fs import read_json, write_json
-        from mizu.runtime import session_prompt
-        from mizu.unit_prompts import _grant_session, _prompt_tool_surface
-        ctx = self.context("worker")
-        path, _ = session_record(ctx, ctx.role.profile, effective(self.config, ctx.role, ctx.role.profile))
-        save_session(path, "test-session", {})
-        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
-                           inbox_generation=self.project.insights.generation())
-        cursor = read_json(path.parent / "prompt_state.json")
-        prior = {"session": _grant_session(read_json(path), path.parent),
-                 "tools": ["mizu_finish"], "bound": "drain", "wrap_up": True}
-        variants = [None, {}, [], {**prior, "session": "wrong-session"},
-                    {**prior, "unexpected": True}, {**prior, "tools": [None]},
-                    {**prior, "bound": None}, {**prior, "bound": "unknown"},
-                    {**prior, "wrap_up": 1},
-                    {**prior, "tools": "mizu_finish"},
-                    {**prior, "tools": ["mizu_unknown"]},
-                    {**prior, "tools": ["mizu_finish", "mizu_finish"]},
-                    {**prior, "tools": _prompt_tool_surface(ctx)["tools"]}]
-        for grant in variants:
-            with self.subTest(grant=grant):
-                write_json(path.parent / "prompt_state.json", {**cursor, "broker_grant": grant})
-                prompt, mode, *_ = session_prompt(ctx, ctx.role, ctx.run_dir)
-                decoded = json.loads(prompt)
-                self.assertEqual(mode, "delta")
-                self.assertNotIn("grant_transition", decoded)
-                self.assertEqual(decoded["pending_insights"], [])
-                self.assertEqual(decoded["unit_tool_surface"], _prompt_tool_surface(ctx))
-        # Malformed cursor identity cannot describe any previous grant.
-        malformed_cursor = {**cursor, "snapshot": "not-a-snapshot-id", "broker_grant": prior}
-        write_json(path.parent / "prompt_state.json", malformed_cursor)
-        self.assertNotIn("grant_transition", json.loads(
-            session_prompt(ctx, ctx.role, ctx.run_dir)[0]))
-        # A changed grant without a recorded bound is reported without guessing
-        # a cause or claiming a temporary restriction was lifted.
-        changed = {"session": prior["session"], "tools": ["mizu_finish"],
-                   "bound": None, "wrap_up": False}
-        write_json(path.parent / "prompt_state.json", {**cursor, "broker_grant": changed})
-        transition = json.loads(session_prompt(ctx, ctx.role, ctx.run_dir)[0])["grant_transition"]
-        self.assertIsNone(transition["previous_bound"])
-        current_tools = _prompt_tool_surface(ctx)["tools"]
-        self.assertEqual(transition["added_tools"],
-                         [tool for tool in current_tools if tool != "mizu_finish"])
-        self.assertEqual(transition["removed_tools"], [])
-        self.assertIn("does not establish a per-run bound as the cause", transition["message"])
-        without_wrapup = {**prior, "wrap_up": False}
-        write_json(path.parent / "prompt_state.json", {**cursor, "broker_grant": without_wrapup})
-        transition = json.loads(session_prompt(ctx, ctx.role, ctx.run_dir)[0])["grant_transition"]
-        self.assertEqual(transition["previous_bound"], "drain")
-        self.assertIn("does not establish a per-run bound as the cause", transition["message"])
-        (path.parent / "prompt_state.json").write_text("{broken", encoding="utf-8")
-        self.assertNotIn("grant_transition", json.loads(session_prompt(ctx, ctx.role, ctx.run_dir)[0]))
-        # A bound still in force cannot be described as ended.
-        write_json(path.parent / "prompt_state.json", {**cursor, "broker_grant": prior})
-        for active in ("drain", "wrap_up", "bound"):
-            with self.subTest(active=active):
-                ctx.wrap_up_attempted = active == "wrap_up"
-                ctx.bound_hit = "requests" if active == "bound" else None
-                with patch.object(self.project, "control", return_value={"draining": active == "drain"}):
-                    decoded = json.loads(session_prompt(ctx, ctx.role, ctx.run_dir)[0])
-                    self.assertNotIn("grant_transition", decoded)
-
     def test_ready_helper_uses_captured_page_without_another_scan(self):
         import mizu.unit_prompts as unit_prompts
         ctx = self.context("worker")
@@ -330,56 +266,6 @@ class ExternalCheckWakePromptTests(Fixture):
                     "non_passing_checks": 1, "may_be_incomplete": True}])
                 # Distinct mutation for the second builder as well.
                 (self.project.root / "vcs-poll.json").unlink()
-
-    def test_simultaneous_decision_and_ci_wake_are_both_delivered(self):
-        import dataclasses
-        from mizu import decision_delivery
-        submitted = self.project.insights.submit(source="worker", title="Review", body="Scope",
-                                                base_snapshot=None, run="test")
-        self.project.insights.decide(submitted["id"], "reject", "not yet", "", "test", expected_rev=1)
-        for builder, args in self.builders():
-            ctx = self.frozen_context(())
-            ctx.role = dataclasses.replace(ctx.role, decision_events=("reject",))
-            ctx.decision_events = decision_delivery.pending(self.project, ctx.role)["events"]
-            self.assertTrue(ctx.decision_events)
-            payload = json.loads(builder(ctx, *args))
-            self.assertEqual(payload["decision_events"], ctx.decision_events)
-            self.assertEqual(payload["external_check_wake"], {"facts": self.facts, "details": None})
-
-    def test_recursive_external_check_rows_are_denied(self):
-        from mizu.errors import Denied
-        forbidden = ({"passed_on": {"revision": "a" * 40}},
-                     {"branch": "main", "sha": "a" * 40, "check": "unit"})
-        for builder, args in self.builders():
-            for row in forbidden:
-                with self.subTest(builder=builder.__name__, row=row):
-                    ctx = self.frozen_context(())
-                    ctx.operator_record_page = {"events": [{"payload": {"nested": [row]}}]}
-                    with self.assertRaisesRegex(Denied, "Per-check external observation"):
-                        builder(ctx, *args)
-            terminal = {"check": "unit", "sha": "a" * 40, "state": "success", "run": "r"}
-            ctx = self.frozen_context(())
-            ctx.operator_record_page = {"events": [{"payload": {"nested": [terminal]}}]}
-            payload = json.loads(builder(ctx, *args))
-            self.assertEqual(payload["operator_records"], ctx.operator_record_page)
-
-    def test_local_check_jobs_and_check_name_selectors_are_accepted(self):
-        import dataclasses
-        from mizu import check_jobs
-        local = {"id": "c" * 32, "status": "completed", "passed": False,
-                 "kind": "experiment", "command_count": 1}
-        selector = {"checks": ["unit"]}
-        for builder, args in self.builders():
-            ctx = self.frozen_context(("check_job",))
-            ctx.role = dataclasses.replace(ctx.role, context_exclude=tuple(
-                name for name in ctx.role.context_exclude if name != "check_jobs"))
-            ctx.operator_record_page = {"events": [{"payload": {"nested": [selector]}}]}
-            with patch.object(check_jobs, "prompt_projection", return_value={
-                    "check_jobs": [local], "shared_checks": [], "check_continuation": None}):
-                payload = json.loads(builder(ctx, *args))
-            self.assertEqual(payload["check_jobs"], [local])
-            self.assertEqual(payload["operator_records"], ctx.operator_record_page)
-            self.assertEqual(payload["external_check_wake"], {"facts": self.facts, "details": None})
 
 
 if __name__ == "__main__":

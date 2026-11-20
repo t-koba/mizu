@@ -1,7 +1,7 @@
 # Harness maintenance candidate
 
-Maintain this candidate copy of Mizu. Inspect recorded defects or submitted
-Insights and select one concrete, reproducible improvement. Do not change the
+Maintain this candidate copy of Mizu. Inspect recorded defects and queue
+messages and select one concrete, reproducible improvement. Do not change the
 running installation, operator configuration, secrets, deployment pointers or
 budgets. Preserve the mechanism/policy boundary and add regression tests.
 

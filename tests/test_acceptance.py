@@ -157,7 +157,7 @@ class AcceptanceTests(Fixture):
                 self.assertIsNone(acceptance.effective(project, ctx.snapshot))
                 self.assertIsNone(project.status()['effective_verification'])
                 value = work_inputs(project, ctx.role, ctx.snapshot,
-                    {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512})
+                    {'max_messages': 1, 'max_text_bytes': 512})
                 self.assertFalse(value['evidence']['snapshot']['verified'])
                 self.assertIsNone(value['evidence']['snapshot']['retained_verification'])
 
@@ -461,7 +461,7 @@ class AcceptanceTests(Fixture):
                     lambda: acceptance.effective(self.project, ctx.snapshot),
                     self.project.status,
                     lambda: work_inputs(self.project, ctx.role, ctx.snapshot,
-                        {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512}),
+                        {'max_messages': 1, 'max_text_bytes': 512}),
                     lambda: acceptance.audit(self.project.root),
                 )
                 for reader in readers:
@@ -489,7 +489,7 @@ class AcceptanceTests(Fixture):
                         lambda: acceptance.effective(self.project, ctx.snapshot),
                         self.project.status,
                         lambda: work_inputs(self.project, ctx.role, ctx.snapshot,
-                            {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512}),
+                            {'max_messages': 1, 'max_text_bytes': 512}),
                         lambda: acceptance.audit(self.project.root)):
                     with self.assertRaises(Denied):
                         reader()
@@ -651,7 +651,7 @@ class AcceptanceTests(Fixture):
     def test_selection_carries_exact_receipt_separate_from_raw_verdict(self):
         from mizu.selection import work_inputs
         ctx, _, proof = self.produce()
-        bounds = {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512}
+        bounds = {'max_messages': 1, 'max_text_bytes': 512}
         value = work_inputs(self.project, ctx.role, ctx.snapshot, bounds)
         self.assertFalse(value['evidence']['snapshot']['verified'])
         self.assertEqual(value['evidence']['snapshot']['retained_verification'], proof)
@@ -1119,7 +1119,7 @@ class AcceptanceTests(Fixture):
                         self.assertEqual(header['effective_verification_diagnostic'],
                             {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None})
                     value = work_inputs(self.project, ctx.role, ctx.snapshot,
-                        {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512})
+                        {'max_messages': 1, 'max_text_bytes': 512})
                     self.assertIsNone(value['evidence']['snapshot']['retained_verification'])
                     self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
                     with self.assertRaises(check_jobs.CacheOwned):

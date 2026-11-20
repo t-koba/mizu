@@ -28,40 +28,6 @@ class BusyRetryTests(Fixture):
             with self.assertRaises(Busy):
                 Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
 
-    def test_editor_lock_busy_retains_claim_without_retrying_run(self):
-        self._retune(lock_timeout_seconds=0)
-        record = {"title": "Idea", "body": "Recover after contention", "base_snapshot": None}
-        spool = self.project.root / "spool/editor/pending.json"
-        claim = self.project.root / ".ingest/pending.json"
-        inbox = self.project.root / "inbox/pending.json"
-        write_json(spool, record)
-        driver = ScriptDriver()
-        with lock(self.project.root / "locks/insights.lock"):
-            with self.assertRaises(Busy) as raised:
-                Engine(self.config, driver=driver).run(
-                    self.project, "worker", retry_busy=True)
-            self.assertEqual(raised.exception.code, 75)
-            self.assertEqual(str(raised.exception), "Already running: insights")
-            self.assertEqual(driver.calls, [])
-            self.assertFalse((self.project.root / "runs").exists())
-            self.assertFalse(spool.exists())
-            self.assertEqual(list(claim.parent.glob("*.json")), [claim])
-            self.assertEqual(read_json(claim), record)
-            self.assertFalse(inbox.exists())
-
-        self.assertEqual(self.project.insights.ingest_editor(),
-                         {"accepted": 1, "rejected": 0, "reaped": 0})
-        self.assertEqual(list(claim.parent.glob("*.json")), [])
-        self.assertEqual(list(spool.parent.glob("*.json")), [])
-        self.assertEqual(list(inbox.parent.glob("*.json")), [inbox])
-        items = self.project.insights.list()
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["id"], "pending")
-        self.assertEqual(items[0]["source"], "editor")
-        accepted = read_json(inbox)
-        for key, value in record.items():
-            self.assertEqual(accepted[key], value)
-
     def test_retry_waits_for_release_then_runs(self):
         self._retune(idle_seconds=1)
         held = lock(self.project.root / "locks/workspace.lock")

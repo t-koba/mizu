@@ -48,26 +48,6 @@ class StateReadTests(Fixture):
                 for operation in operations:
                     self.assertTrue(operation_allowed(operation, caps))
 
-    def test_exact_inherited_grants_surface_and_denial(self):
-        from mizu.config import CAPABILITIES
-        self.assertFalse(STATE_READ_CAPABILITIES.keys() & CAPABILITIES)
-        for cap in (*WORK_CAPABILITIES, "report", "submit_insight", "decide", "finish"):
-            ctx = self.reader(capabilities=(cap,))
-            surface = {t["operation"] for t in tool_definitions(ctx.role.capabilities)}
-            for operation, gates in STATE_READ_CAPABILITIES.items():
-                with self.subTest(cap=cap, operation=operation):
-                    self.assertEqual(operation in surface, cap in gates)
-                    if cap in gates:
-                        ctx.handle(operation, {})
-                    else:
-                        # Even explicitly including the prompt section grants nothing.
-                        ctx.role = dataclasses.replace(ctx.role, context_exclude=(),
-                                                       context_include=("ready_work", "work_order", "report"))
-                        with self.assertRaises(Denied):
-                            ctx.handle(operation, {})
-                        with self.assertRaises(Denied):
-                            ctx.dispatch(operation, {})
-
     def test_excluded_full_and_delta_still_allow_bounded_ready_read(self):
         ids = [self.create(str(n)) for n in range(3)]
         ctx = self.reader()

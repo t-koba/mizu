@@ -57,7 +57,7 @@ class ContextJoinToolsTests(unittest.TestCase):
         self.assertIs(Context._DISPATCH["delegate"], ContextJoinToolsMixin._op_delegate)
 
     def test_consult_success_runs_child_and_restores_idle(self):
-        args = {"question": "x"}
+        args = {"request": "x"}
         child = Mock(return_value={"ok": "consult"})
         context = _JoinContext(child)
         result = ContextJoinToolsMixin._op_consult(context, args)
