@@ -1671,9 +1671,11 @@ CALLS = {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'work readiness / one-row readiness existence check'),
     },
+    'engine_dispatch.py': {
+        ('EngineDispatchMixin._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
+            '1', 'mechanism', 'engine dispatch / one-row pending-decision dispatch check'),
+    },
     'runtime.py': {
-        ('Engine._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row pending-decision dispatch check'),
         ('Engine._run', 'read_json', 'max_bytes', 0): (
             '1024 * 1024', 'safety', 'runtime / bounded run-state record read'),
         ('Engine._run', 'project.work_items.page_ready', 'limit', 0): (
@@ -3594,8 +3596,8 @@ def sibling():
         self.assertEqual(defaults['wait_events_limit'], '10')
         self.assertEqual(_LIMIT_RANGES['wait_events_limit'], (1, 100))
 
-        runtime = ast.parse((ROOT / 'runtime.py').read_text(encoding='utf-8'))
-        dispatch = next(node for node in ast.walk(runtime)
+        engine_dispatch = ast.parse((ROOT / 'engine_dispatch.py').read_text(encoding='utf-8'))
+        dispatch = next(node for node in ast.walk(engine_dispatch)
                         if isinstance(node, ast.FunctionDef) and node.name == '_dispatch_state')
         self.assertIn('wait_limit = project.config.limits.wait_events_limit',
                       {ast.unparse(node) for node in ast.walk(dispatch)

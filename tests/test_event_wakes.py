@@ -57,16 +57,16 @@ class EventWakesGateTests(Fixture):
             return patch(target, **({"return_value": value} if not callable(value) else {"side_effect": value}))
         return {
             "wait": ("worker", [p("mizu.runtime.check_jobs.wake_ready", True)]),
-            "ci": ("worker", [p("mizu.runtime._ci_due_for_with_facts", ([{"x": 1}], []))]),
-            "operator": ("reviewer", [p("mizu.runtime._operator_woke", True)]),
-            "decision": ("worker", [p("mizu.runtime._decision_delivery_state",
+            "ci": ("worker", [p("mizu.engine_dispatch._ci_due_for_with_facts", ([{"x": 1}], []))]),
+            "operator": ("reviewer", [p("mizu.engine_dispatch._operator_woke", True)]),
+            "decision": ("worker", [p("mizu.engine_dispatch._decision_delivery_state",
                                       {"events": [{"action": "approve"}], "diagnostics": []})]),
             "work_item": ("worker", [patch("mizu.runtime.work_item_events.delivery",
                                            return_value={"events": [{"x": 1}]})]),
             "operator_record": ("worker", [patch(
                 "mizu.runtime.operator_records.pending",
                 return_value=({"wake_pending": True, "events": []},))]),
-            "ready_work": ("worker", [patch("mizu.runtime._ready_work_observation",
+            "ready_work": ("worker", [patch("mizu.engine_dispatch._ready_work_observation",
                                             return_value=(True, True, False))]),
         }
 

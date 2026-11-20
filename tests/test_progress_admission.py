@@ -443,14 +443,14 @@ class ProgressAdmissionTests(Fixture):
                         config = dataclasses.replace(self.config, roles=roles)
                 parked = self._parked_snapshot(count=4)
                 due = [{"sha": "red", "check": "offline", "run": "test"}] if kind == "ci" else []
-                with patch("mizu.runtime._ci_due_for_with_facts", return_value=(due, [])):
+                with patch("mizu.engine_dispatch._ci_due_for_with_facts", return_value=(due, [])):
                     result = self._recorded_run(base=parked, custom_config=config,
                                                 ack_decisions=(kind in ("wait", "decision")))
                 self.assertTrue(result["progress"]["signals"]["input"])
                 self.assertEqual(result["progress"]["no_progress_count"], 0)
                 self.assertEqual(self.project.insights.due_waits("worker", result), [])
                 self.assertEqual(self.project.insights.decision_events("worker", ("reject",)), [])
-                with patch("mizu.runtime._ci_due_for_with_facts", return_value=([], [])):
+                with patch("mizu.engine_dispatch._ci_due_for_with_facts", return_value=([], [])):
                     repeated = self._recorded_run(base=result, custom_config=config)
                 self.assertFalse(repeated["progress"]["signals"]["input"])
                 self.assertEqual(repeated["progress"]["no_progress_count"], 1)
