@@ -274,5 +274,40 @@ class PiReleaseHandoffTests(Fixture):
         self.assertNotIn(item["source_receipt"], retained)
 
 
+    def test_hold_requires_both_a_reproduced_regression_and_a_failing_gate(self):
+        stable, reproduced = self.observe_feed(
+            entry("1.5.6", "Pi 1.5.6 stable",
+                  "stable patch: no reproduced regression; SDK gate not run"),
+            entry("1.5.7", "Pi 1.5.7 stable",
+                  "blocking regression reproduced: stable patch fails the Pi SDK gate"))
+        failing = run_standin_sdk_gate(failing=True)
+        passing = run_standin_sdk_gate(failing=False)
+        self.assertTrue(failing["failing"])
+        self.assertTrue(passing["passed"])
+
+        # Both conditions must be load-bearing: a reproduced report alone, a
+        # failing gate alone, or a reproduced report with a passing gate must
+        # not produce a hold or leak gate evidence into the routing reason.
+        cases = (
+            (reproduced, failing, True),
+            (reproduced, passing, False),
+            (stable, failing, False),
+            (stable, passing, False),
+        )
+        for item, gate, held in cases:
+            with self.subTest(version=item["title"], gate=gate["expectation"]):
+                routing = self.route_release(item, gate)
+                if held:
+                    self.assertTrue(routing["reason"].startswith("Hold:"))
+                    self.assertIsNotNone(routing["reproduction"])
+                    self.assertIn(gate["receipt"], routing["reason"])
+                else:
+                    self.assertEqual(routing["action"], "defer")
+                    self.assertNotIn("Hold:", routing["reason"])
+                    self.assertIsNone(routing["reproduction"])
+                    self.assertNotIn(gate["marker"], routing["reason"])
+                    self.assertNotIn(gate["receipt"], routing["reason"])
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
