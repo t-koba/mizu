@@ -57,6 +57,7 @@ from .context_insight_tools import ContextInsightToolsMixin
 from .context_evidence import ContextEvidenceMixin
 from .context_web_tools import ContextWebToolsMixin
 from .context_check_tools import ContextCheckToolsMixin
+from .context_read_tools import ContextReadToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -90,7 +91,6 @@ from . import materialize as _materialize
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
-from . import sandbox_operations
 from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
@@ -462,7 +462,7 @@ def _spend_counter(name):
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextKernelToolsMixin, ContextInsightToolsMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
-                ContextCheckToolsMixin):
+                ContextCheckToolsMixin, ContextReadToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -868,18 +868,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 raise Denied("Unknown operation")
             return handler(self, args)
 
-    def _op_result_read(self, args: dict) -> dict:
-        return tool_results.read(self, args)
-
-    def _op_diff(self, args: dict) -> dict:
-        return workspace_reads.op_diff(self, args)
-
     def _observed_diff_base(self) -> str | None:
         return workspace_reads.observed_diff_base(
             self, max_bytes=OBSERVED_CURSOR_MAX_BYTES)
-
-    def _op_files(self, args: dict) -> dict:
-        return workspace_reads.op_files(self, args)
 
     def _injected_ref_paths(self) -> list[str]:
         return workspace_reads.injected_ref_paths(self)
@@ -887,9 +878,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
     def _op_read(self, args: dict) -> dict:
         return workspace_reads.op_read(
             self, args, max_identities=MAX_READ_IDENTITIES)
-
-    def _op_exec_experiment(self, op: str, args: dict) -> dict:
-        return sandbox_operations.exec_experiment(self, op, args)
 
     def _op_ready_work_read(self, args: dict) -> dict:
         if not operation_allowed("ready_work_read", self.role.capabilities):
@@ -1561,17 +1549,11 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
     def _writer_wait_liveness(self, *, releases=()):
         return _writer_wait_liveness(self.project, self.role, releases=releases)
 
-    def _op_exec(self, args: dict) -> dict:
-        return self._op_exec_experiment("exec", args)
-
-    def _op_experiment(self, args: dict) -> dict:
-        return self._op_exec_experiment("experiment", args)
-
     _DISPATCH = {
-        "diff": _op_diff, "files": _op_files, "read": _op_read, "result_read": _op_result_read,
+        "diff": ContextReadToolsMixin._op_diff, "files": ContextReadToolsMixin._op_files, "read": _op_read, "result_read": ContextReadToolsMixin._op_result_read,
         "command_evidence_read": ContextEvidenceMixin._op_command_evidence_read,
         "experiment_evidence_read": ContextEvidenceMixin._op_experiment_evidence_read,
-        "exec": _op_exec, "experiment": _op_experiment,
+        "exec": ContextReadToolsMixin._op_exec, "experiment": ContextReadToolsMixin._op_experiment,
         "verify": ContextCheckToolsMixin._op_verify, "check_job": ContextCheckToolsMixin._op_check_job,
         "fetch": ContextWebToolsMixin._op_fetch, "probe": ContextWebToolsMixin._op_probe, "search": ContextWebToolsMixin._op_search, "feed_updates": ContextWebToolsMixin._op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "ready_work_read": _op_ready_work_read,
