@@ -252,7 +252,9 @@ class DelegationGateContractTests(Fixture):
             with self.assertRaises(Denied):
                 engine.consult(self.ctx, {"request": "pinned?"})
             with self.assertRaisesRegex(Denied, "Delegation capture"):
-                engine.delegate(self.ctx, {"role": "reporter", "task": "test"})
+                # A valid child role: the delegate gate refuses grants such
+                # as queues/work_items_create before this capture fence.
+                engine.delegate(self.ctx, {"role": "consult", "task": "test"})
         self.assertFalse(self.ctx.closed)
         with self.assertRaises(Denied):
             delegation_gates.refuse_live_tree(self.view, "final capture")

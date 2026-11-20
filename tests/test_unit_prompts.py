@@ -7,8 +7,8 @@ from support import Fixture
 
 
 MOVED = ("MAX_READY_WORK_AGE_SECONDS",
-         "_prompt_clock", "_prompt_research_state", "_decision_task",
-         "_open_backlog", "_prompt_tool_surface", "_prompt_run_identity",
+         "_prompt_clock", "_prompt_research_state",
+         "_prompt_tool_surface", "_prompt_run_identity",
          "_prompt_capture_limit", "_ready_work_age", "_ready_work_projection",
          "prompt_for", "prompt_delta_for", "session_prompt")
 STAYS_IN_RUNTIME = ("_reject_constant", "_has_ready_work", "_ready_work_changed",
@@ -90,8 +90,7 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual(ctx.ready_work_signature, page["signature"])
         self.assertEqual(ready["total"], page["total"])
         self.assertEqual(list(ready), ["items", "total", "overflow_count", "truncated",
-                                      "unseeded_decisions", "coverage_complete",
-                                      "unknown_blocked"])
+                                      "coverage_complete", "unknown_blocked"])
 
     def test_moved_builders_still_set_the_ready_work_signature(self):
         import mizu.unit_prompts as unit_prompts
@@ -203,7 +202,7 @@ class ExternalCheckWakePromptTests(Fixture):
 
     def builders(self):
         from mizu.unit_prompts import prompt_for, prompt_delta_for
-        return ((prompt_for, ()), (prompt_delta_for, ([],)))
+        return ((prompt_for, ()), (prompt_delta_for, ()))
 
     def objects(self, value):
         if isinstance(value, dict):

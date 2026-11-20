@@ -24,14 +24,6 @@ PURPOSE_PREFIXES = {
         "Search configured feeds or an operator-provided adapter and receive results with stated "
         "scope and coverage."),
     "feed_updates": "Read configured RSS/Atom updates without a query.",
-    "record_write": (
-        "Store one immutable SharedRecords entry under your role for a declared writable kind."),
-    "record_read": (
-        "Inspect a delivered operator answer or notice, or read a record written by your role."),
-    "decision_read": (
-        "Inspect an exact decision or insight.pending event from your unit's frozen delivery "
-        "manifest."),
-    "insights": "Inspect proposals and decisions without changing their state.",
     "ready_work_read": (
         "Inspect what your role can act on without claiming, transitioning or acknowledging any "
         "work."),
@@ -45,17 +37,6 @@ PURPOSE_PREFIXES = {
     "work_items_reopen": "Challenge a done item by reopening it so it can be claimed and closed again.",
     "work_items_transition": (
         "Move a work item to a new state or update scope, smoke pins or delivery in place."),
-    "decide": (
-        "Record a decision on an exact proposal revision to authorize work, defer it or reject "
-        "it."),
-    "submit_insight": (
-        "Submit an insight to bring a proposal to its addressee's attention without granting "
-        "authority or changing work status."),
-    "revise_insight": (
-        "Record a new revision of your own proposal under its stable ID so it can be considered "
-        "again."),
-    "withdraw_insight": "Retract your own proposal at the revision you read.",
-    "attach_evidence": "Add an attributed evidence note without editing the insight's title or body.",
     "delegate": (
         "Give a configured delegate a self-contained implementation task in your live workspace."),
     "consult": "Ask named read-only roles independently about one immutable code snapshot.",
@@ -85,12 +66,6 @@ PURPOSE_PREFIXES = {
         "Record your ordered work-item plan without changing any item's priority, status or "
         "scheduling."),
     "result_read": "Retrieve the next page of a truncated tool result without rerunning the tool.",
-    "objects_create": "Create an object of a declared kind.",
-    "objects_transition": "Make a declared transition on an object.",
-    "objects_read": "Read the current or a numbered revision of an object of a declared kind.",
-    "objects_list": "List current objects of a declared kind ordered by id,",
-    "events_read": "Read events matching your role's configured subscriptions, oldest first.",
-    "events_ack": "Advance your role's durable event cursor to seq;",
     "queue_write": "Append a message to a declared queue.",
     "queue_read": "Read due messages from a declared queue after your role's durable cursor,",
     "queue_ack": "Advance your role's durable cursor in a declared queue to seq;",
@@ -108,7 +83,7 @@ HISTORY_WORDING = re.compile(
 
 class ToolDescriptionTests(unittest.TestCase):
     def test_definition_inventory(self):
-        self.assertEqual(len(DEFINITIONS), 55)
+        self.assertEqual(len(DEFINITIONS), 40)
         for retired in ("work_items_legacy_read", "work_items_reconcile"):
             self.assertNotIn(retired, DEFINITIONS)
         for tool, (description, _) in DEFINITIONS.items():

@@ -18,7 +18,7 @@ def _daemon(**overrides):
     base = {
         "armed": True, "paused": False, "draining": False,
         "goal_changed": False, "operator_woke": False, "ready_work_changed": False, "ci_wait_due": False, "outcome": "continue",
-        "inbox_changed": False, "routed_events_due": False, "ci_due": False,
+        "messages_due": False, "routed_events_due": False, "ci_due": False,
         "wait_expired": False, "progress_admits": True,
     }
     base.update(overrides)
@@ -29,7 +29,7 @@ def _dispatch(**overrides):
     base = {
         "event_trigger": False, "on_change": False, "code_unchanged": False,
         "has_code_event": False,
-        "has_decision": False, "has_work_item": False,
+        "has_message": False, "has_work_item": False,
         "has_wait": False, "has_ci": False, "explicit_wake": False,
         "operator_woke": False,
         "progress_self_admits": False,
@@ -60,13 +60,18 @@ class DaemonEvaluatorTests(unittest.TestCase):
         facts = dataclasses.replace(facts, ci_wait_due=False)
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "outcome"))
+        # Queue wake is already collected; it short-circuits outcome collection.
+        queued = dataclasses.replace(facts, messages_due=True)
+        self.assertEqual((evaluate_daemon(queued).ready,
+                          evaluate_daemon(queued).reason), (True, "queue"))
+        facts = dataclasses.replace(facts, messages_due=False)
         facts = dataclasses.replace(facts, outcome="done")
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.reason, decision.needed),
                          (False, "done", None))
         # Non-done readiness collects each signal only after its predecessors.
         facts = dataclasses.replace(facts, outcome="wait")
-        for name in ("inbox_changed", "routed_events_due", "ci_due", "wait_expired"):
+        for name in ("routed_events_due", "ci_due", "wait_expired"):
             decision = evaluate_daemon(facts)
             self.assertEqual((decision.ready, decision.needed), (None, name))
             facts = dataclasses.replace(facts, **{name: False})
@@ -105,7 +110,7 @@ class DispatchEvaluatorTests(unittest.TestCase):
         decision = evaluate(_dispatch(event_trigger=True, explicit_wake=True,
                                       progress_self_admits=True))
         self.assertEqual((decision.admitted, decision.skipped), (False, "no-event"))
-        for flag in ("has_decision", "has_work_item", "has_wait", "has_ci"):
+        for flag in ("has_message", "has_work_item", "has_wait", "has_ci"):
             with self.subTest(flag=flag):
                 decision = evaluate(_dispatch(event_trigger=True, **{flag: True}))
                 self.assertTrue(decision.admitted)
@@ -113,7 +118,7 @@ class DispatchEvaluatorTests(unittest.TestCase):
 
     def test_label_precedence(self):
         cases = [
-            ("decision-first", {"has_decision": True, "has_work_item": True, "has_wait": True, "has_ci": True}, "decision"),
+            ("queue-first", {"has_message": True, "has_work_item": True, "has_wait": True, "has_ci": True}, "queue"),
             ("work-item", {"has_work_item": True, "has_wait": True, "has_ci": True}, "work_item"),
             ("wait", {"has_wait": True, "has_ci": True}, "wait"),
             ("ci", {"has_ci": True}, "ci"),
@@ -154,7 +159,7 @@ class DispatchEvaluatorTests(unittest.TestCase):
         self.assertEqual((decision.admitted, decision.skipped, decision.admission),
                          (True, None, "change"))
         # A more-specific subscribed event keeps its own label.
-        for flag, label in (("has_decision", "decision"), ("has_work_item", "work_item"),
+        for flag, label in (("has_message", "queue"), ("has_work_item", "work_item"),
                             ("has_wait", "wait"), ("has_ci", "ci")):
             with self.subTest(flag=flag):
                 decision = evaluate(_dispatch(event_trigger=True, on_change=True,
@@ -182,11 +187,11 @@ class DispatchEvaluatorTests(unittest.TestCase):
             on_change=False, code_unchanged=False)).admission, "schedule")
         # Changed code with timer events keeps the change label; event triggers use events.
         decision = evaluate(_dispatch(on_change=True, code_unchanged=False,
-                                      has_decision=True))
+                                      has_message=True))
         self.assertEqual(decision.admission, "change")
         decision = evaluate(_dispatch(on_change=True, code_unchanged=False,
-                                      event_trigger=True, has_decision=True))
-        self.assertEqual(decision.admission, "decision")
+                                      event_trigger=True, has_message=True))
+        self.assertEqual(decision.admission, "queue")
         self.assertEqual(evaluate_dispatch(_dispatch()), evaluate(_dispatch()))
 
 

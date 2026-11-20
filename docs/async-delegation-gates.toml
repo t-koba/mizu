@@ -18,10 +18,8 @@ release_status = "terminal-after-proven-quiescence"
 
 # The parent can keep using only these proven non-tree Context operations.
 parent_control_plane = [
-  "fetch", "probe", "search", "insights", "decision_read", "record_read", "result_read",
-  "work_items_read",
-  "work_items_create", "work_items_transition", "work_order", "decide",
-  "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence",
+  "fetch", "probe", "search", "result_read", "work_items_read",
+  "work_items_create", "work_items_transition", "work_order",
   "research_read", "research",
 ]
 
@@ -46,9 +44,8 @@ parent_denied = [
   "files", "read", "command_evidence_read", "experiment_evidence_read",
   "exec", "experiment", "verify", "check_job", "sync", "vcs_publish",
   "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",
-  "report", "record_write", "feed_updates", "ready_work_read", "work_order_read", "report_read",
-  # Kernel object/event and queue tools are not proven safe for a reserved parent yet; fail closed.
-  "objects_create", "objects_transition", "objects_read", "objects_list", "events_read", "events_ack",
+  "report", "feed_updates", "ready_work_read", "work_order_read", "report_read",
+  # Queue and message tools are not proven safe for a reserved parent yet; fail closed.
   "queue_read", "queue_write", "queue_ack", "message_read", "message_refs",
 ]
 

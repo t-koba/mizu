@@ -279,9 +279,13 @@ class RootOwnerTemplateTests(unittest.TestCase):
         tables = set(re.findall(r"(?m)^(?:# ?)?\[([a-z_]+)(?:\.|\])", template))
         scalars = set(re.findall(r"(?m)^(?:# ?)?([a-z_]+) =", template))
         # record_kinds is the one deliberate default-closed declaration; the
-        # template explains its absence instead of showing a block.
+        # template explains its absence in a wrapped comment instead of
+        # showing a block.
         self.assertEqual(ROOT_KEYS - (tables | scalars), {"record_kinds"})
-        self.assertIn("record_kinds absent", template)
+        explanation = " ".join(line.removeprefix("#").strip()
+                               for line in template.splitlines()
+                               if line.lstrip().startswith("#"))
+        self.assertIn("record_kinds absent", explanation)
 
     def test_limits_template_names_every_field(self):
         root = Path(__file__).resolve().parents[1]
