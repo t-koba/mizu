@@ -814,6 +814,62 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(len(self._decision_rows(identity)), 2)
         self.assert_parity(identity)
 
+    def test_superseding_defer_replay_above_scaled_page_ceiling(self):
+        """Exact replacement replay must not enumerate the decisions queue."""
+        self.activate()
+        identity = "e1" * 16
+        self.live_submit(identity, "Replace then retry above ceiling")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        self.project.insights.decide(
+            identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+            "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 2)
+        # Scale the administrative read ceiling below the retained decision
+        # head. An exact retry converges through the deterministic message id;
+        # it must not read_complete over the whole decisions queue.
+        with (mock.patch.object(queue_decision_delivery, "MAX_PAGES", 1),
+              mock.patch.object(queue_decision_delivery, "PAGE", 2)):
+            self.project.insights.decide(
+                identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+                "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 2)
+        events = self.assert_parity(identity)
+        self.assertEqual([event["action"] for event in events], ["defer"])
+        self.assertEqual(events[0]["reason"], "replacement")
+
+    def test_interrupted_superseding_replay_above_scaled_page_ceiling(self):
+        """A lost replacement append also replays without a queue scan."""
+        self.activate()
+        identity = "f1" * 16
+        self.live_submit(identity, "Defer then lost replacement above ceiling")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        writer = self.project.insights.decision_queue_writer
+        real_decide = writer.decide
+        calls = {"count": 0}
+
+        def drop_replacement(*args):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return
+            return real_decide(*args)
+
+        with mock.patch.object(writer, "decide", side_effect=drop_replacement):
+            self.project.insights.decide(
+                identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+                "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 1)
+        with (mock.patch.object(queue_decision_delivery, "MAX_PAGES", 1),
+              mock.patch.object(queue_decision_delivery, "PAGE", 2)):
+            self.project.insights.decide(
+                identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+                "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 2)
+        events = self.assert_parity(identity)
+        self.assertEqual([event["action"] for event in events], ["defer"])
+        self.assertEqual(events[0]["reason"], "replacement")
+
     def test_missed_superseding_append_repairs_under_distinct_id(self):
         """A lost replacement-defer append is repaired without a second row."""
         self.activate()

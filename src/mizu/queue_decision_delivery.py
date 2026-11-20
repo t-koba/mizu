@@ -831,36 +831,41 @@ class DecisionQueueWriter:
 
         Each decision message carries ``legacy_event`` (the exact history
         filename) and ``legacy_record`` (the committed decision). The first
-        decision owns the conversion-stable id, so the common case is an O(1)
-        keyed read whose record matches, independent of retained history. A
-        superseding decision owns a stem-derived id, so when the stable row is
-        a different record a bounded complete read finds the message bound to
-        this exact record. Returns None only when no message for the record
-        has been appended yet (an interrupted append), letting the caller fall
-        back to the content-addressed history read. Malformed envelopes fail
-        closed through ``identifier``.
+        decision owns the conversion-stable id and a later one at the same
+        revision owns an id derived from its exact history stem, so every
+        candidate row is reachable by an O(1) keyed read computed from the
+        record. Replay therefore never enumerates the decisions queue: its
+        administrative page ceiling is unrelated to decision identity and
+        must not bound how old a replayable decision may be. Converted first
+        decisions keep their original random stem verbatim. Returns None only
+        when no message for the record has been appended yet (an interrupted
+        append), letting the caller repair from content-addressed history.
+        Malformed envelopes fail closed through ``identifier``.
         """
         store = self.project.kernel_queues
         identity = decision["id"]
-        wanted = canonical(decision).decode("utf-8")
-        try:
-            first = store.message(message_id(DECISION_KIND, identity, rev), "role:writer")
-        except Denied:
-            first = None
-        if first is not None:
-            if first["queue"] != DECISIONS:
+        raw = canonical(decision)
+        wanted = raw.decode("utf-8")
+        ids = [message_id(DECISION_KIND, identity, rev)]
+        # A replacement owns a stem-derived id: the content address for a
+        # defer, or the decision key when a substantive decision supersedes an
+        # earlier defer at this revision. Both are deterministic from the
+        # committed record, so neither needs a queue scan.
+        stems = [digest(raw)[:32]]
+        key = decision.get("decision_key")
+        if isinstance(key, str) and ID.fullmatch(key):
+            stems.append(key)
+        ids.extend(superseding_message_id(DECISION_KIND, identity, rev, stem)
+                   for stem in stems)
+        for candidate in ids:
+            try:
+                message = store.message(candidate, "role:writer")
+            except Denied:
+                continue
+            if message["queue"] != DECISIONS:
                 raise Denied("Decision identity message names another queue")
-            if first["body"].get("legacy_record") == wanted:
-                return identifier(first["body"].get("legacy_event"))
-        for message in read_complete(store, DECISIONS, "role:writer"):
-            if message.get("deliver_at") is not None:
-                continue
-            body = message["body"]
-            if (body.get("legacy_insight") != identity
-                    or body.get("legacy_rev") != str(rev)):
-                continue
-            if body.get("legacy_record") == wanted:
-                return identifier(body.get("legacy_event"))
+            if message["body"].get("legacy_record") == wanted:
+                return identifier(message["body"].get("legacy_event"))
         return None
 
     def decide(self, current, event, event_id: str) -> None:
