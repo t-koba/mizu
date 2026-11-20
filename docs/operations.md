@@ -880,7 +880,8 @@ rebuilds the index when every history validates. Writers wait for the audit.
   `.new-*` orphans/aliases are ignored (never promoted); unsafe or unexpected
   names, malformed records, incomplete chains and bound violations fail closed.
   Runtime prompt projection and the open-page and by-ID modes of `work_items_read`
-  keep their locked, recovering `page_open` behavior; the `closed=true` page uses
+  keep their locked, recovering readers: `page_open` serves the open inventory and
+  `explain` the by-ID history; the `closed=true` page uses
   the unlocked, non-recovering `page_closed` reader. The separate host `--legacy`
   inventory uses `page_legacy`.
 

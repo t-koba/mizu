@@ -38,6 +38,8 @@ class ClosedPagingDocsTests(unittest.TestCase):
     def test_operations_qualifies_locked_page_open_claim(self):
         text = (DOCS / "operations.md").read_text(encoding="utf-8")
         self.assertIn("the open-page and by-ID modes of `work_items_read`", text)
+        self.assertIn("`page_open` serves the open inventory", text)
+        self.assertIn("`explain` the by-ID history", text)
         self.assertIn("the unlocked, non-recovering `page_closed` reader", text)
 
 
