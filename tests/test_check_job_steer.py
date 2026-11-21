@@ -202,6 +202,30 @@ class SteerTests(SteerFixture):
         projected, _ = acceptance.discover(self.project, ids=[shared['id']])
         self.assertEqual(projected[shared['id']]['status'], 'completed')
 
+    def test_detached_subscription_is_indexed_and_steered_like_full_discovery(self):
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=True))
+        self.project.config = self.config
+        original = self.job()
+        shared = check_jobs.submit(self.context())
+        path = check_jobs.root(self.project) / shared['id'] / 'job.json'
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        raw['detached'] = True
+        raw['acknowledged'] = False
+        path.write_text(json.dumps(raw), encoding='utf-8')
+        self.project.ledger.rebuild('check_jobs')
+        self.assertEqual(check_jobs.read(self.project, shared['id'])['status'], 'cancelled')
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            rows = db.execute('SELECT role, job_id FROM check_completion_changes WHERE job_id=?',
+                              (shared['id'],)).fetchall()
+        self.assertEqual(rows, [('worker', shared['id'])])
+        full = {row['id'] for row in check_jobs.steer_pending(
+            self.project, 'worker', (), discovery=acceptance.discover(self.project))}
+        incremental = {row['id'] for row in check_jobs.steer_pending(
+            self.project, 'worker', (), cursor=check_jobs.CheckSteerCursor())}
+        self.assertIn(shared['id'], full)
+        self.assertIn(shared['id'], incremental)
+
     def test_result_ack_and_idle_wake_semantics_are_unchanged(self):
         job = self.job()
         self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))

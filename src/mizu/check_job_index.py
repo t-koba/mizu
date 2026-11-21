@@ -44,6 +44,15 @@ CREATE INDEX check_jobs_status ON check_jobs(valid, status, shared_job);
 TERMINAL = ("completed", "interrupted", "refused", "cancelled", "cleanup_failed")
 
 
+def effective_status(status, *, detached, shared, original_status=None):
+    """The status every reader projects: detached is cancelled, shared follows its original."""
+    if detached:
+        return 'cancelled'
+    if shared and original_status is not None:
+        return original_status
+    return status
+
+
 def completion_pairs(rows):
     """Role/job pairs whose effective result is terminal in one row inventory."""
     by_id = {row[0]: row for row in rows if len(row) > 2}
@@ -51,11 +60,13 @@ def completion_pairs(rows):
         _, valid, _, role, status, _, detached, _, shared, *_ = row
         if not valid:
             continue
+        original_status = None
         if shared and not detached:
             original = by_id.get(shared)
             if original is not None and original[1]:
-                status = original[4]
-        if status in TERMINAL:
+                original_status = original[4]
+        if effective_status(status, detached=detached, shared=shared,
+                            original_status=original_status) in TERMINAL:
             yield role, job_id
 
 
@@ -77,11 +88,14 @@ class _CheckJobs(Domain):
         if row is None or not row[0]:
             return None
         _, role, status, shared, detached = row
+        original_status = None
         if shared and not detached:
             original = db.execute(
                 "SELECT valid, status FROM check_jobs WHERE id=?", (shared,)).fetchone()
             if original is not None and original[0]:
-                status = original[1]
+                original_status = original[1]
+        status = effective_status(status, detached=detached, shared=shared,
+                                  original_status=original_status)
         return role if status in TERMINAL else None
 
     def put(self, db, entry) -> None:
@@ -131,7 +145,7 @@ class _CheckJobs(Domain):
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 7, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 8, _TABLES)
 
 
 def entry_key(name: str) -> str:
