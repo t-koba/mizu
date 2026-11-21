@@ -83,6 +83,13 @@ class UnreachableCiWaitTests(CiWaitFixture):
         write_json(self.project.root / POLL_STATE_FILE,
                    {"failures": {}, "successes": {}, "ci_changes_pending": True})
         self.assertEqual(self.live()["state"], "pending")
+        # The producer persists a bounded page, not a boolean. A draining
+        # change scan can still add a run for this commit to the maps.
+        write_json(self.project.root / POLL_STATE_FILE,
+                   {"failures": {}, "successes": {}, "ci_changes_pending": {
+                       "cursor": "0", "next_cursor": "1", "branches": ["published"],
+                       "after": []}})
+        self.assertEqual(self.live()["state"], "pending")
 
     def test_publication_ci_wait_uses_the_same_proof(self):
         self.config.vcs["ci_branch"] = "published"

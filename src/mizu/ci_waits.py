@@ -706,7 +706,10 @@ def _poll_run_state(raw, sha):
     Both bounded run maps and every retained row must be well formed. Any
     matching sha, malformed entry or pending change scan is unknown, not empty.
     """
-    if not isinstance(raw, dict) or raw.get("ci_changes_pending") is True:
+    # The producer writes a bounded change page while a scan is draining, or
+    # None when it is caught up. Any live page can still add a run for the
+    # pinned commit to the maps below.
+    if not isinstance(raw, dict) or raw.get("ci_changes_pending") is not None:
         return None
     found = False
     for name in ("failures", "successes"):
