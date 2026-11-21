@@ -174,9 +174,10 @@ mizu cleanup demo
 - `work-items/`, `work-item-receipts/`, `shared-records/`,
   `shared-record-receipts/`, `delivery-settlements/`, `selection/`: 作業項目とその受領・
   共有記録、実行時の配送決済、選択状態 ★
-- `work-item-events-index.json`, `work-item-events-heads.json`: 終端イベントの未配信行と
-  役割ごとの受領カウンタ・最新10件サンプル、および現行の終端ヘッドの索引 ★。端末遷移と
+- `work-item-events-index.json`, `work-item-events-heads/`: 終端イベントの未配信行と
+  役割ごとの受領カウンタ・最新10件サンプル、および項目ごとの現行終端ヘッドの索引 ★。端末遷移と
   受領書き込み時に records.lock の下で更新され、読み取りはこの索引だけを参照します。
+  旧形式の `work-item-events-heads.json` を含むバックアップも復元できます。
   旧データに索引が無い場合は、最初の端末書き込みまたは受領が validate 済みの履歴から
   一度だけ再構築します。再構築までの読み取りは fail closed です。
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★

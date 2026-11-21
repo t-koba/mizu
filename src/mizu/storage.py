@@ -42,7 +42,9 @@ DEFAULT_RESTORE_MEMBER_COUNT = 100000
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "safe-point.json", "snapshots", "objects",
-    "histories", "queues", "work-items", "work-item-receipts", "work-item-events-index.json", "work-item-events-heads.json",
+    "histories", "queues", "work-items", "work-item-receipts", "work-item-events-index.json", "work-item-events-heads",
+    # The former single-file name stays allowed so older archives still restore.
+    "work-item-events-heads.json",
     "shared-records", "shared-record-receipts", "delivery-settlements", "runs", "sessions",
     "evidence", "artifacts", "health", "role-state", "observed", "maintenance", "spool", "selection",
 )

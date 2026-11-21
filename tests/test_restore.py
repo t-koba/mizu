@@ -10,8 +10,8 @@ from support import Fixture, bind_delivery
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.project import Project
 from mizu.storage import backup, restore
-from mizu import storage, smoke_retention as retention, snapshot as snapshot_module
-from mizu.fs import held
+from mizu import storage, smoke_retention as retention, snapshot as snapshot_module, work_item_events as events
+from mizu.fs import canonical, held
 
 
 class RestoreTests(Fixture):
@@ -481,6 +481,39 @@ class RestoreTests(Fixture):
                 info.size = 3
             tar.addfile(info, None if kind else io.BytesIO(b'bad'))
         return archive
+
+    def test_terminal_head_directory_roundtrips_and_legacy_member_is_allowed(self):
+        store = self.project.work_items
+        item = store.create(idempotency_key="restore-head", title="Terminal head",
+                            actor="worker")["record"]["work_item"]
+        store.transition(item["id"], expected_rev=1, status="dropped", actor="worker",
+                         reason="Terminal head roundtrip")
+        member = f"{events.HEADS_NAME}/{item['id']}.json"
+        head = self.project.root / member
+        self.assertTrue(head.is_file())
+        before = head.read_bytes()
+        event = events._read_head(store, item["id"])
+        self.assertIsNotNone(event)
+
+        self.project.set_control(paused=True)
+        archive = self.root / "heads.tar.gz"
+        backup(self.project, archive, verify=True)
+        with tarfile.open(archive, "r:gz") as saved:
+            names = set(saved.getnames())
+        self.assertIn(member, names)
+        restore(self.config, "restored", archive)
+        restored = Project(self.config, "restored")
+        self.assertEqual((restored.root / member).read_bytes(), before)
+        self.assertEqual(events._read_head(restored.work_items, item["id"]), event)
+
+        legacy = self.root / "legacy-heads.tar.gz"
+        old_heads = canonical({"schema": events.INDEX_SCHEMA, "heads": {item["id"]: event}})
+        with tarfile.open(legacy, "w:gz") as saved:
+            info = tarfile.TarInfo("work-item-events-heads.json")
+            info.size = len(old_heads)
+            saved.addfile(info, io.BytesIO(old_heads))
+        self.assertEqual(storage.validate_backup_archive(legacy),
+                         {"members": 1, "bytes": len(old_heads)})
 
     def test_refuses_traversal(self):
         with self.assertRaises(Denied):
