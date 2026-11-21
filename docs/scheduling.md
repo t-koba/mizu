@@ -10,9 +10,9 @@ subscriptions, `on_change`, `ci_wake`) that operator policy selects and
 
 At most one of `daemon`, `interval_seconds`, `calendar` may be set per role
 (`src/mizu/config.py` rejects combinations). Event subscriptions
-(`decision_events`, `work_item_events` with their `*_sources` routes) are
-independent triggers: they may accompany a schedule or run event-only on
-platforms with file triggers; they do not count as a second schedule mode.
+(a `work_item_events` subscription together with its `work_item_sources`
+route) is an independent trigger: it may accompany a schedule or run event-only
+on platforms with file triggers; it does not count as a second schedule mode.
 `on_change` skips same-code snapshots on scheduled/explicit runs, including for
 every `review_verdict` capability holder: a typed approval on the reviewed code
 digest transfers to a same-code successor, so a state-only republication needs no
@@ -37,7 +37,7 @@ The shipped example (`config/config.example.toml`) exercises each pattern:
 |---|---|---|---|
 | worker | write | `daemon = true` | writer-daemon `should_run` gate |
 | searcher | read | `interval_seconds = 1800` | none |
-| reviewer | read | `interval_seconds = 900` | `on_change = true`, optional `decision_events` / `work_item_events` (commented) |
+| reviewer | read | `interval_seconds = 900` | `on_change = true`, optional `work_item_events` / `work_item_sources` (commented) |
 | reporter | read | `calendar = ["07:00", "19:00"]` | none by default |
 | consult | read | none (explicit-run only) | none |
 | maintainer | write | `interval_seconds = 21600` | none |
@@ -932,22 +932,21 @@ best-effort hint to already-configured platform event watches. Those hints
 never carry authority: dispatch revalidates the exact waiter and evidence.
 Unscheduled/unsubscribed roles keep their existing explicit-run policy.
 
-Deferrals ride along in `own`-source mode but do not admit a run on their
-own; with `decision_sources = "any"` a matching action — deferrals
-included — admits one focused run (`Engine.run` filters `substantive_events`
-by source mode, and `_role_events_due` applies the same rule). Terminal
-routing is filtered independently by `work_item_sources`. Delivered
-obligations (`pending_obligations` in `Engine.run`) ride along when the role
-runs for other reasons and never admit a run on their own. Structured due-wait
-and obligation rows carry exact registration identities and role/source/payload-bound
-`ack_token`s in full/delta prompts. Only handled tokens explicitly selected in
+A deferred decision does not admit a run on its own: its revisit condition is
+recorded on the decision, and later evidence is delivered as insight input for
+a new decision. Terminal work items are the only subscribed ledger route:
+`work_item_events` selects `done`/`dropped` rows and `work_item_sources`
+selects `own` (items this role created) or `any` (every matching item), for both
+`_role_events_due` readiness and the dispatch page. Structured due-wait rows
+carry exact registration identities and role/source/payload-bound `ack_token`s
+in full/delta prompts. Only handled tokens explicitly selected in
 `finish.ack_events` are consumed/receipted after durable successful result and
-writer publication. Unselected rows replay oldest-first; a re-registration
-survives selection of the prior identity. Obligation receipts suppress visibility
-only, never assign work or satisfy a dependency. CI waits sharing `wait_events`
-have no such token and keep their existing acknowledgement behavior. See
-[the receipt contract](configuration.md) for bounds and
-failure behavior.
+writer publication; unselected rows replay oldest-first, and a re-registration
+survives selection of the prior identity. Progress records keep a constant
+`obligations_digest` (the digest of an empty identity list) for schema
+continuity; there are no delivered obligation rows. CI waits sharing
+`wait_events` have no token and keep their existing acknowledgement behavior.
+See [the receipt contract](configuration.md) for bounds and failure behavior.
 
 CI-wake default: `ci_wake` defaults to true for `write` roles and false
 otherwise (`src/mizu/config.py`). When VCS polling is enabled, red results on
