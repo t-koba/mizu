@@ -212,21 +212,41 @@ def strict_jobs(project):
     return {job_id: json.loads(raw) for job_id, _, _, raw in rows}
 
 
-def discover(project):
+def discover(project, *, ids=None):
     """One consistent read of the job index with complete internal exclusions.
 
     Records and their retained evidence were validated when the index was
     written or built; an invalid record is excluded and reported by code.
-    Raw records are retained so overlays remain exactly one hop. No
-    retention, acknowledgement, proof creation or producer writes occur here.
+    Raw records are retained so overlays remain exactly one hop. With ``ids``,
+    only those jobs and the originals they overlay are read; the projection is
+    identical. No retention, acknowledgement, proof creation or producer writes
+    occur here.
     """
     jobs, invalid = {}, {}
+    wanted = None if ids is None else list(dict.fromkeys(ids))
     with _jobs(project) as db:
-        for job_id, valid, code, raw in db.execute('SELECT id, valid, code, job FROM check_jobs'):
-            if not valid:
-                invalid[('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id] = code
-            else:
-                jobs[job_id] = json.loads(raw)
+        def read_wanted(names):
+            if not names:
+                return
+            marks = ", ".join("?" * len(names))
+            for job_id, valid, code, raw in db.execute(
+                    f'SELECT id, valid, code, job FROM check_jobs WHERE id IN ({marks})',
+                    tuple(names)):
+                if not valid:
+                    invalid[('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id] = code
+                else:
+                    jobs[job_id] = json.loads(raw)
+        if wanted is None:
+            for job_id, valid, code, raw in db.execute('SELECT id, valid, code, job FROM check_jobs'):
+                if not valid:
+                    invalid[('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id] = code
+                else:
+                    jobs[job_id] = json.loads(raw)
+        else:
+            read_wanted(wanted)
+            originals = [job['shared_job'] for job in jobs.values()
+                         if job.get('shared_job') and job['shared_job'] not in jobs]
+            read_wanted(list(dict.fromkeys(originals)))
     projected = {}
     for job_id, raw in jobs.items():
         job = dict(raw)

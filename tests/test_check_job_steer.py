@@ -4,9 +4,10 @@ import json
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 
 from support import Fixture, ROOT, ScriptDriver
-from mizu import check_jobs
+from mizu import acceptance, check_jobs
 from mizu.errors import Denied
 from mizu.pi import CheckSteer, PiDriver
 from mizu.runtime import Engine
@@ -129,6 +130,45 @@ class SteerTests(SteerFixture):
         pump = CheckSteer(context, channel, context.check_steer_seen)
         pump.observe({'type': 'agent_start'})
         self.assertEqual(channel.sent, [])
+
+    def test_unchanged_boundaries_read_no_jobs_and_new_completions_stay_bounded(self):
+        first = self.job()
+        channel = RecordingChannel()
+        pump = CheckSteer(self.context(), channel)
+        with patch.object(acceptance, 'discover', wraps=acceptance.discover) as discover:
+            pump.observe({'type': 'agent_start'})
+            self.assertEqual(discover.call_args.kwargs['ids'], [first['id']])
+            self.assertEqual(len(channel.sent), 1)
+            discover.reset_mock()
+            for kind in ('turn_start', 'message_start', 'tool_execution_end',
+                         'turn_end', 'message_end', 'agent_start'):
+                pump.observe({'type': kind})
+            discover.assert_not_called()
+            self.assertEqual(len(channel.sent), 1)
+            second = self.job('printf second')
+            pump.observe({'type': 'turn_end'})
+            self.assertEqual(discover.call_args.kwargs['ids'], [second['id']])
+            self.assertEqual(len(channel.sent), 2)
+
+    def test_completion_change_index_covers_overlay_and_rebuild(self):
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
+        self.project.config = self.config
+        original = check_jobs.submit(self.context())
+        self.assertEqual(check_jobs.run_one(self.project, threading.Event(),
+                                            sandbox_factory=FakeSandbox)['status'], 'completed')
+        shared = check_jobs.submit(self.context())
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            changes = db.execute('SELECT role, job_id FROM check_completion_changes '
+                                 'ORDER BY seq').fetchall()
+        self.assertEqual(changes, [('worker', original['id']), ('worker', shared['id'])])
+        self.project.ledger.rebuild('check_jobs')
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            rebuilt = db.execute('SELECT role, job_id FROM check_completion_changes '
+                                 'ORDER BY seq').fetchall()
+        self.assertEqual(set(rebuilt), set(changes))
+        self.assertEqual(len(rebuilt), 2)
+        projected, _ = acceptance.discover(self.project, ids=[shared['id']])
+        self.assertEqual(projected[shared['id']]['status'], 'completed')
 
     def test_result_ack_and_idle_wake_semantics_are_unchanged(self):
         job = self.job()

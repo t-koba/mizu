@@ -1113,7 +1113,9 @@ and pi-durable, such a result is additionally steered once into the
 already-running unit at its next model turn boundary, using the same capability
 and policy gate. That in-unit delivery is presentation only: no polling, no
 sleeping, no output acknowledgement and no model receipt; output stays behind
-`action=result`. Managed Pi writes no wake marker, so the independent wake and
+`action=result`. Managed Pi reads only indexed completion changes, bounding
+work per boundary and leaving unchanged boundaries constant-cost. Managed Pi
+writes no wake marker, so the independent wake and
 the marker written by a later dispatch stay unchanged. Managed pi-durable
 submits the notification as a durable steer input and marks that result's
 automatic wake as delivered for the running unit, so no follow-up dispatch

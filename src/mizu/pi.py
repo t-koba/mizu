@@ -97,6 +97,8 @@ class CheckSteer:
         self.context, self.channel = context, channel
         self.presented = set(presented)
         self.active = False
+        from . import check_jobs
+        self.cursor = check_jobs.CheckSteerCursor()
 
     def observe(self, event):
         kind = event.get('type')
@@ -112,7 +114,7 @@ class CheckSteer:
             return
         from . import check_jobs
         for job in check_jobs.steer_pending(self.context.project, self.context.role.name,
-                                            self.presented):
+                                            self.presented, cursor=self.cursor):
             if job['id'] in self.presented:
                 continue
             self.presented.add(job['id'])

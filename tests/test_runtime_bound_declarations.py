@@ -855,6 +855,8 @@ DECLARATIONS = {
             '128', 'safety', 'check jobs / bounded job identifier excerpt in a steer notification'),
         'MAX_CHECK_STEER_STATUS_CHARS': (
             '64', 'safety', 'check jobs / bounded status label excerpt in a steer notification'),
+        'MAX_CHECK_STEER_CHANGE_ROWS': (
+            '32', 'safety', 'check jobs / bounded indexed completion changes read per steer boundary'),
         'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS': (
             '4', 'safety', 'check jobs / bounded commands shown per job summary'),
         'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS': (
@@ -3677,6 +3679,7 @@ def no_defaults(limit, /, count, *, size):
                 'MAX_CHECK_STEER_MESSAGE_BYTES',
                 'MAX_CHECK_STEER_JOB_ID_CHARS',
                 'MAX_CHECK_STEER_STATUS_CHARS',
+                'MAX_CHECK_STEER_CHANGE_ROWS',
                 'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS',
                 'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
                 'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',

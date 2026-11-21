@@ -29,6 +29,9 @@ CREATE TABLE check_jobs(
     acknowledged INTEGER, detached INTEGER, wake INTEGER, shared_job TEXT, created_at TEXT,
     proof_pending INTEGER, job TEXT, lifecycle_key TEXT, shared_key TEXT, purpose TEXT,
     cache_request TEXT, request_sequence INTEGER, passed INTEGER, cancel_requested INTEGER);
+CREATE TABLE check_completion_changes(
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, job_id TEXT NOT NULL);
+CREATE INDEX check_completion_changes_role ON check_completion_changes(role, seq);
 CREATE INDEX check_jobs_role ON check_jobs(role, valid, acknowledged);
 CREATE INDEX check_jobs_shared ON check_jobs(shared_job);
 CREATE INDEX check_jobs_shared_key ON check_jobs(valid, shared_key, status, passed, shared_job, detached, cancel_requested, created_at);
@@ -41,6 +44,21 @@ CREATE INDEX check_jobs_status ON check_jobs(valid, status, shared_job);
 TERMINAL = ("completed", "interrupted", "refused", "cancelled", "cleanup_failed")
 
 
+def completion_pairs(rows):
+    """Role/job pairs whose effective result is terminal in one row inventory."""
+    by_id = {row[0]: row for row in rows if len(row) > 2}
+    for job_id, row in by_id.items():
+        _, valid, _, role, status, _, detached, _, shared, *_ = row
+        if not valid:
+            continue
+        if shared and not detached:
+            original = by_id.get(shared)
+            if original is not None and original[1]:
+                status = original[4]
+        if status in TERMINAL:
+            yield role, job_id
+
+
 def lifecycle_key(job):
     """Identity shared by every command lookup on the same frozen inputs."""
     return digest(canonical({
@@ -50,6 +68,22 @@ def lifecycle_key(job):
 
 
 class _CheckJobs(Domain):
+    @staticmethod
+    def _completion_role(db, job_id: str):
+        """Role whose live unit should see this job's effective terminal result."""
+        row = db.execute(
+            "SELECT valid, role, status, shared_job, detached FROM check_jobs WHERE id=?",
+            (job_id,)).fetchone()
+        if row is None or not row[0]:
+            return None
+        _, role, status, shared, detached = row
+        if shared and not detached:
+            original = db.execute(
+                "SELECT valid, status FROM check_jobs WHERE id=?", (shared,)).fetchone()
+            if original is not None and original[0]:
+                status = original[1]
+        return role if status in TERMINAL else None
+
     def put(self, db, entry) -> None:
         if len(entry) == 2:
             db.execute("INSERT OR REPLACE INTO check_waits VALUES (?, ?)", entry)
@@ -57,20 +91,47 @@ class _CheckJobs(Domain):
         db.execute("INSERT OR REPLACE INTO check_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entry)
 
     def replace(self, db, key, entries) -> None:
+        # A subscription's effective status comes from its original, so the
+        # original's terminal transition is an event for every live subscriber.
+        affected = {key} | {row[0] for row in db.execute(
+            "SELECT id FROM check_jobs WHERE shared_job=?", (key,))}
+        before = {job_id: self._completion_role(db, job_id) for job_id in affected}
         db.execute("DELETE FROM check_waits WHERE name=?", (key,))
         db.execute("DELETE FROM check_jobs WHERE id=?", (key,))
         for entry in entries:
             self.put(db, entry)
+        for job_id in sorted(affected):
+            role = self._completion_role(db, job_id)
+            if role is None:
+                # A released job or a subscriber whose original is gone has no
+                # live completion left to present; its change row ends here.
+                db.execute("DELETE FROM check_completion_changes WHERE job_id=?", (job_id,))
+            elif before.get(job_id) is None:
+                db.execute("INSERT INTO check_completion_changes(role, job_id) VALUES (?, ?)",
+                           (role, job_id))
+
+    def finish(self, db) -> None:
+        # A rebuilt index has no incremental history: seed one exact change per
+        # currently effective terminal job, oldest first so seq orders by time.
+        db.execute("DELETE FROM check_completion_changes")
+        rows = db.execute(
+            "SELECT id, valid, NULL, role, status, NULL, detached, NULL, shared_job "
+            "FROM check_jobs ORDER BY created_at, id").fetchall()
+        for role, job_id in completion_pairs(rows):
+            db.execute("INSERT INTO check_completion_changes(role, job_id) VALUES (?, ?)",
+                       (role, job_id))
 
     def snapshot(self, db):
         if db is None:
             return {}
         return {row[0]: tuple(row) for table in ("check_jobs", "check_waits")
-                for row in db.execute(f"SELECT * FROM {table}")}
+                for row in db.execute(f"SELECT * FROM {table}")} | {
+            row[0]: tuple(row) for row in db.execute(
+                "SELECT seq, role, job_id FROM check_completion_changes")}
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 6, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 7, _TABLES)
 
 
 def entry_key(name: str) -> str:
@@ -171,12 +232,19 @@ def audit(ledger, *, repair: bool) -> dict:
     snapshot = ledger.snapshot("check_jobs")
     state, indexed = ("missing", {}) if snapshot is None else snapshot
     corrupt = sorted(key for key, row in files.items() if not row[1])
-    divergent = sorted(key for key in set(files) | set(indexed) if files.get(key) != indexed.get(key))
-    repaired = bool(repair and divergent)
+    divergent = sorted(key for key in set(files) | set(indexed)
+                       if isinstance(key, str) and files.get(key) != indexed.get(key))
+    changes = [value for key, value in indexed.items() if isinstance(key, int)]
+    actual = {(value[1], value[2]) for value in changes}
+    expected = set(completion_pairs(row for row in files.values() if len(row) > 2))
+    change_consistent = len(actual) == len(changes) and actual == expected
+    repaired = bool(repair and (divergent or not change_consistent))
     if repaired:
         ledger.rebuild("check_jobs")
-    return {"jobs": sum(len(row) != 2 for row in files.values()), "index": state, "consistent": not corrupt and not divergent,
+    return {"jobs": sum(len(row) != 2 for row in files.values()), "index": state,
+            "consistent": not corrupt and not divergent and change_consistent,
             "repaired": repaired,
+            "completion_changes": len(changes), "completion_change_consistent": change_consistent,
             "corrupt": [{"id": key, "error": files[key][2] if len(files[key]) != 2 else "wait_json"} for key in corrupt[:MAX_OPEN_PAGE_ROWS]],
             "corrupt_count": len(corrupt),
             "divergent": divergent[:MAX_OPEN_PAGE_ROWS], "divergent_count": len(divergent)}

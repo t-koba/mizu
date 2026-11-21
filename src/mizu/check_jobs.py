@@ -74,6 +74,8 @@ MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS = 24
 MAX_CHECK_JOB_PROJECTION_ROWS = 32
 #: Bound one in-unit steer batch, independent of the model-visible job page.
 MAX_CHECK_STEER_NOTIFICATIONS = 8
+#: Bound one incremental completion-change read and the carried candidate set.
+MAX_CHECK_STEER_CHANGE_ROWS = 32
 #: Bound each host-owned steer notification, including its fixed framing.
 MAX_CHECK_STEER_MESSAGE_BYTES = 1024
 #: Bound untrusted job identifiers embedded in a steer notification.
@@ -1996,24 +1998,70 @@ def waiting(project, role):
 TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'))
 
 
-def steer_pending(project, role, presented, *, discovery=None):
+@dataclasses.dataclass
+class CheckSteerCursor:
+    """One running unit's bounded position in the completion-change index."""
+    seq: int = 0
+    candidates: list = dataclasses.field(default_factory=list)
+
+
+def _steer_changes(project, role, cursor):
+    """Read one bounded page of this role's new terminal completions."""
+    with project.ledger.read('check_jobs', locked=False) as db:
+        rows = db.execute(
+            'SELECT seq, job_id FROM check_completion_changes WHERE role=? AND seq>? '
+            'ORDER BY seq DESC LIMIT ?',
+            (role, cursor.seq, MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
+    if rows:
+        cursor.seq = max(cursor.seq, *(row[0] for row in rows))
+    return [row[1] for row in rows if isinstance(row[1], str)]
+
+
+def _steer_incremental(project, role, already, cursor):
+    """Present only completion changes since this unit's last boundary."""
+    combined = list(dict.fromkeys([*_steer_changes(project, role, cursor), *cursor.candidates]))
+    batch, carry = combined[:MAX_CHECK_STEER_CHANGE_ROWS], combined[MAX_CHECK_STEER_CHANGE_ROWS:]
+    if not batch:
+        return []
+    from .acceptance import discover
+    projected, _ = discover(project, ids=batch)
+    selected, remaining = [], []
+    for job_id in batch:
+        job = projected.get(job_id)
+        if (job is None or job_id in already or job.get('role') != role
+                or job.get('status') not in TERMINAL_WAKE_STATUSES or job.get('acknowledged')):
+            continue
+        if len(selected) < MAX_CHECK_STEER_NOTIFICATIONS:
+            selected.append(summary(job, project))
+        else:
+            remaining.append(job_id)
+    cursor.candidates = (remaining + carry)[:MAX_CHECK_STEER_CHANGE_ROWS]
+    return selected
+
+
+def steer_pending(project, role, presented, *, discovery=None, cursor=None):
     """Newly terminal owned results to present inside a running unit.
 
     Schema: bounded job summaries. Bounds: at most
-    MAX_CHECK_STEER_NOTIFICATIONS per call; the caller's ``presented`` set
-    filters what this unit has already shown. Trust: only this role's
-    unacknowledged terminal jobs, under the same capability and automatic
-    wake policy that governs dispatch wakes. Failure: a role without the
-    capability or policy has nothing to present. This is a pure read: it
-    never acknowledges output, marks a wake delivered or changes scheduling.
+    MAX_CHECK_STEER_NOTIFICATIONS per call, and with ``cursor`` at most
+    MAX_CHECK_STEER_CHANGE_ROWS indexed completion changes per call. The
+    caller's ``presented`` set filters what this unit has already shown.
+    Trust: only this role's unacknowledged terminal jobs, under the same
+    capability and automatic wake policy that governs dispatch wakes. A
+    cursor reads writer-maintained completion changes; without one, a full
+    discovery serves one-shot callers. Failure: a role without the capability
+    or policy has nothing to present. This is a pure read: it never
+    acknowledges output, marks a wake delivered or changes scheduling.
     """
     settings = project.config.roles.get(role)
     if settings is None or 'check_job' not in settings.capabilities or not settings.check_result_wake:
         return []
+    already = set(presented)
+    if cursor is not None:
+        return _steer_incremental(project, role, already, cursor)
     if discovery is None:
         from .acceptance import discover
         discovery = discover(project)
-    already = set(presented)
     jobs = [job for job in discovery[0].values()
             if job.get('role') == role and job.get('id') not in already
             and job.get('status') in TERMINAL_WAKE_STATUSES and not job.get('acknowledged')]

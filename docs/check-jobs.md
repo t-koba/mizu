@@ -175,7 +175,9 @@ unit's opening prompt was captured, the host sends one bounded `steer`
 notification at the next model turn boundary. It names only the job ID and
 status and points back to `action=result`; it carries no output and is not
 acceptance. Terminal results already in the opening prompt are not repeated,
-and each new result is injected at most once per unit. The same `check_job`
+and each new result is injected at most once per unit. Managed Pi follows a
+writer-maintained completion-change index with a bounded read at each boundary,
+so unchanged boundaries touch no job records. The same `check_job`
 capability and `roles.<name>.check_result_wake` policy gate this path. Neither
 engine polls, sleeps, acknowledges output or needs a wake to keep the unit
 running; output stays behind `action=result`. Managed Pi presents the
