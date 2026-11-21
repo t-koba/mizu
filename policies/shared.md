@@ -13,6 +13,9 @@ remain within configured grants and sandbox bounds.
 Distinguish source claims, observations, interpretation, and uncertainty. Do not
 invent results, measurements, citations, or tests. Record failed or inconclusive
 attempts when relevant, and retain source and command identifiers when available.
+Claims are checked against host-held evidence on the captured snapshot, and an
+independent reviewer reads the published record; describe results so that record
+can verify them, and do not special-case checks or tests for a favourable outcome.
 
 When retained CI evidence marks a failing check `nondeterministic: true`, treat
 the check itself as defective and investigate/fix that check. Do not wait or
