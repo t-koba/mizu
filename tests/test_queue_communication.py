@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import support  # noqa: F401
 from support import Fixture, ScriptDriver, history_write_json
-from mizu import cli, queue_facts
+from mizu import cli, queue_facts, unit_finish
 from mizu.errors import Denied, ProtocolError
 from mizu.fs import write_json
 from mizu.kernel import parse_queues
@@ -169,19 +169,41 @@ class QueueFactsTests(QueueFixture):
         self.assertEqual(set(queues[0]), {"queue", "count", "more", "messages"})
 
     def test_waking_message_stays_due_after_interrupted_finish_until_acked(self):
-        """An interrupted observer finish leaves its queue source eligible for retry."""
+        """A finish interrupted before its intent is durable leaves the queue due for retry."""
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
         self.write("Observed upstream release")
         self.assertTrue(queue_facts.due(self.project, "worker"))
 
-        def interrupted(ctx, *_):
-            ctx.handle("_budget", {"sequence": 1})
-            raise ProtocolError("synthetic interruption")
+        first_prompts = []
+        real_write = unit_finish.write_json
+
+        def interrupt_at_finish(path, value, *args, **kwargs):
+            if str(path).endswith("finish-intent.json"):
+                raise ProtocolError("synthetic interruption")
+            return real_write(path, value, *args, **kwargs)
+
+        def interrupted(ctx, prompt, profile=None):
+            first_prompts.append(json.loads(prompt))
+            # Finish validation and close_exec have already run here; only
+            # the durable finish intent remains. Interrupt exactly that write,
+            # so the unit ends without a completed result.
+            with patch("mizu.unit_finish.write_json", side_effect=interrupt_at_finish):
+                ctx.handle("finish", {"outcome": "wait", "summary": "Interrupted",
+                                      "state": "Next."})
 
         with self.assertRaisesRegex(ProtocolError, "synthetic interruption"):
-            Engine(self.config, driver=ScriptDriver(interrupted)).run(self.project, "worker")
+            Engine(config, driver=ScriptDriver(interrupted)).run(self.project, "worker")
 
-        # No finish and no explicit queue_ack occurred, so the source remains
-        # due and visible to the next observer unit rather than being consumed.
+        # The first observer already saw the queue in its own opening facts.
+        self.assertEqual(first_prompts[0]["queues"][0]["count"], 1)
+        self.assertEqual(first_prompts[0]["queues"][0]["messages"][0]["body"]["title"],
+                         "Observed upstream release")
+        self.assertFalse(list((self.project.root / "runs").rglob("finish-intent.json")))
+        # The source remains due and visible to the next observer unit.
         self.assertTrue(queue_facts.due(self.project, "worker"))
         opening = queue_facts.opening(self.project, "worker")
         self.assertEqual(opening[0]["count"], 1)
@@ -191,20 +213,14 @@ class QueueFactsTests(QueueFixture):
 
         def observer(ctx, prompt, profile=None):
             prompts.append(json.loads(prompt))
+            self.assertEqual(ctx.handle("queue_ack", {"queue": "notes", "seq": 1}), {"seq": 1})
             ctx.handle("finish", {"outcome": "wait", "summary": "Read queue", "state": "Next."})
 
-        roles = dict(self.config.roles)
-        roles["worker"] = dataclasses.replace(
-            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
-        config = dataclasses.replace(self.config, roles=roles)
-        self.project = Project(config, self.project.name)
         Engine(config, driver=ScriptDriver(observer)).run(self.project, "worker")
         self.assertEqual(prompts[0]["queues"][0]["count"], 1)
         self.assertEqual(prompts[0]["queues"][0]["messages"][0]["body"]["title"],
                          "Observed upstream release")
-
-        # An explicit queue_ack is what finally clears the due source.
-        self.project.kernel_queues.ack("notes", "role:worker", 1)
+        # The granted queue_ack in the retrying unit is what clears the source.
         self.assertFalse(queue_facts.due(self.project, "worker"))
         self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
