@@ -48,6 +48,10 @@ class UnreachableCiWaitTests(CiWaitFixture):
         vcs.inject_refs(self.project.root, {"published": SHA})
         self.assert_pending()
 
+    def test_pinned_sha_head_of_another_published_branch_stays_pending(self):
+        vcs.inject_refs(self.project.root, {"published": OTHER, "other-published": SHA})
+        self.assert_pending()
+
     def test_current_evidence_blocks_proof_and_incomplete_ledger_stays_pending(self):
         with patch("mizu.ci_waits._read", return_value={}):
             self.assertIsNone(ci_waits.unreachable(self.store, self.item))

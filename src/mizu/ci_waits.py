@@ -757,9 +757,10 @@ def unreachable(store, item):
         if (not isinstance(sha, str) or not vcs._SHA.fullmatch(sha)
                 or not isinstance(branch, str) or not branch):
             return None
+        # The receipt branch still binds satisfaction and request/run evidence.
+        # Liveness, however, is about the commit itself: any published branch
+        # head can receive the work, so no ref may be skipped by short name.
         for name in refs:
-            if vcs._short_branch_name(name) != branch:
-                continue
             if vcs.read_ref(store.root, name) == sha:
                 return None
         rows, incomplete = CiRequests(store.root)._rows(strict=True)
