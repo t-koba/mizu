@@ -1,5 +1,7 @@
 """Check-result notifications steered into one running Pi unit, never polled."""
 import dataclasses
+import datetime as dt
+import itertools
 import json
 import sys
 import threading
@@ -124,10 +126,36 @@ class SteerTests(SteerFixture):
             lambda ctx, prompt, profile: captured.append((ctx, json.loads(prompt)))))
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         context, prompt = captured[-1]
+        self.assertEqual(context.check_steer_seq, check_jobs.completion_high_water(self.project))
+        self.assertGreater(context.check_steer_seq, 0)
         self.assertEqual(context.check_steer_seen,
                          frozenset(row['id'] for row in prompt['check_jobs']
                                    if row['status'] in check_jobs.TERMINAL_WAKE_STATUSES))
         self.assertIn(job['id'], context.check_steer_seen)
+        channel = RecordingChannel()
+        pump = CheckSteer(context, channel, context.check_steer_seen)
+        pump.observe({'type': 'agent_start'})
+        self.assertEqual(channel.sent, [])
+
+    def test_completion_during_prompt_capture_is_seeded_not_steered(self):
+        self.job()
+        from mizu.runtime import session_prompt as real_prompt
+        captured = {}
+
+        def racing_prompt(context, role, run_dir):
+            raced = self.job('printf raced')
+            captured['raced'] = raced['id']
+            return real_prompt(context, role, run_dir)
+
+        engine = Engine(self.config, driver=ScriptDriver(
+            lambda ctx, prompt, profile: captured.setdefault('context', ctx)))
+        with patch('mizu.runtime.session_prompt', side_effect=racing_prompt):
+            self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        context = captured['context']
+        # The cursor seals the pre-opening high; the raced completion is in the
+        # bounded prompt, so `already` filters it instead of a duplicate steer.
+        self.assertEqual(context.check_steer_seq, 1)
+        self.assertIn(captured['raced'], context.check_steer_seen)
         channel = RecordingChannel()
         pump = CheckSteer(context, channel, context.check_steer_seen)
         pump.observe({'type': 'agent_start'})
@@ -181,6 +209,94 @@ class SteerTests(SteerFixture):
         self.assertTrue(pages)
         self.assertLessEqual(max(pages), check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)
         self.assertEqual(sum(pages), count)
+
+    def test_exact_full_page_seals_its_window_without_rereading(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS
+        jobs = [self.job(f'printf exact-{index}') for index in range(count)]
+        cursor = check_jobs.CheckSteerCursor()
+        presented, delivered = set(), []
+        for _ in range(count):
+            batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+            for row in batch:
+                self.assertNotIn(row['id'], presented)
+                presented.add(row['id'])
+                delivered.append(row['id'])
+        self.assertEqual(delivered, [job['id'] for job in reversed(jobs)])
+        with patch.object(acceptance, 'discover', wraps=acceptance.discover) as discover:
+            self.assertEqual(check_jobs.steer_pending(
+                self.project, 'worker', presented, cursor=cursor), [])
+            discover.assert_not_called()
+
+    def test_window_with_only_other_role_rows_follows_a_later_new_high(self):
+        self.job(role='reviewer')  # Advances the shared index, not this role.
+        cursor = check_jobs.CheckSteerCursor()
+        self.assertEqual(check_jobs.steer_pending(self.project, 'worker', (), cursor=cursor), [])
+        fresh = self.job('printf fresh')
+        self.assertEqual([row['id'] for row in check_jobs.steer_pending(
+            self.project, 'worker', (), cursor=cursor)], [fresh['id']])
+
+    def test_preopening_history_cannot_delay_or_repeat_a_fresh_result(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 5
+        old = [self.job(f'printf old-{index}') for index in range(count)]
+        captured = check_jobs.completion_high_water(self.project)
+        self.assertEqual(captured, count)
+        # Both prompt seeding and explicit acknowledgement are older history;
+        # neither consumes this unit's first incremental boundary.
+        old_ids = {job['id'] for job in old}
+        check_jobs.acknowledge(self.project, 'worker', old_ids)
+        presented = set(old_ids)
+        fresh = self.job('printf fresh')
+        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+        self.assertEqual([row['id'] for row in batch], [fresh['id']])
+        presented.add(fresh['id'])
+        for _ in range(3):
+            self.assertEqual(check_jobs.steer_pending(
+                self.project, 'worker', presented, cursor=cursor), [])
+        # Steering is presentation only: the independent wake and the unread
+        # result survive, and a seeded fresh ID is never steered twice.
+        wake = check_jobs.root(self.project) / fresh['id'] / 'wake.json'
+        self.assertFalse(wake.exists())
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(check_jobs.read(self.project, fresh['id'])['acknowledged'])
+        context = self.context()
+        context.check_steer_seq = captured
+        channel = RecordingChannel()
+        pump = CheckSteer(context, channel, presented)
+        self.assertEqual(pump.cursor.floor, captured)
+        pump.observe({'type': 'agent_start'})
+        self.assertEqual(channel.sent, [])
+
+    def test_newest_first_pages_match_full_discovery_and_drain_in_order(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 9
+        captured = check_jobs.completion_high_water(self.project)
+        self.assertEqual(captured, 0)
+        base = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        ticks = itertools.count()
+
+        def distinct_now():
+            return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
+
+        with patch.object(check_jobs, 'now', distinct_now):
+            jobs = [self.job(f'printf page-{index}') for index in range(count)]
+        expected = [job['id'] for job in reversed(jobs)]
+        full = check_jobs.steer_pending(self.project, 'worker', ())
+        self.assertEqual(len(full), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
+        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        first = check_jobs.steer_pending(self.project, 'worker', (), cursor=cursor)
+        self.assertEqual([row['id'] for row in first], [row['id'] for row in full])
+        presented = {row['id'] for row in first}
+        delivered = [row['id'] for row in first]
+        for _ in range(count + 2):
+            batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+            if not batch:
+                break
+            self.assertLessEqual(len(batch), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
+            for row in batch:
+                self.assertNotIn(row['id'], presented)
+                presented.add(row['id'])
+                delivered.append(row['id'])
+        self.assertEqual(delivered, expected)
 
     def test_completion_change_index_covers_overlay_and_rebuild(self):
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))

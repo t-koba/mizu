@@ -1105,28 +1105,32 @@ is made. Marking failures fail the dispatch instead of acknowledging unread
 output. The sidecar lives with the existing job directory; retention and result
 authority do not change.
 
-Automatic wake candidates take priority in the existing bounded prompt job
-page (32 summaries, within the aggregate 65,536-byte check projection). Only
+Automatic wake candidates take priority in the existing bounded prompt job page
+(32 summaries, within the aggregate 65,536-byte check projection). Only
 included terminal summaries are marked: omitted results or jobs completing
 after prompt capture keep their independent wake. On both managed engines, Pi
 and pi-durable, such a result is additionally steered once into the
 already-running unit at its next model turn boundary, using the same capability
 and policy gate. That in-unit delivery is presentation only: no polling, no
 sleeping, no output acknowledgement and no model receipt; output stays behind
-`action=result`. Managed Pi reads only indexed completion changes, bounding
-work per boundary and leaving unchanged boundaries constant-cost. Managed Pi
-writes no wake marker, so the independent wake and
-the marker written by a later dispatch stay unchanged. Managed pi-durable
-submits the notification as a durable steer input and marks that result's
-automatic wake as delivered for the running unit, so no follow-up dispatch
-attempt is needed. An unread result remains in ordinary job listings after its
-automatic attempt but cannot cause a scheduling spin. Existing `result`
-retrieval and successful-finish acknowledgement alone consume output; a wake
-marker never imports verification. Exact explicit waits
-retain their signature/deadline/ownership checks and existing acknowledgement
-semantics, even with automatic waking disabled or already marked. A live wait
-on a queued/running job still holds the role until completion, expiry or changed
-inputs, including when another result becomes terminal.
+`action=result`. Managed Pi captures the completion index position with the
+opening prompt and reads only later indexed changes, newest-first in bounded
+pages that drain each window before following a new high: work per boundary
+stays bounded, unchanged boundaries are constant-cost, and pre-opening history
+cannot delay or repeat a fresh result. A completion that races into the prompt
+is seeded as seen and filtered by that position, never steered twice. Managed
+Pi writes no wake marker, so the independent wake and the marker written by a
+later dispatch stay unchanged. Managed pi-durable submits the notification as a
+durable steer input and marks that result's automatic wake as delivered for the
+running unit, so no follow-up dispatch attempt is needed. An unread result
+remains in ordinary job listings after its automatic attempt but cannot cause a
+scheduling spin. Existing `result` retrieval and successful-finish
+acknowledgement alone consume output; a wake marker never imports verification.
+Exact explicit waits retain their signature/deadline/ownership checks and
+existing acknowledgement semantics, even with automatic waking disabled or
+already marked. A live wait on a queued/running job still holds the role until
+completion, expiry or changed inputs, including when another result becomes
+terminal.
 
 `mizu status` exposes `check_results`, keyed by enabled owning role, with up to
 32 unread terminal summaries per role and an `automatic_wake_pending` boolean

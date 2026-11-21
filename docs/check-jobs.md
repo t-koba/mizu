@@ -175,17 +175,22 @@ unit's opening prompt was captured, the host sends one bounded `steer`
 notification at the next model turn boundary. It names only the job ID and
 status and points back to `action=result`; it carries no output and is not
 acceptance. Terminal results already in the opening prompt are not repeated,
-and each new result is injected at most once per unit. Managed Pi follows a
-writer-maintained completion-change index with a bounded read at each boundary,
-so unchanged boundaries touch no job records. The same `check_job`
-capability and `roles.<name>.check_result_wake` policy gate this path. Neither
-engine polls, sleeps, acknowledges output or needs a wake to keep the unit
-running; output stays behind `action=result`. Managed Pi presents the
-notification through its SDK steer channel and leaves the independent dispatch
-wake untouched. Managed pi-durable submits it as a durable steer input at a
-provider turn boundary and records that delivery as satisfying the automatic
-wake, so no redundant dispatch attempt follows it. Idle waking and `result`
-retrieval stay as before.
+and each new result is injected at most once per unit. Managed Pi captures the
+completion index high-water with the opening prompt, so a long pre-opening
+history of seeded or acknowledged results cannot consume a boundary or delay a
+fresh result. It then follows the writer-maintained index in bounded,
+newest-first pages that walk older rows of each window before a new high opens
+a window, giving the same first batch as full discovery. The captured position
+still covers a completion that races into the prompt; the seeded IDs filter it
+out instead of steering it twice. Unchanged boundaries touch no job records.
+The same `check_job` capability and `roles.<name>.check_result_wake` policy
+gate this path. Neither engine polls, sleeps, acknowledges output or needs a
+wake to keep the unit running; output stays behind `action=result`. Managed Pi
+presents the notification through its SDK steer channel and leaves the
+independent dispatch wake untouched. Managed pi-durable submits it as a durable
+steer input at a provider turn boundary and records that delivery as satisfying
+the automatic wake, so no redundant dispatch attempt follows it. Idle waking
+and `result` retrieval stay as before.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
 The work unit ends and returns its model slot and workspace lock. The wait

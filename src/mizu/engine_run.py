@@ -411,6 +411,10 @@ class EngineRunMixin:
                                    observer=role.workspace != "write")
                     or bool(queues or terminal_events or wait_events or ci_failures)
                     or (role.workspace == "write" and prior_wait_expired))
+                # Capture the completion index with the opening prompt: its
+                # terminal IDs are seeded as seen and filtered as `already`,
+                # while changes omitted by the bounded prompt stay eligible.
+                context.check_steer_seq = check_jobs.completion_high_water(project)
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 # A pin must be durable before dispatch-adjacent delivery state
                 # changes, so a setup failure cannot consume an unseen wake.

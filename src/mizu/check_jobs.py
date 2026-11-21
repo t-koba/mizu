@@ -1998,32 +1998,65 @@ def waiting(project, role):
 TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'))
 
 
+def _completion_high(db):
+    row = db.execute('SELECT MAX(seq) FROM check_completion_changes').fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
+def completion_high_water(project):
+    """Current completion-index position, or 0 when no change is indexed.
+
+    Schema: a non-negative integer seq shared by all roles. Bounds: one indexed
+    aggregate read. Trust: writer-maintained index only. Captured with the
+    opening prompt, this seals all earlier history for that unit's steer cursor
+    without acknowledging output or changing a wake. Failure: an unavailable
+    index fails the read, never a silent fallback to zero.
+    """
+    with project.ledger.read('check_jobs', locked=False) as db:
+        return _completion_high(db)
+
+
 @dataclasses.dataclass
 class CheckSteerCursor:
-    """One unit's low-water index position and pending newest-first job IDs.
+    """One unit's completion-index window and IDs read but not yet presented.
 
-    ``seq`` advances only when a bounded page is read into ``candidates``;
-    undelivered IDs drain before the next page is read, so a large interval
-    cannot starve its oldest completions or grow the buffer past one page.
+    ``floor`` covers every seq already accounted for (the opening prompt's
+    captured high-water at first); ``ceiling`` is the high-water of the active
+    window; ``upper`` is the inclusive top of the next descending page. Pages
+    walk newest-first through the whole window before it is sealed by moving
+    ``floor`` to ``ceiling``, so older unread rows are never skipped and a new
+    high starts a fresh window. Buffered IDs drain before another page is read.
     """
-    seq: int = 0
+    floor: int = 0
+    ceiling: int = 0
+    upper: int = 0
     candidates: list = dataclasses.field(default_factory=list)
 
 
 def _steer_changes(project, role, cursor):
-    """Read the oldest bounded page of new completions, newest-first."""
+    """Read one newest-first bounded page of this role's completion changes."""
     with project.ledger.read('check_jobs', locked=False) as db:
+        if cursor.upper <= cursor.floor:
+            high = _completion_high(db)
+            if high <= cursor.floor:
+                return []
+            cursor.ceiling, cursor.upper = high, high
         rows = db.execute(
-            'SELECT seq, job_id FROM check_completion_changes WHERE role=? AND seq>? '
-            'ORDER BY seq ASC LIMIT ?',
-            (role, cursor.seq, MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
+            'SELECT seq, job_id FROM check_completion_changes '
+            'WHERE role=? AND seq>? AND seq<=? ORDER BY seq DESC LIMIT ?',
+            (role, cursor.floor, cursor.upper, MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
     if rows:
-        cursor.seq = max(row[0] for row in rows)
-    return [row[1] for row in reversed(rows) if isinstance(row[1], str)]
+        cursor.upper = min(row[0] for row in rows) - 1
+    if not rows or cursor.upper <= cursor.floor:
+        # An empty read means this role has no more rows in the window; a
+        # drained lower bound means the last page was read. Seal either way so
+        # a later boundary follows a new high instead of rereading old rows.
+        cursor.floor, cursor.upper = cursor.ceiling, cursor.ceiling
+    return [row[1] for row in rows if isinstance(row[1], str)]
 
 
 def _steer_incremental(project, role, already, cursor):
-    """Present only completion changes since this unit's last boundary."""
+    """Present newest-first completion changes since this unit's last boundary."""
     if not cursor.candidates:
         cursor.candidates = _steer_changes(project, role, cursor)
     batch = cursor.candidates[:MAX_CHECK_STEER_CHANGE_ROWS]
@@ -2054,9 +2087,9 @@ def steer_pending(project, role, presented, *, discovery=None, cursor=None):
     caller's ``presented`` set filters what this unit has already shown.
     Trust: only this role's unacknowledged terminal jobs, under the same
     capability and automatic wake policy that governs dispatch wakes. A
-    cursor reads writer-maintained completion changes; without one, a full
-    discovery serves one-shot callers. Failure: a role without the capability
-    or policy has nothing to present. This is a pure read: it never
+    cursor reads writer-maintained completion changes in newest-first pages;
+    without one, a full discovery serves one-shot callers. Failure: a role
+    without the capability or policy has nothing to present. This is a pure read: it never
     acknowledges output, marks a wake delivered or changes scheduling.
     """
     settings = project.config.roles.get(role)

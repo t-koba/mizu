@@ -98,7 +98,8 @@ class CheckSteer:
         self.presented = set(presented)
         self.active = False
         from . import check_jobs
-        self.cursor = check_jobs.CheckSteerCursor()
+        self.cursor = check_jobs.CheckSteerCursor(
+            floor=getattr(context, 'check_steer_seq', 0))
 
     def observe(self, event):
         kind = event.get('type')
