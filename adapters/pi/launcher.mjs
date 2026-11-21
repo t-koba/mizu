@@ -5,6 +5,7 @@ import { ModelRuntime, SettingsManager, SessionManager, createAgentSession,
   createAgentSessionRuntime, createAgentSessionServices, createCodemodeExtension,
   createToolSearchExtension, createMcpExtension, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { register } from './register.mjs';
+import { extensionFactories, sessionToolSelection } from './extension-factories.mjs';
 import { meterRuntime, installReselection, modelAuthority } from './model-runtime.mjs';
 import { catalog } from './catalog.mjs';
 
@@ -47,12 +48,7 @@ if (process.argv.includes('--check-contract')) {
   const authority = cfg.reselection ? modelAuthority() : null;
   const meter = meterRuntime(modelRuntime, bridge, undefined, model => authority?.check(model));
   if (cfg.resources.some(r => !['extension','skill','prompt','theme'].includes(r.kind))) throw new Error('Unsupported Pi resource kind');
-  const factories = [{ name: 'mizu', factory: pi => register(pi, bridge, { requireAuthority: true, authoritySections: cfg.authority_sections, systemCwd: cfg.promptCwd }) }];
-  if (cfg.options.codemode) factories.push({ name: 'codemode', factory: createCodemodeExtension(), builtin: true });
-  if (cfg.options.toolSearch) factories.push({ name: 'tool-search', factory: createToolSearchExtension(), builtin: true });
-  if (Object.keys(cfg.mcp_servers).length) factories.push({ name: 'mcp', builtin: true,
-    factory: createMcpExtension({ loadConfig: () => ({ servers: Object.entries(cfg.mcp_servers).map(([name, config]) =>
-      ({ name, config, source: 'mizu-profile', scope: 'extension' })), errors: [], autoEnableCodemode: Boolean(cfg.options.codemode) }) }) });
+  const factories = extensionFactories(cfg, bridge, { register, createCodemodeExtension, createToolSearchExtension, createMcpExtension });
   // The SDK sends its session id as the provider prompt_cache_key and names the
   // transcript file after it. cacheKey (a digest stable per project, role,
   // profile and model) makes units that share a prefix share one cache
@@ -78,8 +74,7 @@ if (process.argv.includes('--check-contract')) {
     const model = modelRuntime.getModel(cfg.provider, cfg.model);
     if (!model) throw new Error('Configured exact model is unavailable');
     const result = await createAgentSession({ cwd, agentDir, modelRuntime, model,
-      thinkingLevel: cfg.options.thinkingLevel, excludeTools: cfg.options.excludeTools, scopedModels: cfg.options.scopedModels, settingsManager, sessionManager, resourceLoader,
-      noTools: 'builtin', tools: [...bridge.tools.map(t => t.name), ...cfg.engine_tools] });
+      ...sessionToolSelection(cfg, bridge), settingsManager, sessionManager, resourceLoader });
     if (result.modelFallbackMessage) throw new Error('Session resume changed the selected model');
     if (cfg.reselection) await installReselection(result.session, modelRuntime, cfg, bridge, authority);
     result.session.subscribe(event => {

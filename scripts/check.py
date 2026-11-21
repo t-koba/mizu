@@ -124,6 +124,7 @@ RECEIPT_RESERVE_SECONDS = 120
 SDK_GATE_ADAPTERS = {
     'node-durable-contract-tests': ('pi-durable',),
     'node-pi-sdk-contract-tests': ('pi',),
+    'node-pi-namespace-tests': ('pi',),
     'node-pi-reasoning-replay-tests': ('pi', 'pi-durable'),
 }
 #: The SDK contract suite names, in the order the gate runs them.
@@ -131,8 +132,8 @@ SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
 #: The wall-clock budget the gate may spend on the checks that follow the
 #: Python suite. The later phase runs one child per check: the transport
 #: and SDK contract suites, one syntax check per JavaScript file, one per
-#: shell wrapper -- seventeen children in a POSIX matrix cell, ten on
-#: Windows, twenty in the durable job. `later_phase_child_count` derives
+#: shell wrapper -- nineteen children in a POSIX matrix cell, twelve on
+#: Windows, twenty-three in the durable job. `later_phase_child_count` derives
 #: these from the checked file set. A budget per child would make the gate's
 #: own path grow with the number of checked files, so the phase is
 #: bounded as a whole and every enclosing scope holds one phase budget.
@@ -140,7 +141,7 @@ SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
 #: for the earlier sixteen-child POSIX cell, and about 103 s for the earlier
 #: nineteen-child durable job (its three SDK contract suites measured 5.6 s,
 #: 75.5 s and 18.1 s on the development host). Those measurements predate the
-#: current seventeen- and twenty-child phases, so they are lower bounds. The
+#: current nineteen- and twenty-three-child phases, so they are lower bounds. The
 #: budget is sized for two children's full bounds, so one hung child still
 #: leaves a run for the next child when no install is charged; a
 #: pinned-adapter install draws from the same budget and reduces the next
@@ -492,7 +493,7 @@ def later_phase_child_count(*, platform: str | None = None, sdk_suites: int = 0,
     """The number of children the later phase runs in one configuration.
 
     The later phase runs the transport suite, every SDK contract suite that
-    is not waived (`sdk_suites` of them: the matrix cells waive all three
+    is not waived (`sdk_suites` of them: the matrix cells waive all four
     and the durable job runs all of them), one syntax check per JavaScript
     file, and one per shell wrapper on a POSIX host with a functional bash.
     This count is what the phase budget has to cover: a budget per child
@@ -1725,7 +1726,7 @@ def main():
                     print('== provisioned ' + str(adapters[name])
                           + ' pinned dependencies from the offline npm cache ==')
                 verdicts[name] = (state, details)
-        durable_name, pi_sdk_name, replay_name = SDK_GATE_NAMES
+        durable_name, pi_sdk_name, namespace_name, replay_name = SDK_GATE_NAMES
         durable_state, durable_details = verdicts['pi-durable']
         if durable_state == 'ready':
             execute(durable_name, ['node', '--test', 'tests/durable.test.mjs'],
@@ -1739,6 +1740,11 @@ def main():
         else:
             checks.append(sdk_gate_entry(pi_sdk_state, pi_sdk_details, allowed_not_run,
                                          name=pi_sdk_name))
+        if pi_sdk_state == 'ready':
+            execute(namespace_name, ['node', 'scripts/check-pi-namespace.mjs'], later_phase=True)
+        else:
+            checks.append(sdk_gate_entry(pi_sdk_state, pi_sdk_details, allowed_not_run,
+                                         name=namespace_name))
         # This gate uses both real installed SDKs, not the fake-RPC bridge.
         replay_deps = [(adapter, *verdicts[adapter]) for adapter in ('pi', 'pi-durable')]
         if all(state == 'ready' for _, state, _ in replay_deps):

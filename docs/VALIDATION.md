@@ -47,6 +47,8 @@ Mizuは現在、完全なlive-validation集計を生成しません。運用の�
 python3 scripts/check.py --report private-validation/offline.json
 python3 scripts/check-cli.py --codex /path/to/codex --claude-python /path/to/adapter/python3 --report private-validation/contracts.json
 node scripts/check-pi-sdk.mjs
+# インストール済みSDKとfauxモデルで配備済みlauncherのnamespace/factory選択を検査（ネットワークなし）。
+node scripts/check-pi-namespace.mjs
 python3 scripts/check-model-adapters.py --codex /path/to/codex --claude-python /path/to/adapter/python3 --claude-cli /path/to/claude --report private-validation/mock-provider.json
 ./scripts/test-install.sh
 python3 scripts/package.py --release --output dist

@@ -10,6 +10,7 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall }
   from '../adapters/pi/node_modules/@earendil-works/pi-ai/dist/index.js';
 import { createInMemoryTransportPair }
   from '../adapters/pi/node_modules/@earendil-works/pi-mcp/dist/testing/index.js';
+import { extensionFactories, sessionToolSelection } from '../adapters/pi/extension-factories.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'mizu-pi-namespace-'));
 let session;
@@ -18,6 +19,16 @@ try {
     modelsStorePath: join(directory, 'models.json'), refreshOnCreate: false, allowModelNetwork: false });
   const faux = fauxProvider({ provider: 'test-only', models: [{ id: 'model', contextWindow: 32768, maxTokens: 1024 }] });
   runtime.registerNativeProvider(faux.provider);
+
+  const cfg = {
+    options: { codemode: true, toolSearch: true, excludeTools: [], scopedModels: undefined },
+    mcp_servers: { guides: { type: 'stdio', command: 'in-memory-fixture', args: [], exposure: 'codemode',
+      description: 'Offline guide lookup for the namespace check.' } },
+    engine_tools: [], authority_sections: undefined, promptCwd: undefined,
+  };
+  // noTools:'builtin' replaces the settings defaultTools loadout, so the fixture grant
+  // list includes the two SDK selection tools alongside the namespaced fixture tool.
+  const bridge = { tools: [{ name: 'find_reference' }, { name: 'codemode' }, { name: 'tool_search' }] };
 
   // A local MCP server: the transport factory injects its client, so no stdio process or HTTP.
   const mcpCalls = [];
@@ -46,31 +57,41 @@ try {
     void server.start(); // start the in-memory peer as well as the injected client
     return client;
   };
-  const loadConfig = () => ({ servers: [{ name: 'guides', scope: 'extension', source: 'namespace-check',
-    config: { type: 'stdio', command: 'in-memory-fixture', args: [], exposure: 'codemode',
-      description: 'Offline guide lookup for the namespace check.' } }], errors: [], autoEnableCodemode: true });
 
-  const fixtureFactory = pi => pi.registerTool({
-    name: 'find_reference', label: 'Find reference',
-    description: 'Find a local documentation reference by topic.',
-    parameters: { type: 'object', properties: { topic: { type: 'string' } }, required: ['topic'], additionalProperties: false },
-    exposure: 'codemode',
-    namespace: { name: 'mcp__docs', aliases: ['docs'], description: 'Local documentation fixture.',
-      instructions: 'Call find_reference for local documentation topics.' },
-    execute: async (_id, params) => ({ content: [{ type: 'text', text: `reference for ${params.topic}` }], details: {} }),
-  });
+  const fixtureRegister = pi => {
+    pi.registerTool({
+      name: 'find_reference', label: 'Find reference',
+      description: 'Find a local documentation reference by topic.',
+      parameters: { type: 'object', properties: { topic: { type: 'string' } }, required: ['topic'], additionalProperties: false },
+      exposure: 'codemode',
+      namespace: { name: 'mcp__docs', aliases: ['docs'], description: 'Local documentation fixture.',
+        instructions: 'Call find_reference for local documentation topics.' },
+      execute: async (_id, params) => ({ content: [{ type: 'text', text: `reference for ${params.topic}` }], details: {} }),
+    });
+  };
+  const sdk = { register: fixtureRegister, createCodemodeExtension, createToolSearchExtension, createMcpExtension };
+  const mcpOptions = { createTransport, logPath: join(directory, 'mcp.log') };
+  const factories = extensionFactories(cfg, bridge, sdk, mcpOptions);
+  const selection = sessionToolSelection(cfg, bridge);
+  assert.deepEqual(factories.map(f => f.name), ['mizu', 'codemode', 'tool-search', 'mcp']);
+  assert.equal(selection.noTools, 'builtin');
+  assert.deepEqual(selection.tools, ['find_reference', 'codemode', 'tool_search']);
+  const minimalCfg = { ...cfg, options: { ...cfg.options, codemode: false, toolSearch: false }, mcp_servers: {} };
+  assert.deepEqual(extensionFactories(minimalCfg, bridge, sdk).map(f => f.name), ['mizu']);
+
   const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false },
     defaultTools: ['codemode', 'tool_search'] });
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
-    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [fixtureFactory, createCodemodeExtension(),
-      createToolSearchExtension(), createMcpExtension({ loadConfig, createTransport,
-        logPath: join(directory, 'mcp.log') })], systemPrompt: 'Offline namespace check.' });
+    noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    extensionFactories: factories, systemPrompt: 'Offline namespace check.' });
   await resourceLoader.reload();
   assert.deepEqual(resourceLoader.getExtensions().errors, []);
   ({ session } = await createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
     model: faux.getModel(), settingsManager, sessionManager: SessionManager.inMemory(directory),
-    resourceLoader }));
+    resourceLoader, ...selection }));
+  // Keep the namespaced fixture tool deferred so tool_search selects it, as in the
+  // original no-allowlist setup; the SDK otherwise activates explicitly named tools.
+  session.setActiveToolsByName(['codemode', 'tool_search']);
   await session.bindExtensions({});
 
   const namespaceOf = name => session.getAllTools().find(tool => tool.name === name);

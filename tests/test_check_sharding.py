@@ -128,7 +128,8 @@ class TestIdShardTests(unittest.TestCase):
                 report_path = root / 'report.json'
                 argv = ['check.py', '--no-provision', '--report', str(report_path),
                         '--allow-not-run', 'node-durable-contract-tests,'
-                        'node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests']
+                        'node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests,'
+                        'node-pi-namespace-tests']
                 if shard is not None:
                     argv += ['--test-shard', str(shard)]
                 with mock.patch.object(CHECK, 'ROOT', root), \

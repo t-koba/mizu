@@ -82,7 +82,7 @@ not an installer input, and `installation.json` contains no check rows, gate
 provenance or CI acceptance identity. `./scripts/test-install.sh` takes no
 arguments and exercises the same installer/CLI lifecycle on both installs.
 
-On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix waiver is a scoped fallback, not a substitute for that authoritative job.
+On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, namespace, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix waiver is a scoped fallback, not a substitute for that authoritative job.
 
 The gate installs the pinned dependencies itself when they are absent: it runs
 `npm ci --offline --engine-strict --no-audit --no-fund --ignore-scripts` with

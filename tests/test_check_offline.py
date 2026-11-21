@@ -291,12 +291,12 @@ class CheckTimeoutTests(unittest.TestCase):
         # JavaScript file, and one per shell wrapper on a POSIX host. The
         # account of the product's own CI is these counts, so they are
         # pinned here: a changed file set must change this account.
-        self.assertEqual(CHECK.later_phase_child_count(platform='posix'), 18)
-        self.assertEqual(CHECK.later_phase_child_count(platform='nt'), 11)
-        self.assertEqual(len(CHECK.SDK_GATE_NAMES), 3)
+        self.assertEqual(CHECK.later_phase_child_count(platform='posix'), 19)
+        self.assertEqual(CHECK.later_phase_child_count(platform='nt'), 12)
+        self.assertEqual(len(CHECK.SDK_GATE_NAMES), 4)
         self.assertEqual(CHECK.later_phase_child_count(
-            platform='posix', sdk_suites=len(CHECK.SDK_GATE_NAMES)), 21)
-        self.assertEqual(len(CHECK.javascript_sources()), 10)
+            platform='posix', sdk_suites=len(CHECK.SDK_GATE_NAMES)), 23)
+        self.assertEqual(len(CHECK.javascript_sources()), 11)
         self.assertEqual(len(CHECK.shell_sources()), 7)
 
     def test_later_phase_is_bounded_as_a_whole_not_per_child(self):
@@ -391,7 +391,7 @@ class CheckTimeoutTests(unittest.TestCase):
             report = Path(temporary) / 'offline.json'
             wrapper = Path(temporary) / 'gate.py'
             waivers = ('node-durable-contract-tests,node-pi-sdk-contract-tests,'
-                       'node-pi-reasoning-replay-tests')
+                       'node-pi-reasoning-replay-tests,node-pi-namespace-tests')
             wrapper.write_text(
                 'import importlib.util, sys\n'
                 f'spec = importlib.util.spec_from_file_location("check", {str(ROOT / "scripts" / "check.py")!r})\n'
@@ -429,13 +429,14 @@ class CheckTimeoutTests(unittest.TestCase):
         # An SDK contract suite is a child of the phase only where its
         # pinned dependencies are ready: the matrix cells have none, the
         # durable job has all of them.
-        durable_name, pi_sdk_name, replay_name = CHECK.SDK_GATE_NAMES
+        durable_name, pi_sdk_name, namespace_name, replay_name = CHECK.SDK_GATE_NAMES
         durable_state, _ = CHECK.pi_sdk_deps_status(ROOT / 'adapters' / 'pi-durable')
         pi_state, _ = CHECK.pi_sdk_deps_status(ROOT / 'adapters' / 'pi')
         if durable_state == 'ready':
             expected.add(durable_name)
         if pi_state == 'ready':
             expected.add(pi_sdk_name)
+            expected.add(namespace_name)
         if pi_state == 'ready' and durable_state == 'ready':
             expected.add(replay_name)
         self.assertEqual({entry['name'] for entry in refused}, expected)
@@ -1580,7 +1581,9 @@ class GateReceiptOutputBudgetTests(unittest.TestCase):
             full = json.loads(report.read_text(encoding='utf-8'))
             printed = stdout.getvalue()
             self.assertEqual(status, 1)
-            self.assertEqual(len(full['checks']), 240 + 1 + 1 + 3 + 1 + 2)
+            # One receipt row per SDK gate, including the namespace gate.
+            self.assertEqual(len(full['checks']),
+                             240 + 1 + 1 + len(CHECK.SDK_GATE_NAMES) + 1 + 2)
             self.assertTrue(any(entry.get('name') ==
                                 'javascript-syntax:adapters/pi/synthetic-239.mjs'
                                 for entry in full['checks']))
@@ -2574,7 +2577,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             "private-validation/offline.json")
         self.assertIn(shard_command, workflow)
         self.assertIn("format('--test-shard {0}', matrix.shard)", compatibility)
-        self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
+        self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests,node-pi-namespace-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
         self.assertIn('run: ./scripts/test-install.sh\n', workflow)
         self.assertIn('  durable-contract:', workflow)
@@ -2787,13 +2790,16 @@ class PinnedDependencyProvisionTests(unittest.TestCase):
         self.assertEqual(CHECK.provision_targets(frozenset({'node-durable-contract-tests',
                                                             'node-pi-reasoning-replay-tests'})),
                          {'pi'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-pi-namespace-tests'})),
+                         {'pi', 'pi-durable'})
         self.assertEqual(CHECK.provision_targets(frozenset({'node-pi-sdk-contract-tests',
                                                             'node-pi-reasoning-replay-tests'})),
-                         {'pi-durable'})
+                         {'pi', 'pi-durable'})
         self.assertEqual(CHECK.provision_targets(frozenset({'node-durable-contract-tests',
                                                             'node-pi-sdk-contract-tests',
                                                             'node-pi-reasoning-replay-tests'})),
-                         set())
+                         {'pi'})
+        self.assertEqual(CHECK.provision_targets(frozenset(CHECK.SDK_GATE_NAMES)), set())
 
     def test_real_offline_cache_provisions_the_pinned_adapter(self):
         # Environment-coupled by nature: where the operator mounted an
@@ -2816,7 +2822,8 @@ class SdkGateEntryTests(unittest.TestCase):
     NAME = 'node-durable-contract-tests'
 
     def test_each_pi_gate_requires_its_own_explicit_waiver(self):
-        for name in ('node-pi-sdk-contract-tests', 'node-pi-reasoning-replay-tests'):
+        for name in ('node-pi-sdk-contract-tests', 'node-pi-namespace-tests',
+                     'node-pi-reasoning-replay-tests'):
             with self.subTest(name=name):
                 self.assertIsNone(CHECK.sdk_gate_entry('ready', '', frozenset(), name=name))
                 entry = CHECK.sdk_gate_entry('absent', 'missing SDK', frozenset({self.NAME}), name=name)
@@ -2858,6 +2865,40 @@ class SdkGateEntryTests(unittest.TestCase):
         self.assertEqual(CHECK._allow_list(""), frozenset())
         self.assertEqual(CHECK._allow_list("a, b ,,a"), frozenset({"a", "b"}))
 
+    def test_namespace_gate_runs_the_namespace_script_with_the_pi_adapter(self):
+        # The new gate is a child of the later phase, uses the installed pi
+        # SDK, and runs its own namespace/factory script rather than the
+        # SDK-contract script.
+        self.assertEqual(CHECK.SDK_GATE_ADAPTERS['node-pi-namespace-tests'], ('pi',))
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'report.json'
+            commands = []
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    commands.append(command)
+                    self.stdout = io.StringIO('')
+
+                def wait(self, timeout):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            with mock.patch.object(CHECK.sys, 'argv',
+                                   ['check.py', '--report', str(report), '--no-provision']), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK, 'node_version', return_value='v22.0.0'), \
+                    mock.patch.object(CHECK, 'pi_sdk_deps_status', return_value=('ready', '')), \
+                    mock.patch.object(CHECK.shutil, 'which',
+                                      side_effect=lambda name: '/usr/bin/node' if name == 'node' else None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', io.StringIO()):
+                self.assertEqual(CHECK.main(), 0)
+            self.assertIn(['node', 'scripts/check-pi-namespace.mjs'], commands)
+            self.assertIn(['node', 'scripts/check-pi-sdk.mjs'], commands)
 
 
 class SourceManifestStabilityTests(unittest.TestCase):
@@ -2892,6 +2933,7 @@ class SourceManifestStabilityTests(unittest.TestCase):
 
                 waivers = sorted(("node-durable-contract-tests",
                                   "node-pi-sdk-contract-tests",
+                                  "node-pi-namespace-tests",
                                   "node-pi-reasoning-replay-tests"))
                 with mock.patch.object(CHECK, "ROOT", root), \
                                 mock.patch.object(CHECK.sys, "argv", ["check.py", "--report", str(report_path),

@@ -39,10 +39,10 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
         # Offline runners do not provision the operator-owned Pi SDKs, so the
-        # SDK, durable, and reasoning-replay gates are explicitly waived here;
+        # SDK, namespace, durable, and reasoning-replay gates are waived here;
         # the authoritative network-enabled job below provisions both adapters.
         # Every cell publishes sanitized per-test timing evidence.
-        run: python scripts/check.py ${{ matrix.shard && format('--test-shard {0} ', matrix.shard) || '' }}--report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+        run: python scripts/check.py ${{ matrix.shard && format('--test-shard {0} ', matrix.shard) || '' }}--report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests,node-pi-namespace-tests --fail-fast
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         # The installer runs no source suite: it stages the tree and verifies
