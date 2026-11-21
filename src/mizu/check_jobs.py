@@ -76,6 +76,10 @@ MAX_CHECK_JOB_PROJECTION_ROWS = 32
 MAX_CHECK_STEER_NOTIFICATIONS = 8
 #: Bound each host-owned steer notification, including its fixed framing.
 MAX_CHECK_STEER_MESSAGE_BYTES = 1024
+#: Bound untrusted job identifiers embedded in a steer notification.
+MAX_CHECK_STEER_JOB_ID_CHARS = 128
+#: Bound untrusted status labels embedded in a steer notification.
+MAX_CHECK_STEER_STATUS_CHARS = 64
 #: Keep each per-job command preview small and useful.
 MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS = 4
 #: Fixed short text excerpt for commands and prior-run identities.
@@ -2021,8 +2025,8 @@ def steer_message(job):
     """Bounded host-owned notification; never carries job output or text."""
     message = ('MIZU CHECK RESULT (notification, not acceptance): job {id} is {status} '
                '(passed={passed}). Read it with mizu_check_job action=result id={id} when useful.'
-               .format(id=str(job.get('id', ''))[:128],
-                       status=str(job.get('status', ''))[:64],
+               .format(id=str(job.get('id', ''))[:MAX_CHECK_STEER_JOB_ID_CHARS],
+                       status=str(job.get('status', ''))[:MAX_CHECK_STEER_STATUS_CHARS],
                        passed=job.get('passed') is True))
     return text_preview(message, MAX_CHECK_STEER_MESSAGE_BYTES)[0]
 

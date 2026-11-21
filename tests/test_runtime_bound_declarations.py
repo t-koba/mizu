@@ -847,6 +847,14 @@ DECLARATIONS = {
             '24', 'format', 'check jobs / stable container-role identity suffix format'),
         'MAX_CHECK_JOB_PROJECTION_ROWS': (
             '32', 'safety', 'check jobs / bounded role-owned summary rows per projection'),
+        'MAX_CHECK_STEER_NOTIFICATIONS': (
+            '8', 'safety', 'check jobs / bounded check-result notifications steered into one unit'),
+        'MAX_CHECK_STEER_MESSAGE_BYTES': (
+            '1024', 'safety', 'check jobs / bounded host-owned steer notification message'),
+        'MAX_CHECK_STEER_JOB_ID_CHARS': (
+            '128', 'safety', 'check jobs / bounded job identifier excerpt in a steer notification'),
+        'MAX_CHECK_STEER_STATUS_CHARS': (
+            '64', 'safety', 'check jobs / bounded status label excerpt in a steer notification'),
         'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS': (
             '4', 'safety', 'check jobs / bounded commands shown per job summary'),
         'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS': (
@@ -3654,6 +3662,7 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(preview_widths, {
             'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
             'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
+            'MAX_CHECK_STEER_MESSAGE_BYTES',
             'preview_bytes',
         })
         evidence_id = next(node for node in tree.body if isinstance(node, ast.Assign)
@@ -3664,6 +3673,10 @@ def no_defaults(limit, /, count, *, size):
         for name in (
                 'MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS',
                 'MAX_CHECK_JOB_PROJECTION_ROWS',
+                'MAX_CHECK_STEER_NOTIFICATIONS',
+                'MAX_CHECK_STEER_MESSAGE_BYTES',
+                'MAX_CHECK_STEER_JOB_ID_CHARS',
+                'MAX_CHECK_STEER_STATUS_CHARS',
                 'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS',
                 'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
                 'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
