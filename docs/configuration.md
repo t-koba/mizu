@@ -2348,7 +2348,7 @@ incomplete scan as proof of exact uniqueness. Standalone readers and work-item
 stores use the same defaults when no policy is supplied. These settings do not
 affect receipt writes, CI-request evidence budgets, dispatch or provider reads.
 
-A page no larger than both budgets instead reads the writer-owned key index in
+A requested page is capped by both budgets and reads the writer-owned key index in
 `evidence/publication-keys` as a complete receipt inventory. Its schema-3
 entries carry each validated receipt's ordering instant and exact filter
 fields, so one bounded fixed-path read supplies the order, filters and match

@@ -1074,9 +1074,10 @@ class Publication:
                     published_sha, cursor_key):
         """Build one page from the writer's complete receipt index, or None.
 
-        A narrow page (one whose size fits both configured bounds) validates
-        at most ``limit`` receipts; a wide page stays on the bounded directory
-        scan so the policy still bounds ordinary listings. The index is one
+        The requested limit is an upper bound: this reader validates at most
+        ``limit`` receipts, capped by both configured bounds. A wider request
+        therefore returns a shorter real page with a continuation cursor
+        rather than dropping the index. The index is one
         bounded fixed-path read, and its fresh, complete, structurally checked
         schema-3 metadata supplies the inventory, order, filters and count.
         Every page row is revalidated from its no-follow bounded receipt bytes
@@ -1085,8 +1086,6 @@ class Publication:
         the only path a strict reader takes. Failure: ``None`` means "use the
         scan", never "no receipt exists".
         """
-        if limit > min(policy.name_processing_limit, policy.record_limit):
-            return None
         try:
             store = cls._receipt_store(project_root)
             index = cls._read_key_index(store, policy, for_listing=True)
@@ -1108,7 +1107,8 @@ class Publication:
         if cursor_key is not None:
             matches = [item for item in matches if item[0] < cursor_key]
         page = []
-        for key, entry in matches[:limit]:
+        page_size = min(limit, policy.name_processing_limit, policy.record_limit)
+        for key, entry in matches[:page_size]:
             try:
                 record = cls.read_receipt(project_root, entry["publication_id"])
             except (Denied, LimitExceeded, OSError):
@@ -1150,8 +1150,10 @@ class Publication:
         most 128 characters; publication_evidence policy bounds name processing
         and candidate validation (defaults 10000/1000). A page no larger than
         both bounds reads the writer's bounded key index as a complete
-        inventory and validates only that page's receipts; wider pages and
-        strict readers use the bounded directory scan. On that scan all
+        inventory and validates at most that many receipts; a wider request
+        still uses the index, returning a policy-bounded page and a real
+        continuation cursor. Strict readers use the bounded directory scan.
+        On that scan all
         directory names are materialized and sorted before these bounds apply;
         they do not bound the initial enumeration or its memory.
         Trust: locally recorded evidence; an unreadable, oversized or

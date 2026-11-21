@@ -244,10 +244,37 @@ class ExternalPublicationTests(Fixture):
 
         outside = next(record for record in records
                        if record["publication_id"] not in prefix)
+        # An omitted limit is an upper bound, not a reason to abandon a
+        # healthy index: the policy caps the page and supplies a cursor.
         bounded = Publication.list_receipts(self.root, limit=5, policy=narrow)
         self.assertNotIn(outside["publication_id"],
                          [row["publication_id"] for row in bounded["publications"]])
-        self.assertTrue(bounded["scan_stopped"])
+        self.assertFalse(bounded["scan_stopped"])
+        self.assertEqual(bounded["total"], 5)
+        self.assertEqual([row["publication_id"] for row in bounded["publications"]],
+                         newest[:3])
+        self.assertTrue(bounded["truncated"])
+        self.assertRegex(bounded["next_cursor"], r"\Apub1\|[0-9]+\|[0-9a-f]{64}\Z")
+        default_seen = [row["publication_id"] for row in bounded["publications"]]
+        cursor = bounded["next_cursor"]
+        while cursor is not None:
+            page = Publication.list_receipts(self.root, cursor=cursor, policy=narrow)
+            self.assertEqual(page["total"], 5)
+            self.assertFalse(page["scan_stopped"])
+            default_seen.extend(row["publication_id"] for row in page["publications"])
+            self.assertLessEqual(len(default_seen), len(newest))
+            cursor = page["next_cursor"]
+        self.assertEqual(default_seen, newest)
+        self.assertIsNone(cursor)
+
+        exact = Publication.list_receipts(self.root, policy=narrow,
+                                          code_digest=records[1]["code_digest"])
+        self.assertEqual(exact["total"], 1)
+        self.assertEqual([row["publication_id"] for row in exact["publications"]],
+                         [newest[3]])
+        self.assertFalse(exact["truncated"])
+        self.assertFalse(exact["scan_stopped"])
+        self.assertIsNone(exact["next_cursor"])
         for filters, size in (
                 ({"code_digest": outside["code_digest"]}, 1),
                 ({"published_sha": outside["published_sha"]}, 1),
@@ -331,6 +358,9 @@ class ExternalPublicationTests(Fixture):
     def test_list_receipts_reports_a_stopped_scan_instead_of_an_absent_receipt(self):
         for index in range(3):
             self.record(published_sha="%040x" % index, code_digest="%064x" % index)
+        # Bump the directory stamp so this narrow reader must use its scan;
+        # with a fresh index the reader would instead get a bounded index page.
+        (self.root / "evidence" / "publications" / "!reader-change").touch()
         page = Publication.list_receipts(self.root, policy=PublicationEvidence(record_limit=1))
         # The scan stopped at its bound, so the count is a lower bound and the
         # page never claims that no receipt exists.
