@@ -871,7 +871,8 @@ Use the candidate release's installer. With the configured projects stopped,
 promotion verifies the staged manifest and dependency locks before switching
 `current` and the `mizu` launcher. An unreadable or incomplete verification
 blocks promotion. The promotion result reports only `status`, `release` and a
-`note`: promotion switches code only. It does not touch project data, run a
+`note`, and a `mode_change` field with `from`/`to` when the installer changes
+the agent runtime mode: promotion switches code only. It does not touch project data, run a
 data conversion, or change budgets and side effects; services stay stopped
 until you start and arm them explicitly.
 
