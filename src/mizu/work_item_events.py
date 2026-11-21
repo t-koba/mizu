@@ -247,11 +247,12 @@ def _compose_index(store, found, roles, received):
 def _rebuild_index(store, extra=()):
     """Build the whole index once under the caller's record write lock.
 
-    Full chain validation belongs here, never on a read. A rebuild is also
-    used for a superseded terminal head or a newly seen role, where exact
-    acknowledgement samples cannot be derived from the compact state.
+    Terminal payloads and exact receipts are validated here, never on a
+    read. The ledger stays authoritative and is not rebuilt: change cursors
+    must survive an event-index rebuild. A rebuild is also used for a
+    superseded terminal head or a newly seen role, where exact acknowledgement
+    samples cannot be derived from the compact state.
     """
-    store._ledger.rebuild("items")
     with store._ledger.read("items", locked=True) as db:
         found = _rows(db, "SELECT item, creator, status FROM items "
                       "WHERE status IN ('done','dropped') ORDER BY id")
