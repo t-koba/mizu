@@ -26,7 +26,7 @@ from .work_items import (_ReverseKey, _directory, _timestamp, _timestamp_order,
 SOURCE = "work_item"
 ACKED_ID_SAMPLE = 10
 INDEX_NAME = "work-item-events-index.json"
-HEADS_NAME = "work-item-events-heads.json"
+HEADS_NAME = "work-item-events-heads"
 INDEX_SCHEMA = 2
 MAX_INDEX_BYTES = 16 * 1024 * 1024
 
@@ -186,12 +186,56 @@ def _write_index(store, index):
     _write_state(store, INDEX_NAME, index, _validate_index)
 
 
-def _read_heads(store):
-    return _read_state(store, HEADS_NAME, _validate_heads, {"schema": INDEX_SCHEMA, "heads": {}})
+def _head_path(store, item_id):
+    if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
+        raise Denied("Malformed work-item event head")
+    return store.root / HEADS_NAME / f"{item_id}.json"
+
+
+def _validate_head(value, item_id):
+    if (not isinstance(value, dict) or set(value) != {"schema", "event"}
+            or type(value["schema"]) is not int or value["schema"] != INDEX_SCHEMA
+            or not isinstance(value["event"], str)
+            or value["event"].split(":")[1:2] != [item_id]):
+        raise Denied("Malformed work-item event head")
+
+
+def _read_head(store, item_id):
+    """One terminal head by item key; absent is None, never a full scan."""
+    path = _head_path(store, item_id)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    raw = safe_read(store.root, f"{HEADS_NAME}/{item_id}.json", MAX_INDEX_BYTES)
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise Denied("Malformed work-item event head") from exc
+    _validate_head(value, item_id)
+    return value["event"]
+
+
+def _write_head(store, item_id, event):
+    """Publish only the changed terminal head key."""
+    value = {"schema": INDEX_SCHEMA, "event": event}
+    _validate_head(value, item_id)
+    write_json(_head_path(store, item_id), value)
 
 
 def _write_heads(store, heads):
-    _write_state(store, HEADS_NAME, heads, _validate_heads)
+    """Rebuild-time sync of per-item head keys from validated terminal rows."""
+    directory = store.root / HEADS_NAME
+    mkdir(directory)
+    values = heads["heads"]
+    _validate_heads(heads)
+    wanted = {f"{item_id}.json" for item_id in values}
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.name not in wanted and not entry.is_dir(follow_symlinks=False):
+                os.unlink(entry.path)
+    for item_id, event in values.items():
+        _write_head(store, item_id, event)
 
 
 def _freshness(store):
@@ -357,24 +401,23 @@ def index_terminal(store, item, *, terminal=True, marker=None):
             or set(_index_roles(store)) - set(index["roles"])):
         # The in-flight head is already in the ledger, so the rebuild covers it.
         index = _rebuild_index(store)
+    item_id = item["id"]
     try:
-        heads = _read_heads(store)["heads"]
+        head_event = _read_head(store, item_id)
     except Denied:
         index = _rebuild_index(store)
-        heads = _read_heads(store)["heads"]
-    item_id = item["id"]
+        head_event = _read_head(store, item_id)
     if not terminal:
-        if item_id in heads:
+        if head_event is not None:
             _rebuild_index(store)
         return
     event_id = _identity(item)
-    if event_id == heads.get(item_id):
+    if event_id == head_event:
         return
-    if item_id in heads:
+    if head_event is not None:
         _rebuild_index(store)
         return
     creator, row = _terminal_row(store, item)
-    heads[item_id] = event_id
     if current is not None:
         index["generation"], index["terminal_seq"] = current
     if creator is None:
@@ -382,7 +425,7 @@ def index_terminal(store, item, *, terminal=True, marker=None):
     index["events"][event_id] = {"key": _event_key(row), "row": row}
     for state in index["roles"].values():
         state["pending"].append(event_id)
-    _write_heads(store, {"schema": INDEX_SCHEMA, "heads": heads})
+    _write_head(store, item_id, event_id)
     _write_index(store, index)
 
 

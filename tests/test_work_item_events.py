@@ -4,6 +4,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import shutil
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -634,7 +635,11 @@ class WorkItemEventTests(Fixture):
         events.acknowledge(self.store, "reviewer", rows)
         self.assertEqual(self.page()["acknowledged"], 1)
         for name in (events.INDEX_NAME, events.HEADS_NAME):
-            (self.project.root / name).unlink()
+            path = self.project.root / name
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
         with self.assertRaisesRegex(Denied, "index missing"):
             self.page()
         # The next terminal write rebuilds from validated source and receipts.
@@ -676,6 +681,60 @@ class WorkItemEventTests(Fixture):
         # The first close rebuilds once with its own row; the next four
         # closures append without scanning terminal history again.
         self.assertEqual(scanned, [1])
+
+    def test_terminal_closure_writes_only_its_changed_head_key(self):
+        _, item = self.terminal()
+        template = self.store.current(item["id"])
+
+        def measure(acknowledged):
+            _, seed = self.seed()
+            found = [(canonical(template).decode(), "reviewer", "dropped")]
+            for number in range(acknowledged):
+                synthetic = {**template, "id": f"wi_{number:032x}",
+                             "updated_at": f"2030-01-01T00:{number // 60 % 60:02d}:{number % 60:02d}+00:00"}
+                found.append((canonical(synthetic).decode(), "reviewer", "dropped"))
+            index, heads = events._compose_index(
+                self.store, found, events._index_roles(self.store),
+                lambda store, role, candidate: candidate["id"] != item["id"])
+            events._write_index(self.store, index)
+            events._write_head(self.store, item["id"], heads["heads"][item["id"]])
+            reads, writes = [], []
+            real_read, real_write = events.safe_read, events.write_json
+            root = str(self.project.root) + os.sep
+
+            def counting_read(base, name, maximum):
+                raw = real_read(base, name, maximum)
+                if name == events.INDEX_NAME or name.startswith(events.HEADS_NAME + "/"):
+                    reads.append((name, len(raw)))
+                return raw
+
+            def counting_write(path, value, **kwargs):
+                name = str(path)
+                if name.startswith(root):
+                    name = name[len(root):].replace(os.sep, "/")
+                if name == events.INDEX_NAME or name.startswith(events.HEADS_NAME + "/"):
+                    writes.append(name)
+                return real_write(path, value, **kwargs)
+
+            with patch.object(events, "safe_read", side_effect=counting_read), \
+                    patch.object(events, "write_json", side_effect=counting_write), \
+                    patch.object(events, "_write_heads", side_effect=AssertionError("full head rewrite")):
+                self.store.transition(seed["id"], expected_rev=1, status="dropped",
+                                      actor="worker", reason="Proportional head write")
+            normalise = lambda rows: [("head" if name.startswith(events.HEADS_NAME) else name, size)
+                                      for name, size in rows]
+            return normalise(reads), [("head" if name.startswith(events.HEADS_NAME) else name)
+                                      for name in writes]
+
+        small_reads, small_writes = measure(50)
+        large_reads, large_writes = measure(400)
+        self.assertEqual([name for name, _ in small_reads], [events.INDEX_NAME])
+        self.assertEqual([name for name, _ in large_reads], [events.INDEX_NAME])
+        self.assertEqual(small_writes, large_writes)
+        self.assertEqual(large_writes, ["head", events.INDEX_NAME])
+        # Only the acknowledgement counter's decimal width changes with 8x
+        # more retained head history; no per-head scan or rewrite is added.
+        self.assertLess(large_reads[0][1] - small_reads[0][1], 64)
 
     def test_new_role_sees_existing_events_on_refresh_and_fresh_project(self):
         import dataclasses as dc
