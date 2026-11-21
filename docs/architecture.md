@@ -905,8 +905,9 @@ ordering instant and exact filter fields of validated receipts, one bounded
 fixed-path read supplies the page order, filters and match count, and only that
 page's receipts are revalidated from bytes and checked against the metadata,
 so continuations and exact filters reach receipts beyond a stopped scan. A
-missing, stale, incomplete, legacy or mismatched index, a wider page or a
-strict reader uses the bounded directory scan and its `scan_stopped` semantics.
+wider request is capped by both budgets and returns a shorter page with a real
+cursor. A missing, stale, incomplete, legacy or mismatched index or a strict
+reader uses the bounded directory scan and its `scan_stopped` semantics.
 The same validation path lets an exact-SHA CI wait pin a `publication_id` to
 either receipt shape.
 
