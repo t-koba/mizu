@@ -31,10 +31,30 @@ class PollBoundsTests(Fixture):
         self.assertFalse(vcs_poll_proposals_enabled(cfg))
         observing = dataclasses.replace(cfg, vcs={**cfg.vcs,
             "observation_queue": "proposals"})
-        self.assertTrue(vcs_poll_proposals_enabled(observing))
+        # A queue alone does not opt into proposal polling.
+        self.assertFalse(vcs_poll_proposals_enabled(observing))
+        opted = dataclasses.replace(observing, vcs={**observing.vcs,
+            "poll_proposals_enabled": True})
+        self.assertTrue(vcs_poll_proposals_enabled(opted))
         off = dataclasses.replace(self.config, vcs={**self.config.vcs,
             "command": ["true"], "poll_enabled": False})
         self.assertFalse(vcs_poll_enabled(off))
+
+    def test_proposal_flag_is_a_validated_default_false_boolean(self):
+        original = self.file.read_text()
+        self.assertIs(self.config.vcs["poll_proposals_enabled"], False)
+        for value, expected in (("true", True), ("false", False)):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace("[vcs]",
+                    f"[vcs]\npoll_proposals_enabled = {value}", 1))
+                config = load(self.file)
+                self.assertIs(config.vcs["poll_proposals_enabled"], expected)
+        for value in ('"true"', "1", "yes"):
+            with self.subTest(malformed=value):
+                self.file.write_text(original.replace("[vcs]",
+                    f"[vcs]\npoll_proposals_enabled = {value}", 1))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
 
     def test_per_call_timeout_capped(self):
         out = capped_vcs_settings({"timeout_seconds": 1000}, 15)

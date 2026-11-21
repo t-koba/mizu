@@ -1979,7 +1979,7 @@ def load(file: Path) -> Config:
     vcs = data.get("vcs", {})
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
-               "poll_enabled", "observation_queue", "approval_queue", "change_stream_enabled", "ci_wait_descendants",
+               "poll_enabled", "poll_proposals_enabled", "observation_queue", "approval_queue", "change_stream_enabled", "ci_wait_descendants",
                "poll_interval_seconds", "poll_max_branches", "poll_max_ci_wait_targets",
                "ci_cache_max_branches", "ci_cache_max_checks_per_branch",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
@@ -1989,7 +1989,7 @@ def load(file: Path) -> Config:
            "artifact_full_read_chars": DEFAULT_ARTIFACT_FULL_READ_CHARS,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
-           "poll_enabled": False, "observation_queue": "", "approval_queue": "",
+           "poll_enabled": False, "poll_proposals_enabled": False, "observation_queue": "", "approval_queue": "",
            "change_stream_enabled": False, "ci_wait_descendants": True,
            "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4, "poll_max_ci_wait_targets": 16,
            "ci_cache_max_branches": DEFAULT_CI_CACHE_MAX_BRANCHES,
@@ -2049,6 +2049,7 @@ def load(file: Path) -> Config:
     number(vcs["ci_rewake_seconds"], "vcs.ci_rewake_seconds", 60, 86400)
     vcs["ci_wait_descendants"] = boolean(vcs["ci_wait_descendants"], "vcs.ci_wait_descendants")
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
+    vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
     queues = _kernel_queues(data.get("queues", {}))
     from .kernel.queues import allows as _queue_allows
     for key, writer in (("observation_queue", "host"), ("approval_queue", "operator")):

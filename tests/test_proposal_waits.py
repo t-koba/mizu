@@ -22,7 +22,7 @@ class ProposalWaitTests(Fixture):
     def setUp(self):
         super().setUp()
         self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
-            "poll_enabled": True, "command": ["configured-adapter"],
+            "poll_enabled": True, "poll_proposals_enabled": True, "command": ["configured-adapter"],
             "observation_queue": "proposals"})
         self.project = Project(self.config, "sample")
         self.store = self.project.work_items
@@ -75,6 +75,8 @@ class ProposalWaitTests(Fixture):
             self.store.transition(blocked["id"], expected_rev=1, status="blocked",
                                   actor="worker", wait=self.wait)
         with patch.dict(self.store.vcs, {"poll_enabled": False}), self.assertRaises(Denied):
+            self.block(wait=self.wait)
+        with patch.dict(self.store.vcs, {"poll_proposals_enabled": False}), self.assertRaises(Denied):
             self.block(wait=self.wait)
 
     def test_wrong_receipt_proposal_or_endpoints_denied(self):

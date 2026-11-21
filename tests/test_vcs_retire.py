@@ -350,7 +350,7 @@ class RetireLiveRefTests(Fixture):
         """
         config = dataclasses.replace(
             self.config, vcs={**self.config.vcs, "command": ["offline-vcs"],
-                              "poll_enabled": True,
+                              "poll_enabled": True, "poll_proposals_enabled": True,
                               "observation_queue": "proposals"})
         self.project.config = config
         state = {}

@@ -1938,8 +1938,10 @@ class WorkItems:
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
                 elif isinstance(wait, dict) and wait.get("kind") == "proposal_merged":
-                    if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
-                        raise Denied("Proposal waits require automatic VCS polling and an adapter")
+                    if (not self.vcs.get("poll_enabled")
+                            or not self.vcs.get("poll_proposals_enabled")
+                            or not self.vcs.get("command")):
+                        raise Denied("Proposal waits require proposal polling, an adapter and a queue")
                     from .proposal_waits import normalize
                     registered = normalize(self, {k: v for k, v in wait.items()
                                                   if k != "smoke_refs"})
