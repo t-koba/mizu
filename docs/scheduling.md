@@ -514,9 +514,9 @@ not a new authority or watcher. It never locks, recovers, writes, assigns or
 transitions work. Rows carry `id`, `rev`, `holder`, `wait_kind`, `state`, and a
 bounded reason code, plus `blocked_since`, `blocked_age_seconds` (integer seconds,
 clamped to zero after clock rollback). States are
-`absent` (legacy no-wait), `pending`, `due`, `impossible` (missing work-item target or an exact dependency revision superseded
-or substantively conflicting), `terminal` (the same exact CI/publication/proposal route as holder
-readiness), and `unknown`. Generic wait diagnostics without a current
+`absent` (legacy no-wait), `pending`, `due`, `impossible` (missing work-item target, an exact dependency revision superseded
+or substantively conflicting, or a held CI/publication_ci wait whose pinned commit can never receive a run),
+`terminal` (the same exact CI/publication/proposal route as holder readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
 exact route. The local liveness classifier can report `self_resolvable` as
 `sole_writer_code_change` or `sole_requester_ci`. Status omits those effectively
@@ -705,6 +705,16 @@ has established zero provider runs. This is a ready-set change, not CI success,
 a delivery event, an acknowledgement, or a ledger transition. A still-valid
 observation applies immediately to the same held wait. Missing evidence leaves
 ordinary blocked and terminal handling unchanged.
+
+A held `ci` or `publication_ci` wait whose pinned SHA is not any injected branch
+head, has no recorded CI request and no run in the bounded poll-state maps is
+`impossible` in blocked-work and ready-work liveness with reason code
+`ci_commit_unreachable`. Proof is local and exact: any current CI evidence, an
+unresolvable receipt route, an empty/unreadable/invalid ref inventory, an
+incomplete request ledger or malformed run maps leave the wait `pending`. This
+is a holder-action replanning signal only; it never dispatches, polls,
+acknowledges or transitions work, and the holder must still append a reasoned
+`blocked` → `open` revision.
 
 Adapters may attest exact run coverage in the existing `status` reply with
 `ci_inventory: {repository, branch, sha, complete: true, run_count: 0}`. The

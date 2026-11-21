@@ -172,6 +172,9 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
             from . import ci_waits
             observed = ci_waits.terminal_evidence(store, item)
             if observed is None:
+                unreachable = ci_waits.unreachable(store, item)
+                if unreachable is not None:
+                    return result("impossible", unreachable)
                 if ci_waits.holder_only(store, item):
                     self_resolvable = "sole_requester_ci"
                 return result("pending", "terminal_evidence_absent")

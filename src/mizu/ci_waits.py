@@ -16,11 +16,12 @@ import uuid
 from dataclasses import asdict
 from time import time
 
-from . import lineage
+from . import lineage, vcs
+from .ci_observation import POLL_STATE_FILE
 from .ci_requests import CiRequests
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, loads_finite, lock,
-                 mkdir, safe_read, sync_dir, write_json)
+                 mkdir, read_json, safe_read, sync_dir, write_json)
 from .fs import now as observed_now
 from .shared_records import RECORD_BYTES, RECEIPT_BYTES, KindPolicy, SharedRecords, _token
 from .publication import Publication
@@ -693,6 +694,81 @@ def evidence(store, item, *, sync=False):
     if observed is None or observed[1] is _LEGACY_ACKNOWLEDGED:
         return None
     return observed
+
+
+#: Bounded, holder-actionable reason for a CI commit no harness run can reach.
+UNREACHABLE_REASON = "ci_commit_unreachable"
+
+
+def _poll_run_state(raw, sha):
+    """Whether a run for ``sha`` is recorded, or ``None`` when the cache cannot prove absence.
+
+    Both bounded run maps and every retained row must be well formed. Any
+    matching sha, malformed entry or pending change scan is unknown, not empty.
+    """
+    if not isinstance(raw, dict) or raw.get("ci_changes_pending") is True:
+        return None
+    found = False
+    for name in ("failures", "successes"):
+        mapping = raw.get(name)
+        if not isinstance(mapping, dict):
+            return None
+        for branch, rows in mapping.items():
+            if not isinstance(branch, str) or not isinstance(rows, list):
+                return None
+            for row in rows:
+                if (not isinstance(row, dict)
+                        or not isinstance(row.get("sha"), str)
+                        or not vcs._SHA.fullmatch(row["sha"])
+                        or not isinstance(row.get("check"), str)
+                        or not 1 <= len(row["check"]) <= 256
+                        or "\n" in row["check"] or "\x00" in row["check"]):
+                    return None
+                found = found or row["sha"] == sha
+    return found
+
+
+def unreachable(store, item):
+    """Bounded proof that a pinned CI commit can never receive a harness run.
+
+    Read-only and local: no adapter call, polling, notification or transition.
+    Returns a bounded reason only when current evidence is absent, the receipt
+    route resolves, the commit is no injected branch head, no CI request was
+    recorded for it, and both poll-state run maps are complete and lack it. An
+    empty or unreadable ref inventory and any malformed record stay unknown.
+    """
+    try:
+        if _read(store, item) is not None:
+            return None
+        # An empty or invalid ref inventory is unknown regardless of the
+        # receipt route; check it before any receipt-key resolution.
+        refs = vcs.list_refs(store.root)
+        if not refs:
+            return None
+        for name in refs:
+            vcs._check_ref_name(name)
+        wait = _resolved(store, item["wait"])
+        if wait is None:
+            return None
+        sha, branch = wait["sha"], wait["branch"]
+        if (not isinstance(sha, str) or not vcs._SHA.fullmatch(sha)
+                or not isinstance(branch, str) or not branch):
+            return None
+        for name in refs:
+            if vcs._short_branch_name(name) != branch:
+                continue
+            if vcs.read_ref(store.root, name) == sha:
+                return None
+        rows, incomplete = CiRequests(store.root)._rows(strict=True)
+        if incomplete or any(isinstance(row, dict) and row.get("sha") == sha for row in rows):
+            return None
+        raw = read_json(store.root / POLL_STATE_FILE, {}, max_bytes=MAX_FRAME)
+        if _poll_run_state(raw, sha) is not False:
+            return None
+        return UNREACHABLE_REASON
+    except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError,
+            KeyError, OverflowError, RecursionError):
+        return None
 
 
 def _shared_ack_corrupt(store, item):
