@@ -45,14 +45,16 @@ class PollBoundsTests(Fixture):
         self.assertIs(self.config.vcs["poll_proposals_enabled"], False)
         for value, expected in (("true", True), ("false", False)):
             with self.subTest(value=value):
-                self.file.write_text(original.replace("[vcs]",
-                    f"[vcs]\npoll_proposals_enabled = {value}", 1))
+                self.file.write_text(original.replace(
+                    "poll_proposals_enabled = false",
+                    f"poll_proposals_enabled = {value}", 1))
                 config = load(self.file)
                 self.assertIs(config.vcs["poll_proposals_enabled"], expected)
         for value in ('"true"', "1", "yes"):
             with self.subTest(malformed=value):
-                self.file.write_text(original.replace("[vcs]",
-                    f"[vcs]\npoll_proposals_enabled = {value}", 1))
+                self.file.write_text(original.replace(
+                    "poll_proposals_enabled = false",
+                    f"poll_proposals_enabled = {value}", 1))
                 with self.assertRaises(ConfigError):
                     load(self.file)
 

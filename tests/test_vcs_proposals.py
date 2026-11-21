@@ -344,8 +344,8 @@ class ProposalPollingTests(Fixture):
 
     def _config(self, **updates):
         settings = {**self.config.vcs, "command": ["offline-vcs"],
-                    "poll_enabled": True, "observation_queue": OBSERVATION_QUEUE,
-                    **updates}
+                    "poll_enabled": True, "poll_proposals_enabled": True,
+                    "observation_queue": OBSERVATION_QUEUE, **updates}
         return dataclasses.replace(self.config, vcs=settings)
 
     def test_proposal_poll_requires_both_opt_ins_and_adapter(self):
@@ -355,6 +355,7 @@ class ProposalPollingTests(Fixture):
         state = {}
         for config in (self._config(observation_queue=""),
                        self._config(poll_enabled=False),
+                       self._config(poll_proposals_enabled=False),
                        self._config(command=[])):
             self.assertIsNone(poll_proposals(config, self.project, state,
                                              now=0, interval=15, reader=reader))
