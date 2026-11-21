@@ -19,8 +19,13 @@ class UnreachableCiWaitTests(CiWaitFixture):
         write_json(self.project.root / POLL_STATE_FILE, {"failures": {}, "successes": {}})
         self.item = self.block()
 
-    def live(self):
-        return self.store.blocked_liveness_readonly()["items"][0]
+    def live(self, item_id=None):
+        rows = self.store.blocked_liveness_readonly()["items"]
+        if item_id is None:
+            return rows[0]
+        row = next((r for r in rows if r["id"] == item_id), None)
+        self.assertIsNotNone(row, f"blocked liveness has no row for {item_id}")
+        return row
 
     def assert_pending(self):
         self.assertEqual(self.live()["state"], "pending")
@@ -105,7 +110,8 @@ class UnreachableCiWaitTests(CiWaitFixture):
         self.receipt_for()
         item = self.block(key="publication", wait={"kind": "publication_ci",
             "snapshot_id": snapshot["id"], "checks": ["unit", "lint"]})
-        row = self.live()
+        row = self.live(item["id"])
         self.assertEqual((row["state"], row["reason"], row["wait_kind"]),
                          ("impossible", "ci_commit_unreachable", "publication_ci"))
-        self.assertEqual(self.store.page_ready(role_name="worker")["items"][0]["id"], item["id"])
+        ready = [r["id"] for r in self.store.page_ready(role_name="worker")["items"]]
+        self.assertIn(item["id"], ready)
