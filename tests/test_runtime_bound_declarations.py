@@ -20,8 +20,8 @@ pagination behavior otherwise follows the VCS schema without a provider guess.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. Constructor policy defaults
 include policy supplied by `Project`; literal bound-parameter defaults are
-classified separately below. The `runtime.py` literals are fixed run-local
-memory, one-row probe and public page bounds. Runtime's configurable admission
+classified separately below. The `runtime.py` and `engine_run.py` literals
+are fixed run-local memory, one-row probe and public page bounds. Runtime's configurable admission
 and dispatch choices are `Limits` and `[dispatch_evidence]` fields, including the run-local
 queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
@@ -1572,11 +1572,13 @@ CALLS = {
     },
     'engine_dispatch.py': {
     },
-    'runtime.py': {
-        ('Engine._run', 'read_json', 'max_bytes', 0): (
+    'engine_run.py': {
+        ('EngineRunMixin._run', 'read_json', 'max_bytes', 0): (
             '1024 * 1024', 'safety', 'runtime / bounded run-state record read'),
-        ('Engine._run', 'project.work_items.page_ready', 'limit', 0): (
+        ('EngineRunMixin._run', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness check during a run'),
+    },
+    'runtime.py': {
     },
     'role_admission.py': {
         ('should_run', '_receipt_wait_due', 'limit', 0): (
