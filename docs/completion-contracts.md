@@ -32,17 +32,17 @@ Claudeは専用環境の公式Python Agent SDKを使います。権限コール�
 
 独立したobserver daemonはWriterのdone/wait/blockedを待機条件として流用しません。arm/pause、既存のOSスケジュールとon_changeが適用されます。子相談・委譲は受付済みの呼出元が保持する実行枠を借り、別枠を取得しません。parallel_runs=1でも実行でき、相談の並列数はparallel_consultsで制限します。実行枠の受付がない呼出元は子の消費前にBusyを返し、子は枠を再貸与できません。
 
-## Insight・利用量・通信
+## 利用量・通信
 
-`insight-ids/<id>.json` は `{id, sha256, created_at}` の不変なID記録です。ハッシュの対象はid/source/title/body/base_snapshot/run。本文がGCされても保持します。同一内容は冪等、異なる内容は拒否します。本文もID記録もなくdecisionだけあるIDは内容を推測せず再利用を拒否します。GCは確定判断のcreated_atを基準にし、deferを保持します。排他順序はeditor-ingest → insights → decisionsです。バックアップはingestを停止して `.ingest` も保存します。Editorの送信はJSON化後UTF-8サイズで受理上限を確認します。
-
-利用量集計の正本は各子runのconsultation.jsonです。親は子run IDだけを参照します。同じrunのresult/errorを重複加算しません。受付直後の保存失敗でも、Contextへ登録した受付数を残します。予算同期の結果を確定できない場合はrequests_known=falseとunknown_request_runsを記録し、既知の0回と区別します。`request_unit` はPiのmodel_request、Codexのturn、Claudeのqueryを区別します。`requests` の合計を料金とは扱いません。未認識または不正な利用量形状も `usage_known=false` とunknown_usage_runsに含め、認識できた部分量は別途残し、未知の数値をトークンへ変換しません。input/output/cache_read/cache_writeを分離し、cacheがinputの部分集合の場合は追加して総トークンを作りません。Claudeはmodel_usageの再開前との差分を使い、messageやsubagent内訳を重複加算しません。レコードの不正JSON、読取エラー、非有限値は個別に隔離します。最新runの選択は5000、表示は200に制限し、切り詰めを明示します。decisionはUTCへ正規化した時刻から最新10を選びます。時差付きISO-8601を文字列順に比較しません。pendingには表示件数・総件数・切り詰めを持たせ、利用量保持は実際の日付で判定します。
+利用量集計の正本は各子runのconsultation.jsonです。親は子run IDだけを参照します。同じrunのresult/errorを重複加算しません。受付直後の保存失敗でも、Contextへ登録した受付数を残します。予算同期の結果を確定できない場合はrequests_known=falseとunknown_request_runsを記録し、既知の0回と区別します。`request_unit` はPiのmodel_request、Codexのturn、Claudeのqueryを区別します。`requests` の合計を料金とは扱いません。未認識または不正な利用量形状も `usage_known=false` とunknown_usage_runsに含め、認識できた部分量は別途残し、未知の数値をトークンへ変換しません。input/output/cache_read/cache_writeを分離し、cacheがinputの部分集合の場合は追加して総トークンを作りません。Claudeはmodel_usageの再開前との差分を使い、messageやsubagent内訳を重複加算しません。レコードの不正JSON、読取エラー、非有限値は個別に隔離します。最新runの選択は5000、表示は200に制限し、切り詰めを明示します。利用量保持は実際の日付で判定します。
 
 両MCPサーバーは共通JSON-RPCループを使用します。要求IDは256 UTF-8バイト以下の文字列または符号付き64ビット整数（bool/null不可）、paramsはオブジェクト、非有限JSONは拒否します。IDのないtools/callは実行しません。要求・応答はLFを含め1MiBです。Python/JavaScriptのブリッジはloopbackと整数ポート、booleanのok、objectのresultを検査します。通信失敗を成功へ変換せず、副作用要求を再送しません。共通ループはレガシーの `initialize` ハンドシェイクを要求し、`2024-11-05`、`2025-03-26`、`2025-06-18` の3版のみを受け付けます。未知の提示版は `2025-06-18` に下げ、初期化前の要求は拒否します。固定されたCodex/Claude用のローカルstdioサーバーであり、HTTP/OAuthや全ての任意機能を実装しません。ステートレス化した将来のエンジンを固定する前に、ハンドシェイクと版一覧を明示的に再検討します。
 
-files/list_filesの省略時はoffset=0/limit=1000。offsetは0..2147483647、limitは1..1000。結果は決定的な順序、offset/next_offset/truncatedを持ち、ページをUTF-8 JSONバイト上限に収めます。変更されるWriterの一覧はページ間の不変性を保証しません。長い読取結果は追加の小さいページを要求します。書込み応答は既存の小さい固定形または64KiB以下のInsight契約を用い、送信側もJSONエスケープ後のフレームを検査します。
+files/list_filesの省略時はoffset=0/limit=1000。offsetは0..2147483647、limitは1..1000。結果は決定的な順序、offset/next_offset/truncatedを持ち、ページをUTF-8 JSONバイト上限に収めます。変更されるWriterの一覧はページ間の不変性を保証しません。長い読取結果は追加の小さいページを要求します。書込み応答は既存の固定形 `{"id", "status"}` を用い、送信側もJSONエスケープ後のフレームを検査します。
 
 ## サービス・バックアップ・配布
+
+バックアップはingestを停止して `.ingest` も保存します。Editorの送信はJSON化後UTF-8サイズで受理上限を確認します。
 
 サービス名は `mizu-<プロジェクト名の文字数>-<プロジェクト名>-<ロール名>`。所有一覧 `.mizu-<project SHA256先頭24文字>.json` がプロジェクト・OS・生成ファイルのハッシュを保持します。所有不明の定義を上書き／削除せず。生成・検証は一時ディレクトリで行い、検証失敗時に既存定義を変更しません。単位ごとの配置は原子的ですが、複数定義の配置全体を一つの原子的トランザクションとは扱いません。失敗時は所有一覧とファイルを点検してください。有効化・起動は運用者の操作です。
 
@@ -63,9 +63,7 @@ Codex providerの設定契約は [公式設定リファレンス](https://develo
 exec/experimentはid/kind/exit_code/reason/seconds/writableと、script/stdout/stderrの各8KiB UTF-8プレビュー、各truncated、commands/<id>.jsonの証跡参照を返します。完全な結果は保存したcommand記録が正本です。verifyも完全な検証記録を保存し、応答の各scriptは512バイトプレビューとtruncatedにします。切り詰めは実行結果や検証結果を成功へ変更しません。相談は最大8件×12000文字の回答を保持し、例外文字列だけ2KiBに制限して完全な子runの証跡を残します。エスケープを含むMCP応答の1MiB境界をテストします。
 readは[limits]file_bytes以下のファイルを最大8192文字ずつ返します。offset/limitは文字単位で、初回のcontent_idを次ページに渡し、内容変更時は拒否します。全体ファイル上限と応答ページ上限は別です。
 
-insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理し、既存呼出しは省略できます。insightsは未決定の保留一覧をページングし、総件数とselection_truncatedも返します。action指定では決定済みを行動別（accept/modify/defer/reject）に列挙し、id指定では全IDまたは一意な接頭辞で1件を読みます（曖昧・不存在は拒否）。プロンプトに載る選択は[limits]pending_insights件に収まりますが、明示的取得の選択はそれと分離し、INSIGHT_RETRIEVAL_LIMIT（1000）件上限のオフセット非依存の安定選択をページングします。searchは応答行をtitle 300、URL 4096、summary 1500のUTF-8バイトプレビューと各truncatedにし、完全な結果をsources/search-<SHA256>.jsonへ記録します。ページは128KiB以下の項目集合、offset/next_offset/truncatedを持ちます。source_truncatedは検索元の切り詰めと区別します。fetchはoffset（0..2147483647文字）とlimit（1..8192文字、省略8192）で本文をページングし、全文は取得receiptに残す本文から再現できます。fetch/probeはreceipt_id、searchはresult_idとoffset/limitだけで同一run内の不変な初回結果を継続取得できます（元のURL/method/queryとの併用は拒否）。継続では通信・probe・検索を再実行せず、不正・破損・別runのIDは明示的に失敗します。実バイトを保持したfetch receiptだけをexperimentのsource_receiptに指定でき、長さとSHA-256を検証して/work/input/bodyへ読み取り専用で渡します。詳細はconfiguration.mdのImmutable Web continuation and experiment inputを参照してください。これらは既存のread/fetch/search/insights権限内であり、新しいホスト読取権限を与えません。通信失敗や部分書込みを再送しません。
-
-`insights`のID読取では、保存された`source`が呼出元roleと一致する元の投稿者に限り、現在のaccept/modify決定と検証済みWorkItemsがあれば、小さな`work_item_status`を追加します。item ID、status、rev、holder、updated_at、current_origin_rev、staleと、必要な状態詳細の短いプレビューだけを含みます。open legacy sidecarも検証し、drop-only／未解決legacyや別role、非accept/modify決定、一覧応答には追加しません。これは読取投影であり、権限追加、状態遷移、reconcile、scheduler/wakeupを行いません。
+searchの一覧はoffset/limit（filesと同じ型・上限）を受理し、既存呼出しは省略できます。searchは応答行をtitle 300、URL 4096、summary 1500のUTF-8バイトプレビューと各truncatedにし、完全な結果をsources/search-<SHA256>.jsonへ記録します。ページは128KiB以下の項目集合、offset/next_offset/truncatedを持ちます。source_truncatedは検索元の切り詰めと区別します。fetchはoffset（0..2147483647文字）とlimit（1..8192文字、省略8192）で本文をページングし、全文は取得receiptに残す本文から再現できます。fetch/probeはreceipt_id、searchはresult_idとoffset/limitだけで同一run内の不変な初回結果を継続取得できます（元のURL/method/queryとの併用は拒否）。継続では通信・probe・検索を再実行せず、不正・破損・別runのIDは明示的に失敗します。実バイトを保持したfetch receiptだけをexperimentのsource_receiptに指定でき、長さとSHA-256を検証して/work/input/bodyへ読み取り専用で渡します。詳細はconfiguration.mdのImmutable Web continuation and experiment inputを参照してください。これらは既存のread/fetch/search権限内であり、新しいホスト読取権限を与えません。通信失敗や部分書込みを再送しません。
 
 ## 現行エンジンの接続契約
 
@@ -193,7 +191,7 @@ Finite runs enter wrap-up before wall exhaustion, reserving
 `min(model_request_seconds, run_seconds / (wrap_up_requests + 1))` seconds inside the wall
 (`wrap_up_requests` is the configured total, project default with per-role override).
 The configured wrap-up allowance is not extended; only `finish`,
-`research`, `submit_insight`, `attach_evidence`, and `decide` remain available.
+`research`, and `attach_evidence` remain available.
 A finish in this mode stores outcome `bounded`. Wall exhaustion, normal return
 from deadline wrap-up without a finish, or exhaustion of its request/tool
 allowance records a bounded run result with `publication="not_published"`, never
@@ -237,7 +235,7 @@ record. Its separately projected `effective_verification` can refer to a late,
 input-bound retained acceptance receipt, without importing current-source
 verification. Item completion now separately requires an explicit earlier
 doing-to-doing delivery revision, binding the accepted scope to an exact retained
-published snapshot under publication.lock then insights.lock. It uses that
+published snapshot under publication.lock then records.lock. It uses that
 snapshot's embedded proof or pins a retained receipt by exact ID and acceptance
 scope digest, never live workspace equality. A receipt alone is not delivery.
 Only dropped-to-done correction is allowed, with a prior delivery binding and

@@ -10,33 +10,22 @@ Environment substitution reads the controller process environment, not
 `ConfigError`); there are no implicit defaults so a missing export cannot
 silently change grants or paths. Prefer literal model aliases for systemd services.
 
-## Operator answers and notices
+## Questions, answers and notices
 
-The host-only `mizu record` CLI supports the configured `answer` and
-`operator.notice` kinds. A missing kind table is disabled; declaring a table
-without `enabled` defaults that kind to enabled. The routes are fixed to the
-exact question's authenticated source role and the notice's explicit addressee;
-the only accepted retention value is `permanent`, and `wake` defaults to true
-for a declared kind. No TTL/deletion setting is supported today. The required
-retention policy has no fixed horizon: keep data while any source, audit, wait,
-work-item history, backup or other live reference requires it, and reclaim only
-through bounded product-owned proof that every source released its references.
-Acknowledgement alone never authorizes deletion. That cleanup is not implemented,
-so all records and receipts remain retained. These are explicit product policy
-defaults, not model write grants. The complete schema, CLI lifecycle, wake
-behavior and acknowledgement rules are in [shared-record delivery](shared-records.md#operator-answers-and-notices-active-without-decision-cutover).
+Questions, answers and notices are declared `[queues.*]` tables with write,
+read and wake principals and optional body schemas; the kernel enforces the
+declarations, and role policy decides what each message means. See
+[kernel.md](kernel.md) for queue mechanics and the commented
+`config/config.example.toml` for the shipped declarations.
 
 ## Declared host records
 
 `record_kinds` defaults to empty. Data-only declarations bind an authenticated
-writer, route/wake, subject format, envelope bound and permanent retention with
-explicit acknowledgements. Publisher outcomes use the trusted host route; role
-writes require an explicit `record_write` grant and matching `role.<name>` writer.
-Role kinds use `route = "none", wake = false` for unrouted data, or opt in to
-`route = "operator_question"` for bounded host-CLI listing and exact record-bound
-operator answers. Wake is an explicit required boolean; only the question route
-permits enabling it. No role kind, route or wake is enabled by default. See the
-[record contracts](shared-records.md) for declarations, bounds and trust behavior.
+host writer, route/wake, subject format, envelope bound and permanent retention
+with explicit acknowledgements. Publisher outcomes use the trusted host route;
+no role kind, route or wake is enabled by default. See the
+[record contracts](shared-records.md#declared-host-publisher-outcomes) for
+declarations, bounds and trust behavior.
 
 ## Regenerable workspace caches
 
@@ -162,140 +151,6 @@ implicit retry: a later boundary retries when due. Backward clock movement
 therefore delays reclamation, not deletion safety. Maintenance never changes
 snapshots, publication or configuration, and failures do not fail execution.
 
-## Decision-to-work policy
-
-`mizu_decide` (the `decide` capability) accepts optional
-`work_item_intent: "create" | "none"` on `accept`/`modify` only. The operator
-CLI uses `mizu insight decide <project> ... --work-item-intent create|none`.
-It also accepts an optional `--accepted-scope` (1-4000 nonblank characters),
-the accepted scope of the work the decision authorizes.
-Other intent values or action combinations are refused before any event is
-written. Omission resolves from the stored, trusted insight `source`, never
-its title, body, opaque `origin`, or the deciding role. Policy is configured as:
-
-```toml
-[insight_decisions]
-work_item_intent_default = "create"
-[insight_decisions.work_item_intent_by_source]
-operator = "none"
-vcs = "none"
-```
-
-Without this table the global default is `create` and the per-source map is
-empty; unknown sources use the global default. Both settings accept only
-`create`/`none`; map keys must be source identifiers. The example configuration
-suggests `none` for operator/VCS dispositions, not a mechanism restriction:
-every accept/modify may explicitly override either default. Editing the example
-does not update an existing private operator configuration.
-
-Every new accept/modify event stores the resolved `work_item_intent`. `create`
-keeps the canonical `wi_<event-id>` seed when the task list is omitted; `none`
-is a durable explicit no-work disposition without a seed. Both resolve work-item coverage. Old unseeded
-accept/modify events without the marker remain unresolved until the existing
-hash-bound open/drop reconciliation; neither reads nor new policy infer or
-rewrite their intent. Explicit no-work events cannot be reconciled. The legacy
-audit page includes them as `work_item_intent: "none"`, `openable: false`, and
-`resolution: {outcome: "none"}`; no work-item status is attached to them.
-
-To name separate tasks explicitly, `decide` also accepts optional `work_items`:
-
-```json
-[{"title": "Implement the first part", "description": "The concrete first task"},
- {"title": "Reassess after the deadline", "description": "The contingent follow-up",
-  "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}}]
-```
-
-The operator CLI reads this array from `--work-items tasks.json`. Each entry
-requires `title` (1–200 nonblank characters) and `description`
-(1–4000 nonblank characters), both valid UTF-8 without NUL, and may carry one
-`wait` using the existing defer schema: `deadline` with timezone-aware `at`,
-`code_change` with no other fields, `insight_decided` with `insight`, or
-`dependency` with `recipient` and exact `requires: {insight, rev, action}`.
-New Insight task waits normalize to `object_resolved` with
-`subject: {type:"insight", id}`; historical task manifests retain their bytes.
-CI waits, null/malformed waits, unknown fields and per-task scopes are refused.
-There are 1–16 entries; an empty list is refused. A supplied list requires resolved intent `create`: explicit
-`none` conflicts, and if trusted-source policy is `none`, explicitly pass
-`--work-item-intent create` (or the tool equivalent) rather than silently
-losing tasks. Omission preserves all existing single-seed/no-work behavior.
-No rationale prose is parsed into tasks.
-
-The complete canonical decision event, **including both task specs and all
-seeds**, must fit `PREVIEW_BYTES` (131072 UTF-8 bytes); individual field limits
-do not guarantee that the aggregate fits. Every spec and every seed storage
-slot is validated before commit. The immutable history event contains
-`work_item_specs` (the ordered input list) and `work_items` (the complete seed
-list), instead of `work_item`. Each task is unheld (`holder: null`): without
-`wait` it starts `open` in the unchanged seed shape; with `wait` it starts
-`blocked` with the normalized condition embedded in that immutable seed. There
-is no intermediate open revision, sidecar registration or per-task transition.
-Each task has its own description and deterministic ID bound to the exact
-decision key/revision, complete ordered **raw** list (including waits) and position. If the decision states an accepted scope, every task
-inherits that same scope; task-specific scopes are not introduced here.
-
-One atomic immutable event commits the entire group; it contains the raw
-`work_item_specs`, complete `work_items` seed list and, when any wait is
-present, a parallel `work_item_waits` array that binds normalized waits (and
-the captured code-change baseline) to their seeds. There are no separately
-committed members or mutable seed index. Before that commit no tasks are
-visible, and afterward all are visible even if the current-decision pointer
-write was interrupted. Retry with the identical ordered list to return the
-original event and repair a missing/stale non-substantive pointer. Wait
-normalization occurs on first commit: a `code_change` baseline is the published
-code digest then, stored in `work_item_waits` and preserved on retry even if the
-head changed or is unavailable. Replay validates that manifest against the
-seed's normalized wait and raw kind, without rebasing;
-other waits must match their raw specs after normalization. Even a raw timestamp
-change that normalizes identically is a conflicting request. A changed,
-reordered or omitted list conflicts; a conflicting substantive pointer or a
-missing/tampered manifest member fails closed instead of being repaired.
-Every task read validates the complete manifest. Direct ID lookup scans
-immutable decision events when there is no legacy single-seed event at that ID;
-normal page enumeration reuses the already-read group. Current decision
-projections expose `work_item_ids` for groups; the original submitter's
-`work_item_status` is `{items: [status, ...]}` in declared order, bounded by
-`PREVIEW_BYTES`. Legacy single-item projections retain their existing shape.
-These groups fully resolve legacy coverage and cannot be reconciled as old
-unseeded decisions. Existing wait re-evaluation makes satisfied unheld blocked
-tasks claimable by any transition-capable role; held blocked tasks remain
-ready only for their holder. Unsatisfied waits are not ready. Admission compares
-the full role-eligible set, including exact receipt-route terminal evidence
-bindings, to the set shown in the last unit input, using a bounded fingerprint from
-the existing locked ledger scan (progress schema 3). Persistent unchanged ready
-work is not a recurring wake: a writer `wait` or `blocked` finish keeps its
-delivered signature, counts no progress and parks, while ID additions,
-removals/replacements and wait satisfaction wake. The signature is captured
-with the full/delta prompt, not at finish, so new work during a run remains
-pending. Legacy missing signatures admit nonempty sets for reassessment;
-empty sets do not manufacture an event. Independent control/input/CI/wait
-signals remain unchanged; read-only no-progress backoff and writer
-next-step/ready-work admission are described in
-[scheduling](scheduling.md#wake-sources-versus-delivered-inputs) and
-[writer handoff](scheduling.md#writer-next-step-handoff). This adds no grant,
-actor/assignee input, condition vocabulary or FIFO change.
-
-A substantive `accept`/`modify`/`reject` at the current insight revision prevents
-conflicting further decisions on that revision. An exact keyed replay returns
-the original event without appending history or changing its recorded run,
-whether the current pointer already matches or needs repair after an uncertain
-write. For recovery, omitted intent reuses the stored resolution despite later
-policy changes; conflicting action/reason/revisit or explicit intent is refused.
-Revise the insight meaningfully to reopen; an earlier defer alone may still be
-superseded. New decisions use a bounded keyed content lookup; only a legacy
-defer pointer without `decision_key` may require scanning old random-ID event
-contents. The shared safety scanner checks decision-history directory metadata
-and atomic-write temporaries before all new event writes (see architecture.md).
-Seed retries also validate storage and the transition chain before success or
-pointer repair. Revision CAS, append-only history, and source binding are
-unchanged. Read current state after uncertainty; refusals write no event or
-seed. Existing decision/seed byte bounds and lock/cancellation behavior apply;
-the decision-to-work policy adds no grant or scheduling. Independent task
-creation uses the separate grant below. New single-seed `create` decisions
-store the exact decision reason as immutable `description` (1–4000 nonblank characters),
-and replay verifies that binding. Existing decision seeds without descriptions
-remain valid and are never upgraded or rewritten; their retries keep the old
-shape and reason bounds.
-
 ## Direct work-item creation grant
 
 `work_items_create` is a separate mutating capability, denied without an explicit
@@ -305,21 +160,21 @@ it. `work_items_read` does not imply create. The runtime binds actor to the role
 there is no model-supplied actor or implicit assignment.
 
 Supply a stable `idempotency_key` (1–128 characters) and `title` (1–200), optionally
-`description` (1–4000 characters with at least one non-whitespace character)
-and/or `origin` with exactly one `insight_id` or `work_item_id` plus a positive
-integer `rev`. Description text is immutable and preserved exactly, including
-whitespace; explicit null is invalid. Omitting description preserves the v1
-seed shape; supplying it uses the v2 field set. Both remain readable and keep
-their original shape through transitions. The origin's current revision must
-match at first commit. Keys are scoped to the runtime role: retain the exact
-key/title/origin and description presence/text after an uncertain response.
+`description` (1–4000 characters with at least one non-whitespace character),
+`scope`, `smoke_refs` and/or an opaque `origin` (a nonblank string of at most 512
+characters, or null). Description text is immutable and preserved exactly,
+including whitespace; explicit null is invalid. Omitting description preserves
+the v1 seed shape; supplying it uses the v2 field set. Both remain readable and
+keep their original shape through transitions. Keys are scoped to the runtime
+role: retain the exact key/title/origin and description presence/text after an
+uncertain response.
 Exact retries return the original creation record with `created: false`, even
 after valid transitions or origin revision changes; they validate stored history
 without rechecking the live origin. Changed requests with the same key are denied,
-and retries do not count as tool progress. First commits share decision seeding's
-preflight and refuse nonempty or unsafe item slots, including orphan temporaries;
-no existing record is overwritten.
-Null and parent origins never acquire an inferred submitter for terminal routing.
+and retries do not count as tool progress. First commits preflight the seed and refuse nonempty or unsafe item slots,
+including orphan temporaries; no existing record is overwritten.
+An origin is opaque provenance and never acquires an inferred submitter for
+terminal routing.
 See [the runtime and persistence contract](architecture.md) for validation,
 projection, history, event delivery, cancellation and backup behavior. The
 work-item ledger is the single record of accepted and planned work, including
@@ -471,43 +326,11 @@ required). Operator tooling that concatenates configs
 
 ## Limits
 
-Work-item creation has no project-wide backlog cap. Direct creation,
-accept/modify decisions (including multi-task manifests), and legacy
-reconciliation remain atomic and idempotent regardless of the existing number
-of open, doing, or blocked items. Request, manifest, storage, and page bounds
-still apply; invalid or corrupt state fails closed. The writer chooses what
-to accept, merge, defer, or reject using the current bounded work-load view.
-Per-role `work_items_doing` limits constrain active execution, not accepted work.
-
-`producer_inputs_per_source = 20` is a provisional congestion threshold, not a
-measured optimum; tune it to project capacity or set it to 0 to disable. It
-holds only configured non-writer project roles that carry the
-`submit_insight` capability (the writer is not held, so it can resolve, merge,
-defer, or reject input at capacity), before any model or run-slot use, when the
-role-name source's current unresolved live input count (undecided plus deferred revisions;
-resolved revisions and archive-only history excluded) reaches the per-source
-limit. Independently, `open_work_items = 0` disables the optional open-work
-producer threshold. A positive integer (up to 1,073,741,824) holds only roles
-that explicitly set `held_at_capacity = true` (boolean, default false), when
-the open/doing/blocked count is **at least** that threshold. Neither a positive
-threshold alone nor role opt-in with a zero threshold enables this gate.
-Existing explicit keys are accepted, but there is no hidden nonzero default.
-This policy holds only the next producer admission: work-item seeds and
-accept/modify decision transactions remain uncapped, even above the threshold.
-Operator, vcs, and editor input channels are never role names, so they are
-never held.
-The check applies to direct, scheduled, event-triggered, and daemon admission,
-and runs before any event or cursor is acknowledged; a held attempt claims no
-run directory, slot, or lock, consumes no event, and leaves every pending input
-durable. Admission reads the open-work count only for an active opted-in gate. Fail
-closed when a required enabled metric is unreadable or invalid. Status still
-reports current workload for visibility even when the gate is disabled. A run
-already in progress may finish; this is an admission threshold, never a
-cancellation. `mizu status` reports each held source (the role name), reason codes, and a
-`thresholds` map with its exact configured bound(s) in `backpressure.held`. Held producers resume
-only through existing schedules or subscriptions; skipped runs consume no
-events, and repeated state-based triggers coalesce through the existing
-durable stores (see `docs/operations.md` and `docs/scheduling.md`).
+Work-item creation has no project-wide backlog cap. Direct creation and
+operator-led re-seeding remain atomic and idempotent regardless of the number
+of open, doing, or blocked items. Request, storage and page bounds still apply;
+invalid or corrupt state fails closed. Per-role `work_items_doing` limits
+constrain active execution, not accepted work.
 
 Check-job evidence uses source-owned lifecycle release, not a retention count
 or TTL (`check_retained` is no longer accepted). Bound submissions release only
@@ -526,14 +349,13 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
 | `budget_day_file_bytes` | Operator-selected day-file storage/read budget for admission writes and read-only budget peek (default 4 MiB / 4,194,304 bytes; integer 1–`min(TOML signed-64-bit max, sys.maxsize)`). Oversize writes refuse admission; peek reports `unavailable` without counters. Larger values permit proportionally larger storage, read and parse resource use; this byte budget can bind before the daily count caps. Legacy `usage` reads remain unbounded |
-| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget. Hitting a per-run bound grants the configured total wrap-up allowance (`wrap_up_requests` requests, `wrap_up_tools` wrap-up tool calls limited to `finish`, `research`, `submit_insight`, `attach_evidence`, `decide`) so the unit can seal a clean `bounded` end that runs again like `continue` without counting toward `max_failures`; When an ordinary provider request hits the cap, Pi and non-Pi paths yield to Engine's reduced-grant follow-up before spending that request reserve; an already-armed one-shot checkpoint seal may spend its reserved request directly. If that request wrap-up returns unsealed or exhausts its requests, the unit records `status="bounded", bound="requests", publication="not_published"`, preserves workspace changes, and does not increase failure counters. It does not publish an unfinished snapshot. Host admission exceptions retain their type across adapter error events: exhausted deadline/drain/request/tool wrap-up records the corresponding bounded outcome, while daily quota refusals remain infrastructure deferrals and invalid admissions remain faults. An exhausted tool reserve also records the corresponding non-failing bounded outcome on a normal unsealed Pi settlement, without publication or missing-finish follow-ups. The first ordinary tool-cap refusal still permits the existing reduced-grant follow-up. The host cause is run-local, cleared by a successful admission or a new physical dispatch; pending tool-refusal evidence also clears after a successful tool operation. Provider message text cannot forge it. Provider errors, cancellation and evidence-storage failures retain their failure paths |
+| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget. Hitting a per-run bound grants the configured total wrap-up allowance (`wrap_up_requests` requests, `wrap_up_tools` wrap-up tool calls limited to `finish`, `research`, `attach_evidence`) so the unit can seal a clean `bounded` end that runs again like `continue` without counting toward `max_failures`; When an ordinary provider request hits the cap, Pi and non-Pi paths yield to Engine's reduced-grant follow-up before spending that request reserve; an already-armed one-shot checkpoint seal may spend its reserved request directly. If that request wrap-up returns unsealed or exhausts its requests, the unit records `status="bounded", bound="requests", publication="not_published"`, preserves workspace changes, and does not increase failure counters. It does not publish an unfinished snapshot. Host admission exceptions retain their type across adapter error events: exhausted deadline/drain/request/tool wrap-up records the corresponding bounded outcome, while daily quota refusals remain infrastructure deferrals and invalid admissions remain faults. An exhausted tool reserve also records the corresponding non-failing bounded outcome on a normal unsealed Pi settlement, without publication or missing-finish follow-ups. The first ordinary tool-cap refusal still permits the existing reduced-grant follow-up. The host cause is run-local, cleared by a successful admission or a new physical dispatch; pending tool-refusal evidence also clears after a successful tool operation. Provider message text cannot forge it. Provider errors, cancellation and evidence-storage failures retain their failure paths |
 | `wrap_up_requests`, `wrap_up_tools` | Total wrap-up allowance granted when a per-run spend bound is hit (defaults 3 requests and 5 wrap-up tool calls; range 1–1,073,741,824). A role may override with `roles.<name>.wrap_up_requests` / `wrap_up_tools`, same range, unset keeps the project value. The reserve wall window (`wrap_up_at`) divides the wall by this request allowance plus one |
 | `delegate_wrap_up_requests`, `delegate_wrap_up_tools` | Aggregate share of that same wrap-up allowance available to delegated children across one caller unit (defaults 2 requests and 4 tools; ranges 0–2 and 0–4). Any unused child share remains available to the caller; at least one request and one wrap-up tool always remain for the top-level seal. Child normal request/tool counts and daily admission remain shared with the caller; consultation units are unaffected |
 | `run_seconds` | Whole-unit monotonic wall deadline, default `1200`, integer 1–1,073,741,824 seconds. `roles.<name>.run_seconds` inherits when unset; integer 0 disables only that role's whole-unit wall, and positive integers up to the same maximum override it. Resolved once per Context, never renewed by selector fallback |
 | `model_request_seconds` | Positive finite logical-request deadline, default `1200`, integer 1–1,073,741,824 seconds; no role override. Host-enforced independently of the whole-unit wall. Pi/pi-durable: each admitted `model_request`; Claude: enclosing query; Codex: enclosing turn, not every opaque provider HTTP subcall |
 | `command_seconds` | Deadline for each individual container command (unchanged by role wall overrides) |
-| `roles.<name>.held_at_capacity` | Boolean, default false. Opts a configured non-writer `submit_insight` role into the positive `limits.open_work_items` threshold; inert for writers, non-producers, or threshold 0 |
-| `roles.<name>.context_sections` | Inline table `{include = [...], exclude = [...]}` of optional unit-prompt sections (default empty). Optional sections: `open_work_items`, `ready_work`, `work_order`, `check_jobs`, `insights`, `research`, `ci`, `acceptance`, `report`. Default: `open_work_items` is sent to insight producers (`submit_insight`), decision makers (`decide`), and roles holding a work-item capability (`work_items_read`, `work_items_create`, `work_items_transition`, `work_items_reopen`, `work_order`); `ready_work` is sent only to roles holding a work-item capability; every other section keeps its own capability-gated content (empty without the capability), except `ci`, which is opt-in only and carries aggregate `ci_summary` for explicit `include = ["ci"]` (its keys are absent otherwise). `include` restores a section, `exclude` removes its keys; keys that deliver instructions or obligations (decisions, work-item events, waits, obligations, operator records, snapshot pins, run, clock) are never optional. Unknown or fixed names, duplicates, and a name in both lists fail configuration load. Rows of an excluded section do not count as shown to a later resumed delta. This controls prompt delivery only, not tool authorization; see [on-demand state reads](#on-demand-state-reads) |
+| `roles.<name>.context_sections` | Inline table `{include = [...], exclude = [...]}` of optional unit-prompt sections (default empty). Optional sections: `open_work_items`, `ready_work`, `work_order`, `check_jobs`, `research`, `ci`, `acceptance`, `report`. Default: `open_work_items` is sent to roles holding a work-item capability (`work_items_read`, `work_items_create`, `work_items_transition`, `work_items_reopen`, `work_order`); `ready_work` is sent only to roles holding a work-item capability; every other section keeps its own capability-gated content (empty without the capability), except `ci`, which is opt-in only and carries aggregate `ci_summary` for explicit `include = ["ci"]` (its keys are absent otherwise). `include` restores a section, `exclude` removes its keys; keys that deliver instructions or obligations (work-item events, waits, snapshot pins, run, clock) are never optional. Unknown or fixed names, duplicates, and a name in both lists fail configuration load. Rows of an excluded section do not count as shown to a later resumed delta. This controls prompt delivery only, not tool authorization; see [on-demand state reads](#on-demand-state-reads) |
 | `work_items_doing` | Per-role active `doing` cap (integer 1–100; default 1). `roles.<name>.work_items_doing` overrides this default with the same bounds. Checked under the transition CAS lock when entering `doing` or transferring a `doing` hold to a different role, counting validated holder state across all items, not just a page. Blocked waits consume no slot; existing over-limit records remain readable and may leave `doing` or receive same-holder scope/delivery revisions |
 | `work_items_stale_seconds` | Uninterrupted `doing` age at which `doing_stale` becomes true (integer 1–31,536,000; default 86,400 / 24 hours). Review visibility only, not origin staleness, expiry, reassignment, authorization or scheduling |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
@@ -541,7 +363,7 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
 | `readiness_recheck_seconds` | Resident `signals` daemon only (0–86,400s; default 0 = evaluate readiness on every idle tick). A positive value lets the daemon reuse a negative readiness result while a cheap witness of the project state tree (directory and top-level file identities; the `workspace`, `runs`, `objects`, `sessions`, `locks`, `check-cache` and `spool` trees are not readiness inputs and are skipped) is unchanged, and re-evaluate at the latest after this many seconds. Any state write, which mizu performs by atomic replace, changes a directory identity and triggers the next evaluation; time-dependent readiness (wait deadlines, CI re-wake, no-progress backoff, retry-after) and inputs outside the project tree (shared budget, slot and selection state) are observed at the periodic re-evaluation, so this value is the maximum added wake latency for those. A positive result, an error or a configuration change is never cached. Event dispatch (`--event`) is unaffected |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
-| `progress_signals` | Signals qualifying a writable snapshot or a read-only on-change role’s completion cursor as progress for `continue`/`bounded` units. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies as progress evidence, not necessarily writer readiness (see [next-step handoff](scheduling.md#writer-next-step-handoff)). `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `objects_read`, `objects_list`, `events_read`, `queue_read`, `message_read`, `message_refs`, `ready_work_read`, `work_order_read`, `report_read`, retained-evidence reads, exact `work_items_create` replays (`created: false`), and replay of an existing fetch/probe/search receipt, check-job `list`/`logs` and queued/running `result` reads), or a new native engine-tool authorization (not an idempotent replay); the kernel mutations `objects_create`, `objects_transition`, `events_ack`, `queue_write` and `queue_ack` change state and do qualify as `tool` progress, `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Writable snapshots use those project inputs; read-only on-change cursors use their consumed operator wake, routed events/waits/CI and newly offered obligations, not global inbox or publisher wait generations. For read-only cursors, `code` is always false and `state` compares the role’s own prior completion state. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. A role may override with `roles.<name>.progress_signals` (same unique supported names; unset inherits the project list; explicit `[]` disables qualification for that role). |
+| `progress_signals` | Signals qualifying a writable snapshot or a read-only on-change role’s completion cursor as progress for `continue`/`bounded` units. Default `tool`, `code`, `message`, `input`; any selected true signal qualifies as progress evidence, not necessarily writer readiness (see [next-step handoff](scheduling.md#writer-next-step-handoff)). `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `research_read`, `vcs_read`, `work_items_read`, `queue_read`, `message_read`, `message_refs`, `ready_work_read`, `work_order_read`, `report_read`, retained-evidence reads, exact `work_items_create` replays (`created: false`), and replay of an existing fetch/probe/search receipt, check-job `list`/`logs` and queued/running `result` reads), or a new native engine-tool authorization (not an idempotent replay); `queue_write` and `queue_ack` change queue state and qualify as `tool` progress, `message` a newly consumed role-readable queue message, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed operator wake generation, consumed terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Writable snapshots use those project inputs; read-only on-change cursors use their consumed operator wake, routed events/waits/CI and newly offered obligations, not global wake generations. For read-only cursors, `code` is always false and `state` compares the role’s own prior completion state. Non-due cached red CI is not repeated input progress. A role may override with `roles.<name>.progress_signals` (same unique supported names; unset inherits the project list; explicit `[]` disables qualification for that role). |
 | `no_progress_continuations` | Number of consecutive no-progress `continue`/`bounded` completions allowed to self-admit immediately (0–100; default 0 parks after its first no-progress finish). Only read-only `on_change` roles use this admission allowance; writers need a validated immediate `next_step` or independent wake. Every later unit with the same input observation advances the bounded streak whatever its finish outcome; progress or a changed observation (role, signal policy, obligations or ready-work signature) starts a new streak. |
 | `no_progress_recovery_after` | Consecutive unchanged-input no-progress `wait`, `blocked`, `continue` or `bounded` writer snapshots before a persistent session is rotated to a fresh conversation on its next already-admitted dispatch (1–100; default 2). It never schedules a run; `mizu status` separates a due no-progress threshold (`pending_work: true`) from actionable rotation (`due` only for persistent profiles, `not_applicable` for ephemeral ones, and `conditional` for mixed selector choices). |
 | `no_progress_backoff_seconds` | Read-only `on_change` no-progress timer default (0–86,400; default 0 disables that timer). `roles.<name>.no_progress_backoff_seconds` overrides the timer for that role; when unset, read-only roles inherit this value and writers inherit `writer_no_progress_backoff_seconds`. A read-only role may self-admit on a later scheduled invocation after its timer without changing its cadence. |
@@ -569,7 +391,7 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `role_state_bytes` | Maximum canonical JSON bytes of a new replacement role-owned current research state record (1,024–65,536; default 4,096); existing records remain readable up to the supported 65,536-byte ceiling |
 | `tool_response_bytes` | Maximum canonical-JSON bytes of one model-facing tool response (4,096–1,048,576; default 32,768). A larger result of any tool except `finish` returns its first page instead: `truncated`, `operation`, `cursor`, `total_bytes`, `offset`, `next_offset`, `page` (a UTF-8 slice of the full result's canonical JSON; pages concatenate to it) and `continue` = `{tool, cursor, offset}`. The single continuation tool `result_read` (`{cursor, offset}`, granted at load to every role holding any tool other than `finish`) returns the page at that byte offset in the same shape from the copy retained under `<run>/tool-results/` (removed with the run directory by run retention); it never re-executes the producing tool, so a continuation has no side effect. A cursor is valid only in its run and for the role that received the first page; an unknown cursor, an offset past the end or inside a UTF-8 character fail the call with a denial. Results at or below the bound are returned unchanged. `vcs_read` artifact reads with offset/limit keep their own bound (`vcs.artifact_page_bytes`, `next_offset`); `read`, `exec`, `fetch` and `probe` pages are also subject to this bound. |
 | `role_state_prompt_bytes` | Maximum bytes of a role's own research state injected into its prompt (1–65,536; default 4,096); over-bound records inject status/generation/sizes only |
-| `retention_days` | Daily budget-file retention and decided insight live-inbox window (default 31 days; 0 disables; 0–3,650). Current-revision terminal insights move permanently to `insight-archive.sqlite3` before inbox removal; bodies/evidence are not deleted. Ingest still reports removed live copies as `reaped`. `insight list` remains live-only; explicit `insight page --scope archive` enumerates bodies and validated legacy identity-only tombstones (`body_unavailable: true`); ID reads include archived bodies and explicitly deny missing bodies. Archive retention is permanent, with no expiry/deletion knob (see operations for one-time migration and retry behavior). This setting never deletes snapshots, whole run directories, decisions, or archived insight bodies; bounded per-run dispatch measurements use the separate `event_log_*` retention below |
+| `retention_days` | Daily budget-file retention window (default 31 days; 0 disables; 0–3,650). This setting never deletes snapshots or whole run directories; bounded per-run dispatch measurements use the separate `event_log_*` retention below |
 | `run_retention_scan_runs` | Physical-run retention scan budget (default 5,000; integer 1–100,000), independent of usage-report limits. Exceeding this budget makes the scan incomplete and refuses all apply deletion |
 | `host_record_reference_scan_entries` | Raw entries examined across the permanent host partition and flat legacy root while resolving snapshot references (default 5,000; positive TOML signed-64-bit integer). Reaching the budget, including exact EOF, marks the host reference scan incomplete; `mizu storage --apply` refuses reclamation rather than infer omitted records are absent. Raise the limit when a larger complete scan is required. This budget is independent of other storage scans. |
 | `run_retention_days` | Completed, unreferenced per-project run-component retention (default 31 days; 0 keeps indefinitely; integer 0–3,650). Uses validated `started_at`, not mtime; whole connected components expire only when every member is terminal and strictly older than the window. See the retention contract below |
@@ -589,7 +411,7 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `probe_executable_bytes` | Positive TOML signed-64-bit integer, default `268435456` (256 MiB). Host I/O policy for the largest local executable recovery probes will hash to bind target identity; an over-limit file fails closed before reading. Hashing uses a fixed 64 KiB streaming buffer, so this is a total-size budget, not an allocation size. Raise or lower it for the installed executable and host; the previous 256 MiB refusal behavior is the default. |
 | `queue_observations` | Contended execution-admission observations retained in `started.json` (0–100; default 8). This is an upper bound: runtime also trims the sample to the retained-evidence read cap (64 KiB, or lower `file_bytes`), and every observation not retained increments `omitted` instead of growing the record. Zero retains only the omitted count and disables choice-set detail capture (observations never acquire extra resource or slot locks). Run-local evidence only; no scheduling, admission or history effect |
 | `work_item_events_limit` | Terminal work-item events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Independent of the decision batch: each source uses only its own limit |
-| `wait_events_limit` | Structured insight waits, CI waits, proposal-merge waits, and dependency obligations delivered per dispatch (1–100; default 10). The same policy applies independently to each source; there is no shared total. Existing oldest-first delivery and explicit acknowledgement are unchanged; the 100-row ceiling is fixed mechanism |
+| `wait_events_limit` | CI waits and dependency waits delivered per dispatch (1–100; default 10). The same policy applies independently to each source; there is no shared total. Existing oldest-first delivery and explicit acknowledgement are unchanged; the 100-row ceiling is fixed mechanism |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
@@ -631,7 +453,7 @@ Each observation has exactly `lock`, `phase`, `operation`, `stage`, `outcome`,
 
 - `lock`: `shared-smoke`, `retention-apply`, or `project-record`, selected
   only for `smoke-retention.lock`, `smoke-retention-apply.lock`, or
-  `insights.lock`; paths are never exported.
+  `records.lock`; paths are never exported.
 - `phase`: `pre-admission-startup`, `editor-ingestion`,
   `pre-admission-dispatch`, `admission`, or `post-admission`. The latter starts
   once execution admission owns the dispatch locks, before later guards, run
@@ -688,13 +510,13 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `lock_timeout_seconds`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `open_work_items`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `readiness_recheck_seconds`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_insight_archive_interval_seconds`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `lock_timeout_seconds`, `queue_observations`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `readiness_recheck_seconds`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 
 `mizu prune PROJECT` is a dry run; `--apply` recomputes the plan under the
 same nonblocking exclusions: workspace, sorted configured **and existing** role
-locks, editor-ingest, then insights. A busy lock refuses immediately. Pause is
+locks, editor-ingest, then project records. A busy lock refuses immediately. Pause is
 **not** required for prune; backup and snapshot/object reclamation still require
 pause. This changes no scheduling, admission, delivery or shared smoke policy.
 
@@ -719,17 +541,14 @@ member or live pin target makes the entire scan incomplete, not just that compon
 
 Live pins are only current inbox `run` and `evidence[].run`, active role `run`,
 and valid selector `*-wait.json` pointers whose waiting audit result and
-selection record are intact. Blocked WorkItem insight/dependency waits pin their
-target's exact decision when it names a local Mizu run; the operator decision sentinel
-names no run. Dependency revision/action bindings also resolve retained decision
-history if the current target has moved. WorkItem chains are read with
+selection record are intact. Blocked WorkItem dependency waits pin their target's exact terminal revision
+when it names a local Mizu run. WorkItem chains are read with
 the existing schema validator without recovery or scheduling. Connections are
 only `parent_run` in lifecycle envelopes,
 `consultations/*.json` `answers[].run`, and `delegations/*.json` `run`.
 Nested children are transitive and components are undirected. Prose, VCS provider
 run names, snapshot run fields and historical audit run fields are **not** pins.
-Permanent decisions, insight archives, WorkItems, receipts and other audit
-records remain: an expired historical run ID may no longer resolve to full
+WorkItems, receipts and other audit records remain: an expired historical run ID may no longer resolve to full
 output, and usage reports can only aggregate surviving run output.
 
 The reference scan uses `[limits].run_retention_scan_runs` (default 5,000 physical
@@ -826,8 +645,7 @@ unrecognized object entry still refuses the pass.
 Other roots never expire by this clock: continuation entries and safe-point
 fences; run `snapshot` fields in started/result/consultation/delegation/error and
 prompt-projection records and parent-held consultation/delegation records;
-artifact evidence/latest pointers; live insights,
-superseded insight revisions, archived insight bodies, queued editor submissions
+artifact evidence/latest pointers; queued editor submissions
 and in-flight ingest claims (`base_snapshot`); and **every historical** work-item
 delivery/done binding, even after re-binding, dropping or history-window eviction.
 Each reference root and recent manifest also retains up to `history_index`
@@ -847,9 +665,9 @@ manifest, reference, object-directory scan, or work-item chain refuses the pass
 before unlinking anything. Missing/invalid active publication state also refuses.
 All lock acquisition is nonblocking: workspace, configured/existing role exclusions,
 all configured check-runner slots (including never-used slots), editor-ingest,
-outbox `.submit.lock`, publication, insights, and the acceptance audit's lock.
+outbox `.submit.lock`, publication and the acceptance audit's lock.
 The outbox directory is validated before locking; Capsule submissions share only
-that outbox lock, not project access. CLI insight submit/revise, report and editor
+that outbox lock, not project access. CLI report and editor
 export hold the publication exclusion from snapshot observation through
 reference storage/export; runtime snapshot/reference producers already hold role
 or workspace exclusions. These CLI writers and Capsule submitters acquire their
@@ -1112,14 +930,11 @@ contradictory members refuse expiry. Project payload contents are not parsed as
 reference metadata. Legacy flat pairs and the fixed probe policy are excluded.
 
 `smoke_refs` is an optional array of at most 64 unique exact 32-lowercase-hex IDs
-on an Insight evidence entry, WorkItem seed/current state, or structured wait.
-Project/owner identity is the containing record's identity, never a path supplied
-by a model; Insight evidence also stores `rev` equal to its current revision.
-Revision CAS, owner identity and pair existence are checked by the host. A
-meaningful Insight revision archives prior evidence rather than inheriting its
-pins. Seeded WorkItems copy refs into their own immutable creation record, so a
-terminal Insight does not prematurely release active work. Audit/history keeps
-IDs after owner termination without pinning payload. Current blocked waits own
+on a WorkItem seed/current state or structured wait. Project/owner identity is
+the containing record's identity, never a path supplied by a model. Revision
+CAS, owner identity and pair existence are checked by the host. Seeded WorkItems
+copy refs into their own immutable creation record. Audit/history keeps IDs
+after owner termination without pinning payload. Current blocked waits own
 separate refs and lose them on replacement/consumption or owner termination.
 A changed WorkItem ref list may be recorded as a same-status CAS revision.
 A direct creation that inherits extra refs stores `requested_smoke_refs` (the
@@ -1129,7 +944,7 @@ field is not a pin; it preserves exact retry identity after the origin changes.
 The shared `data_dir` smoke-retention scan is linear in the project roots,
 metadata records and report payload bytes it traverses. A bounded synthetic
 run at the former constants measured about 0.6 ms per root, 0.6 ms per record
-read, and 4.8 KiB retained per insight record in the parsed-record cache; 500
+read, and 4.8 KiB retained per work-item record in the parsed-record cache; 500
 and 5,000 one-KiB pair reports took 0.25 s and 2.8 s. A second run read
 near-16 MiB reports at about 11.5 s/GiB warm (33.5 MB in 0.41 s, 67.1 MB in
 0.77 s, 100.6 MB in 1.12 s). Those dimensions are host/history policy, so they
@@ -1212,7 +1027,7 @@ detected bound without declaring it:
 
 | Category | Bound | Value | Purpose |
 |---|---|---|---|
-| **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | Diff/insight/editor preview and canonical list bounds; CLI stdin framing |
+| **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | Diff/work-item/editor preview and canonical list bounds; CLI stdin framing |
 | | `READ_PAGE_CHARS` (`fs.py`) | 8,192 characters | Per-response workspace/evidence read text bound, separate from the whole-file `file_bytes` cap |
 | | `MAX_STARTED_EVIDENCE_BYTES` (`evidence_records.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads and to trim the configured queue-observation sample; `file_bytes` may lower it |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
@@ -1224,7 +1039,6 @@ detected bound without declaring it:
 | **VCS artifacts** | `MAX_ARTIFACT_FIELD_NAMES` / `MAX_ARTIFACT_FIELD_NAME_CHARS` (`vcs.py`) | 8 / 32 | Bounds the field identifiers a shape refusal may name; values and arbitrary keys are never echoed |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
 | **Adapter diagnostics** | `ADAPTER_DIAGNOSTIC_BYTES_MAX` (`process.py`) | 8 KiB | Hard ceiling for any configured model-visible stderr excerpt; per-adapter `diagnostic_bytes` may lower it or disable it |
-| | `submit_insight` body | 60 KiB | Proposal prose size |
 | | `report` body | 48 KiB | Markdown artifact size |
 | | `finish` summary / state | 12 KiB / 32 KiB | Work-unit completion summary and carried state |
 | | `consult` question / roles | 8 KiB / max 8 | Consultation query and bounded role fan-out |
@@ -1238,7 +1052,6 @@ detected bound without declaring it:
 | **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
 | **Locks** | `LOCK_TIMEOUT` / `LOCK_RETRY_INTERVAL_MS` (`platform.py`), execution-local policy + per-path guard (`fs.py`) | 30 s / 50 ms defaults | Configured host/load policy: `[limits].lock_timeout_seconds` bounds each local/kernel acquisition half; `lock_retry_interval_ms` trades kernel-probe frequency against acquisition latency. Clipping sleeps and refusing retries at/after the deadline preserve the liveness contract (ADR-026); standalone primitives retain the defaults. |
 | **Pipe idle polling** | `PIPE_POLL_INTERVAL_MS` (`platform.py`), execution-local policy captured by reader threads | 100 ms default | Configured host/load policy: `[limits].pipe_poll_interval_ms` (1–500 ms) trades wake frequency against idle cancellation latency while readiness stays immediate. Standalone waits retain the default or accept an explicit seconds timeout. |
-| **Decisions** | `defer` requires a revisit value (`insights.py`) | always | Accountability floor: a deferral without a revisit condition parks work with no observable trigger; worker policy defers only with a revisit trigger |
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`unit_finish.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 | **CI request** | `vcs_request` requires the role capability and `[vcs] request_grant` | always | A request targets a completed publication receipt, never a branch head, and returned runs must bind to that commit. An explicit same-attempt request reconciles an unresolved dispatch through a non-dispatch adapter query; only durable `not_dispatched` permits a new attempt. Time never settles uncertainty. Read-only status/listing never settle it, and there is no automatic retry. The run's own record names each attempt, day, outcome and covered items, so CI activity is visible per unit |
@@ -1252,10 +1065,7 @@ evidence, and only a cursor validated against its typed review and run receipt
 counts as reviewed for that digest; an observed attempt without a verdict remains
 pending. A changed code digest re-arms review. Any retry comes from the role's
 existing schedule or event recovery cadence, never an immediate internal loop.
-An unacknowledged decision event
-routed to the role (`decision_events` in `own` mode, or any-source matches with
-`decision_sources = "any"` delivering
-once and admitting even deferrals), a terminal work-item event routed by
+A due role-readable queue message, a terminal work-item event routed by
 `work_item_sources`, a due structured wait, a red on the configured CI wake set
 for a role with `ci_wake`, or a changed ready-work set (including exact terminal
 evidence bindings) is a distinct admission reason that
@@ -1268,8 +1078,8 @@ observes the configured writer cooldown. See the
 [scheduling contract](scheduling.md) for precedence and the bounded prompt
 projection. Event delivery reaches scheduling two ways: the writer daemon
 re-checks `should_run` against event, wait, CI and ready-work state every idle
-tick, and `mizu service` renders event wakes for non-daemon roles with
-`decision_events` or `work_item_events`, plus unscheduled `on_change` roles.
+tick, and `mizu service` renders event wakes for non-daemon roles with a declared queue
+wake or `work_item_events`, plus unscheduled `on_change` roles.
 By default, Linux systemd path units and macOS `WatchPaths` invoke
 `mizu run --event` on subscribed changes; scheduled timers retain their own
 cadence. Unscheduled
@@ -1296,7 +1106,7 @@ triggers is an operator deployment step. There is no new retry or cancellation
 mechanism; periodic triggers simply re-evaluate existing pending state.
 
 `roles.<name>.event_wakes` lists the wake kinds that may admit a standalone
-`mizu run --event` dispatch of that role: `operator_record`, `decision`,
+`mizu run --event` dispatch of that role: `queue` (a role-readable message),
 `work_item`, `wait` (due waits and owned check-result waits), `ci`, `operator`
 (a role-cursored operator wake), `ready_work` and `code` (an unobserved
 published code change for an unscheduled `on_change` role). Unset admits every
@@ -1308,7 +1118,7 @@ nothing, so the record, event, wait, CI failure or cursor stays pending for
 whichever role or run may consume it. An empty list means no wake starts the
 role standalone, and `mizu service` renders no event service, path or timer
 unit (and no Windows poll task) for it. The list is an additional gate on
-top of `ci_wake`, `check_result_wake`, `decision_events` and
+top of `ci_wake`, `check_result_wake`, queue wake declarations and
 `work_item_events`, which keep their meaning. Interval/calendar timers, daemon
 loops, explicit `mizu run`, saved continuations and delegated or consulted
 children do not pass through this gate; a run that starts for such a reason
@@ -1695,474 +1505,31 @@ installation, login, package acquisition or deployment runs during work.
 
 `work_item_events = []` is disabled by default. Opt in to `["done"]`,
 `["dropped"]`, or both (unique values only); no other transitions are events.
-`work_item_sources` (`own`/`any`) routes terminal events independently of
-`decision_sources`, which routes decisions only. For terminal events, `own` routes by
-**the origin insight's submitter**, not the terminal transition actor. Routing
-reads the supported inbox/archive body, including revised and archived origins;
-item/origin references remain those of the immutable seed. Missing source data
-is explicitly `origin_source: null`, `routing: "unknown"`; only `any` opt-in
-receives those events, with no actor fallback. A malformed/unsafe origin fails
-closed rather than becoming a guessed route.
+`work_item_sources` (`own`/`any`, default `own`) routes terminal events by the
+transition actor: `own` delivers only items closed by this role, while `any`
+requires the explicit subscription and delivers terminal events from any actor.
+`mizu explain` reports the effective routes.
 
-With neither route set, both default to `own`. For migration, omitting
-`work_item_sources` preserves the legacy shared `decision_sources` route for
-terminal subscriptions. In particular, a terminal-only subscription with only
-`decision_sources = "any"` resolves to effective `work_item_sources = "any"`
-and `decision_sources = "own"`. Legacy `any` without either subscription still
-fails load. Once `work_item_sources` is explicit, the routes are independent:
-each `any` requires its **own** nonempty subscription (`decision_events` or
-`work_item_events` respectively). Set both fields explicitly to stop inheriting
-the shared route; for example, `decision_sources = "any"` with
-`work_item_sources = "own"` delivers decisions from anyone but terminal events
-only for this role's findings. `mizu explain` reports the effective routes.
+### Capabilities
 
-### Shared decision delivery (explicit host cutover)
-
-Legacy decision delivery remains the default and the sole active authority until
-an operator's host invokes `decision_reconciliation.activate_decision_delivery(project)`.
-This is a trusted Python host API, **not a model tool, TOML switch, automatic
-migration, or deployment action**. See [shared records](shared-records.md#host-only-one-way-runtime-activation)
-for its quiescent boundary, evidence files and interrupted-retry contract.
-
-Every enabled role with `decision_events` must explicitly configure
-`decision_page_bytes`, an integer in **1–1048576**; there is **no default** and
-no inheritance from the count bound. The setting is inert in legacy mode.
-Activation and shared runtime reads refuse a missing budget. This budget covers
-the actual UTF-8 JSON decision prompt contribution (`decision_events` plus
-`decision_page`, including both keys, JSON formatting, tokens, references and
-all truncation metadata), not the entire prompt. Reserve space for the other
-prompt sections; 1 MiB is an absolute ceiling, not a recommended page size.
-The configured count limit remains independently effective. No kind other than
-`insight.decision` consumes this page budget in this pilot.
-
-Full and delta prompts keep existing `decision_events` action-shaped rows and
-add `decision_page: {pending_count, truncated, count_truncated, byte_truncated}`.
-Rows stay globally oldest-first. An oversized oldest row becomes a bounded
-`ref` with its full immutable record digest; it is never silently skipped.
-A budget too small even for metadata or the oldest reference raises an explicit
-budget failure, including during wake/selection, rather than an empty page.
-Subscriptions in shared mode grant a narrow `decision_read` tool automatically
-for that unit. It accepts only `ack_token` from the host-frozen role/unit
-manifest and optional character `offset`/`limit` (0-based, 1–8192 characters per
-page, default 8192); its response carries `record_id`, `record_digest`, `offset`,
-`total_chars`, `next_offset`, and `text`. Reading does not acknowledge anything.
-This tool grants neither arbitrary store reads nor activation/write authority.
-Source/routing movement cannot change the exact content of a frozen reference.
-
-Prompt, dispatch, wake, selection evidence and finish acknowledgement use the
-same durable marker; shared errors never fall back to legacy. Active routes,
-actions and `own`/`any` sources retain their configured meanings. Shared-mode
-selection evidence follows those routes, resolving references by full digest
-before applying existing classifier text/count bounds (zero decisions disables
-that input). Legacy selection evidence behavior is unchanged. Other event,
-work-item, task, check, wait and CI authorities are unchanged. There is no
-implicit downgrade, including when the budget/subscription configuration changes.
-
-### Decision-event receipts
-
-`finish` optionally accepts `ack_events`, an array of at most 512 strings,
-each at most 64 characters (default omitted, equivalent to `[]`). Delivered
-`decision_events`, terminal `work_item_events`, structured insight `wait_events`
-and dependency `obligations` rows carry a host-issued opaque `ack_token` in both full and delta prompts. Select exactly the handled rows'
-tokens, e.g.
-`{"outcome":"wait","summary":"Handled one decision","ack_events":["<ack_token>"]}`
-(writers also supply `state`). Role policy, not this field, defines handling.
-
-Tokens bind the consuming role, immutable event identity and exact delivered
-payload (including the decision history record for decisions). One unique
-selection may mix these four sources. They are not capabilities obtained by reading
-history or copying untrusted text: finish accepts only tokens delivered to this role in
-this unit. Duplicate, malformed, unknown, foreign and undelivered/stale tokens
-refuse the seal before writing its intent; they never partially acknowledge.
-A decision topic revision/withdrawal during handling does not invalidate its
-frozen decision delivery; a terminal item correction that changes the current
-terminal revision/payload invalidates the older work-item token. No outcome,
-prose summary, or `wait_for_check` implies acknowledgement;
-explicit selections also work when the successful unit waits for a check.
-CI wait rows also appear in `wait_events` and always carry identity-bound
-`ack_token`s plus the `ci_wait_delivery` prompt contract. Explicit selections are
-revalidated against the current blocked revision/holder and exact source
-evidence before intent and receipt writing; bounded/bound-hit runs and finishes
-registering `wait_for_check` write no CI receipt, even if selected. Legacy
-per-item auto-ack files are not imported, so still-current rows without a shared
-receipt replay. CI status and check-job data remain non-token sources.
-Terminal work-item receipts use the same explicit selection contract, with their
-existing storage below.
-
-Structured insight waits and dependency obligations bind one persisted
-`registration_id` (new registrations use a UUID hex string). Legacy registrations
-without that field use a stable `legacy:<owner>:<digest>` identity computed from
-the exact stored registration, without rewriting it; malformed explicit IDs are
-not legacy. Tokens additionally bind the role, source (`insight_wait` versus
-`dependency_obligation`) and canonical delivered payload. After successful
-result/publication, selected due waits are removed only if the stored
-`registration_id` still matches. A same-instant re-registration during handling
-survives an older selection. An old delivered token may record handling in that
-unit but cannot acknowledge the replacement or be reused in a later unit.
-
-Selected obligations produce atomic create-only receipts under
-`obligation-receipts/<role>/<identity-digest>.json`, binding role, source, insight,
-registration ID and token plus `acknowledged_at`. Only those exact registrations
-are suppressed for that role; neither the dependency wait nor task state is
-changed. Receipt reads are capped at 4 KiB and reject corrupt content, invalid
-bindings/timestamps, unsafe directories, symlinks and hardlinks without repair.
-Retries preserve existing bytes; backup/restore retains these receipts.
-Partial write failure leaves unwritten and
-unselected rows pending, never advancing a watermark. Both sources select the
-globally earliest eligible unreceived registrations before applying their count
-limit (default 10, API 1–100). Registration reads and token-bearing payload rows
-are each capped at 1 MiB; UTF-8 bytes, including tokens, count toward the bound.
-Run `wait-events.json`, `obligation-events.json`, finish intent and result retain
-the delivery/selection evidence. No shared aggregate prompt byte budget or
-receipt-pruning policy is added. Receipting an obligation records observation
-handling, not assignment, satisfaction, admission or scheduling.
-
-Only after the durable successful result and, for writers, successful snapshot
-publication does the host write selected exact receipts under
-`decision-receipts/<role>/<token>.json`. An intent alone is not a receipt.
-Atomic per-token receipts are at most 1 KiB, validated fail-closed without
-following links. Exact retries are idempotent and leave existing receipt bytes
-unchanged. Cancellation/failure before completion writes no receipts; a crash
-or I/O failure during receipt writes may replay the remaining decisions, never
-acknowledge an unselected one. Run `decision-events.json`, finish intent and
-result retain delivery and selection evidence. History is immutable. Receipt
-storage grows with distinct handled role/payload identities; no aggregate list
-or timestamp tie window is loaded or truncated. History reads and decision
-payloads are each bounded to 1 MiB; selection uses a heap of at most the
-role-effective limit (fixed maximum 100 rows).
-
-A safely read per-token receipt with invalid content or semantics (malformed
-JSON, wrong shape or role/event/token binding, bad timestamp) isolates only
-that event: it stays undelivered and unacknowledged, its bytes are left
-unchanged, and at most `[limits].decision_receipt_diagnostics` (default 10) bounded diagnostics are reported as
-`decision_receipt_diagnostics` (each `{event, ack_token, action, reason}` with
-`reason` in `malformed_json`, `invalid_receipt`, `invalid_timestamp` and no
-receipt bytes or untrusted content) in full and delta prompts, the run record
-(`decision-receipt-diagnostics.json`), and scheduling, so a corrupt receipt
-alone still admits a run instead of reading as drained. Unrelated valid events
-still deliver. Unsafe receipt directories, symlinks, hardlinks, size-bound
-refusals, and systemic I/O still fail closed and are never isolated.
-Acknowledgement of a suspect token is refused and never overwrites the file.
-There is no receipt-repair command. The product never deletes, quarantines, acknowledges, replays, overwrites, or silently repairs a suspect receipt, and directly editing receipt files is not a supported repair procedure. Until an authorized recovery completes, that event remains withheld. Recover only through this operator runbook, without printing or copying suspect receipt bytes; establish identity from the bounded diagnostic identity (`event`, `ack_token`, `action`, `reason`) plus immutable delivery/decision history (role, event ID/revision/action/scope, payload-bound ack token):
-
-1. `mizu pause PROJECT`; keep the source paused and unchanged throughout.
-2. `mizu backup PROJECT ARCHIVE --verify` (requires a paused project; creates a new archive outside the project tree under quiescence/locks; includes `decision-receipts`; returns checkpoint metadata). Treat archives as protected operator holdings. A current backup containing the corrupt receipt is evidence/rollback only, never a recovery candidate.
-3. A recovery candidate is eligible only when an independently known-good pre-incident backup is proven to contain the exact role, event ID/revision/action/scope, payload-bound ack token, and an already-valid receipt for that identity, plus all project state the operator intends to retain. A checkpoint that would omit later required decisions, evidence, or accepted scope is not eligible.
-4. `mizu restore NEW_PROJECT --archive ARCHIVE` restores an eligible candidate only under a new project name as a new paused, unarmed project; it never overwrites or restores in place. Check the returned checkpoint and compare project identity, goal, policy, immutable decision history, accepted scope, and other required state; keep the candidate unarmed and do not adopt it unless those checks and independent receipt-validity evidence match the intended recovery.
-5. `--verify` and restore integrity checks alone do not prove receipt validity or completeness of the intended project state.
-6. If no such known-good checkpoint exists, the exact receipt cannot be independently established, or project continuity requires the source lineage, there is no supported in-place recovery: keep the source paused, preserve the archives, and escalate; do not delete, quarantine, acknowledge, replay, or directly edit receipt files.
-7. Record operator, project, diagnostic identity/reason, source and candidate checkpoint IDs, archive verification/result, and the final decision, without receipt bytes.
-8. On any failure or rejection, roll back by leaving the source untouched and not adopting the candidate.
-
-Selection excludes exact receipts, then takes the globally oldest eligible
-rows by timezone-aware timestamp and event ID before the prompt limit, across
-substantive decisions and deferrals. Nothing silently rotates past ignored
-deferrals. `own`/`any` routing and own-source defer ride-along admission stay
-unchanged. Leaving the oldest rows unacknowledged deliberately holds the
-window; use role policy to handle them or subscribe only to needed actions.
-
-**Migration:** legacy `decision-cursors` timestamps, tie IDs and defer offsets
-are ignored for suppression, not converted into receipts: unit completion did
-not prove handling. This can replay previously handled eligible history once;
-superseded, withdrawn and revision-stale history remains ineligible. Missing or
-lost receipts can cause replay. Changed delivered payload (such as attached
-evidence) has a distinct token and can replay even for the same decision.
-There is no claim that this repairs events already removed from history, or
-that explicit decision receipts complete the other event-source families.
-
-Terminal events are validated through the existing WorkItems immutable seed
-and complete current chain, oldest terminal instant first (aware timestamps
-normalized to UTC, then item ID/revision). Dispatch batches are independent per
-source: the role-effective `work_item_events_limit` (role override when set,
-else the project default) bounds terminal rows, 1–100 per dispatch, while the
-role-effective `decision_events_limit` bounds only decisions. Structured wait
-and obligation sources each use the project `wait_events_limit` (1–100; default
-10), independently rather than as one combined cap. Either existing role
-override is 1–100 with `None` meaning inherit; the fixed 100-event mechanism
-cap applies to each route. Choose each per-source batch to fit the role's
-`requests_per_run`: terminal, decision, wait, and obligation rows require
-explicit per-row selections in `finish.ack_events` (above); unselected rows
-replay oldest-first. Each terminal row, including its delivery token, is at
-most 8192 canonical bytes, and the page is at most 1 MiB. The title retains
-the seed's 200-character bound and the reason is a 1024-byte preview with a
-truncation flag.
-Delivered rows include a role/payload-bound `ack_token`, stable
-`event: "work_item:<item-id>:<terminal-rev>"`, `source`,
-`type`, item/origin references, transition, terminal time, actor and routing.
-`done` additionally includes `snapshot_id`, a bounded `verification`
-reference (SHA-256 of the canonical copied verification, passing flag and code
-digest) and `delivered_tree`, the digest of the tree that carries the delivery
-(null for `dropped` and for records written before the claim existed); the full
-evidence remains in the immutable work-item history.
-New completion first requires an explicit delivery binding: `snapshot_id` on a
-same-status doing transition with unchanged scope (the binding event stores
-`snapshot_id` as null and persists the delivery object). Completion's `snapshot_id`
-must equal that prior binding; it does not compare the live workspace. Valid
-embedded verification or late independently retained acceptance may close an
-ordinary item. Only independently retained acceptance plus an existing delivery
-can correct dropped to done; done-to-open instead requires the separate
-explicitly enabled `work_items_reopen` tool. The full
-history pins receipt ID and acceptance-scope digest for configuration-independent
-replay (ADR-050). No new configuration knob or grant is added.
-
-These events admit `--event` and unchanged-code runs, appear in a separate
-`work_item_events` field in both full and delta prompts, and are frozen in
-`runs/<run>/work-item-events.json` before selection/execution. `started.json`
-and `prompt_projection.json` record their count. Only tokens explicitly selected
-in `finish.ack_events` acknowledge terminal rows, after the durable successful
-result and, for writers, successful snapshot publication. Omitted/empty means
-none. Selection is validated against current terminal identity/payload before
-finish intent; tokens are stripped before the existing receipt writer validates
-and stores the original row. Store/CLI pending views do not carry tokens.
-Failures, selector waits, busy exits and unsealed runs do not acknowledge.
-Outcome (including bounded wrap-up), summary, CI wait or check wait alone never
-implies acknowledgement; a successful explicit selection works independently
-of outcome/check wait. Events arriving during execution are not delivered in
-that unit, so cannot be selected.
-
-Acknowledgements are source-scoped exact receipts at
-`work-item-receipts/<role>/<item-id>.<terminal-rev>.json`, separate from
-`decision-cursors`. There is **no terminal timestamp watermark**: a later
-decision or clock rollback cannot hide an unseen terminal event. A matching
-retained terminal event with no receipt for the role is backfilled even if it
-predates subscription; receipts remain effective across unsubscribe/re-subscribe.
-Existing terminal receipts remain valid without rewriting; those made before
-explicit selection do not retroactively prove model handling.
-Receipts are excluded before applying the delivery limit. Each receipt is written atomically;
-a failed/partial batch replays only identities without committed receipts.
-Atomic-write leftovers are not receipts. Receipts have no automatic expiry,
-are included in backup/restore, and are not deleted by read-only views. An
-acknowledgement failure does not turn completed processing into an event loss;
-the next run may replay it. Decision receipts and other event-source
-acknowledgement behavior are unchanged.
-
-Daemon admission checks pending terminal identities each idle tick. Non-daemon
-Linux/macOS service definitions also watch the work-items parent. After a
-terminal append or successful/partial receipt write the parent metadata is
-touched as a non-authoritative hint (nested directory writes alone are not
-assumed recursive platform watch events); this permits bounded-batch draining
-without requiring a receipt directory to pre-exist at service installation. No
-record schema or grant changes, assignments or automatic execution are implied.
-These are wake hints, not a transactional queue: a crash between append and
-metadata touch, a failed hint, or a platform-coalesced/busy dispatch can delay
-processing until the next configured `event_poll_seconds` recovery for an
-unscheduled watched role, a daemon idle tick, or the next scheduled/explicit
-run. Windows has no file trigger: scheduled roles check at their scheduled
-firing, while unscheduled watched roles use the event poll task. Re-render/reinstall
-service definitions after enabling a subscription; rendering does not install
-or start services itself.
-
-`roles.<name>.check_result_wake` is a boolean (default `true`, effective only
-with the `check_job` capability). An owned terminal, unacknowledged async check
-can admit its role regardless of the prior finish outcome. Each result gets
-one automatic dispatch attempt, not repeated ticks until output is read.
-`false` disables automatic result admission, not result visibility, explicit
-`wait_for_check` continuations, or other wake sources. This policy neither
-grants check ownership nor imports acceptance. See [scheduling](scheduling.md#asynchronous-check-result-wakes)
-for the separate one-shot dispatch marker and crash semantics.
-
-`roles.<name>.finish_outcomes` is a nonempty array of unique strings from
-`["continue", "wait", "blocked", "done"]` (the default). `mizu_finish` advertises
-and accepts only the configured outcomes. Omitting `wait` also hides
-`wait_seconds` and `wait_for_check`; it does not disable automatic check-result
-or CI wakes. Existing finish checks, such as successful verification for a
-writer's `done`, still apply.
-
-A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
-`capabilities`, `engine_tools` (at most 128 unique, nonempty names of at most
-256 characters), `on_change`,
-`decision_events` (at most 8 unique lowercase decision actions, never
-`withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
-this role: default true for writable roles, false otherwise), and `decision_sources` (`own` default routing only this role's findings,
-`any` routing matching actions from any source so a resolver runs on each new
-deferral) and `work_item_sources` (terminal routing by origin submitter;
-`own`/`any`, default/migration rules in
-[terminal subscriptions](#terminal-work-item-subscriptions)),
-independent `command_evidence_sources` / `experiment_evidence_sources`
-(`own` or `any`, each defaulting to `own`; exact retained-evidence reads only,
-not capability grants),
-optional per-role no-progress backoff override `no_progress_backoff_seconds`
-(0–86,400; unset inherits `[limits].writer_no_progress_backoff_seconds` for
-writable roles and `[limits].no_progress_backoff_seconds` otherwise; the timer
-wake applies to read-only on-change roles only, not writers), optional per-role writer-daemon cooldown override `cooldown_seconds`
-(1–1,073,741,824; unset inherits the project `[limits]` value; writable daemon
-spacing and deferred re-evaluation only, read-only cadence stays on
-`idle_seconds` and read-only deferrals stay on the project cooldown),
-optional per-role progress-signal override `progress_signals` (same unique
-supported names as `[limits].progress_signals`; unset inherits the project
-list; explicit `[]` disables qualification for that role),
-optional per-role spend overrides `requests_per_run` / `tools_per_run` /
-`wrap_up_requests` / `wrap_up_tools`
-(1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
-200/400 while other roles stay at the project default; storage, transport, budgets,
-slots and rotation stay project/host policy), optional per-role event batch
-overrides `decision_events_limit` / `work_item_events_limit` (1–100 each; unset
-keeps the matching project `[limits]` value, so one role may take larger
-decision windows while another takes smaller terminal batches), optional
-per-role event-only recovery poll override `event_poll_seconds` (60–2,678,400
-seconds, default 60; the Task Scheduler minimum/bounds; unscheduled watched
-roles recheck pending event inputs at this cadence on every platform while
-scheduled timers stay on their schedule), optional `event_batch_seconds`
-(integer 60–2,678,400 seconds, unset by default; watched non-daemon roles only)
-for periodic event-only triggers instead of file hints/recovery polling on all
-platforms, without changing ordinary schedules, explicit daemon scheduling policy
-`daemon_policy` (`signals` consults the role-aware `should_run` gate,
-`periodic` runs at the ordinary cadence while armed and neither paused nor
-draining; unset keeps the workspace default with identical effective behavior:
-`write` uses `signals`, `read`/`none` use `periodic`, so the daemon loop
-consumes this policy, never `workspace`), optional ordinary daemon spacing
-override `daemon_spacing_seconds` (1-1,073,741,824; unset keeps the policy
-default: `signals` uses the effective `cooldown_seconds`, `periodic` uses
-`idle_seconds`; affects ordinary daemon spacing only, never deferred
-`next_evaluation_at` re-entry or the `cooldown_seconds` retry policy), and at
-most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
-string or an array of path strings (e.g. shared principles plus the role file);
-parts are read as UTF-8 in order and joined with one `\n` (trailing newline
-kept), so the composed text is the prompt and the policy digest. Missing,
-unreadable, non-UTF-8, or oversize parts fail load; unknown keys still fail.
-Bounds (fixed mechanism): at most 16 parts, each at most 64 KiB, 256 KiB total.
-
-`scheduled_inputs` is an optional array of unique source names (default `[]`,
-open-ended scheduling). Its only supported value is `"deferred_insights"`;
-a nonempty declaration requires `interval_seconds` or `calendar` and the
-existing `insights` capability. For example, add
-`scheduled_inputs = ["deferred_insights"]` to a timed resolver that already has
-that capability. The platform timer command for an opted-in role carries the
-internal `--scheduled` marker: only those invocations may return
-`{"skipped":"no-scheduled-input","snapshot":"…","code_digest":"…"}` before
-model/run-slot admission. A strict locked read of the insight index finds
-whether any exact current `defer` decision exists across **all** live sources,
-including sources no longer configured and already-acknowledged decisions.
-Undecided, resolved and
-stale-decision revisions do not count as deferrals. A proven-empty source
-alone is not enough to skip: the authoritative pre-admission projection must
-also show no other scheduled input (a subscribed decision, terminal work-item
-event, due wait, current CI failure, operator record, ready-work set, explicit
-wake, progress self-admission or unobserved code change). The timer is the only
-dispatch for scheduled roles on Windows. Unsafe, unreadable, malformed or
-otherwise unavailable evidence leaves ordinary scheduled execution in place,
-never establishes emptiness. The compact result creates no run, receipt or
-cursor and acknowledges nothing. Direct runs, event triggers, explicit operator
-wakes, pending continuations, daemons and roles with `[]` keep their existing
-behavior. No new read/routing authority is granted; see [scheduling.md](scheduling.md).
-
-Capabilities grant
-Mizu operations; `engine_tools` grants native or external MCP tools such as
-`codemode`, `web_search`, or `mcp__docs__search`. Exposure and automatic approval
-never grant execution authority. Native host command/file tools cannot bypass
-the bridge and publication contract. Codex currently refuses any nonempty
-`engine_tools` role before launching app-server: its current adapter has no
-pre-send admission hook. Native/extra tools (including extra MCP tools) remain
-unavailable there until such an adapter exists; this does not alter operator
-grants. Pi and Claude require a trusted SDK invocation identity at their pre-call
-boundary; see [admission bounds and trust](completion-contracts.md#extra-tool-pre-send-admission).
-
-| Engine | Managed interface | Completion | Admission unit |
-|---|---|---|---|
-| Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
-| Pi-durable | Pinned pi-durable Harness over file-backed SQLite with Pi's own `ModelRuntime` for the pinned model; one admitted submission per engine attempt, with per-turn Harness request IDs bound to the durable work-unit grant key | Settled submission and seal | Logical model request (includes auxiliary inference) |
-| Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
-| Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
-
-For pi-durable, the durable work-unit key is bound to the exact persisted
-work-unit grant; it is not itself the per-turn Harness request ID in every
-submission. The first turn uses the work-unit key as its Harness `requestId`,
-and later authorized turns use `<key>-t<sequence>`. Replaying a compatible
-completed sealed candidate restores its persisted host finish without new
-admission; an unsealed completed row requires its one-dispatch in-process
-continuation and cannot be replayed as a fresh terminal. Selector failover gets
-a new work-unit key only after a known terminal `pi-durable` `unanswered` failure
-and an eligible fallback has actually been selected; the bounded attempt suffix
-leaves the session/store and all durable grant and replay checks intact. Other
-or uncertain failures retain the work-unit key and therefore refuse a changed
-grant rather than forking around unresolved work.
-
-Claude composed prompts are literal data: the launcher always sets the pinned
-SDK's `ClaudeAgentOptions.verbatim_prompts=True`. This field is runtime-owned;
-any supplied `options.verbatim_prompts` value (even `true`) is refused before
-launch. Prompt text is not escaped or rewritten to handle `@path` or leading
-slashes. Reviewed plugins/skills and explicitly granted native/MCP tools remain
-supported; prompt text is not a separate CLI command API.
-
-Settings that collide with runtime-owned prompt/model/bridge/session fields
-fail before input; they are never silently overwritten. Native engine errors
-remain errors. On every engine but pi-durable, session identifiers include model,
-policy, goal, capabilities, native grants, effective configuration minus live
-reasoning-effort keys (`thinkingLevel` and `cacheRetention` on pi, `model_reasoning_effort` on Codex,
-`effort` on Claude), command and resource content digests. An effort-only (or `cacheRetention`-only on pi)
-profile switch therefore continues the role's conversation with the current
-effort; any other change still starts a fresh bounded session whose first
-unit prompt carries snapshots, pending insights, and research state.
-
-Full and resumed delta prompts open with the same names-only
-`unit_tool_surface`, derived from that dispatch role's broker tool grants. It
-is explicitly a **UNIT-OPENING** snapshot: it supersedes earlier units' wrap-up
-restrictions, never a later restriction in the same unit (a narrowed re-dispatch
-may retain the original opening prompt). Request/tool/deadline/drain wrap-up
-and tool-active missing-finish notices restrict only the rest of their own work
-unit. The opening text grants nothing, does not advertise native engine tools,
-and never replaces host capability enforcement or changes persistent-session
-identity.
-
-Pi-durable sessions instead cover only engine, backend, and the declared store
-format (see the profile section above), so compatible changes ride the live
-conversation there. On every engine, stable system instructions compose the
-ordered role policy followed by the exact pinned operator-supplied project
-charter (`Context.goal`). Pi sends this as `systemPrompt` (and `system.md`),
-Codex as `baseInstructions` on both start and resume, Claude as `systemPrompt`,
-and pi-durable as `instructions` (and `system.md`). Both full and delta unit
-prompts carry only `goal_digest`, not a duplicate charter body. Writers pin the
-live project goal at context construction; read-only roles pin the published
-snapshot goal, and consultation/delegation children inherit their parent's pin.
-No charter is discovered in the managed workspace. Charter changes retain the
-existing `goal_changed` wake. They re-key normal engine sessions just like
-policy changes; pi-durable instead keeps its store identity and applies the
-composed instructions through its existing live configure/readback convergence.
-Its resume-authority and current-turn grants both bind the composed charter
-in the existing `policy_text` digest: a new unit can use a changed charter in
-the same store, but stale crash recovery under a different charter is refused.
-Resume errors never start a new conversation. Persistent sessions belong to
-that fingerprint; ephemeral state belongs to the run. Authentication is an
-explicit operator operation. Mizu does not alter operator settings files.
-
-Token totals are observed evidence, separate from admissions and native cost
-estimates. Codex/Claude do not expose a supported Pi-equivalent hook for each
-inner provider request. Claude native turn/cost limits can supplement the
-query admission. Model fallback is explicit native configuration and actual
-models are recorded. Model usage excludes unreported auxiliary billing.
+A role's `capabilities` array may contain only these names; a grant changes a
+tool boundary, never the meaning of a message or the outcome of work.
 
 | Capability | Authority |
 |---|---|
 | `files`, `read`, `diff` | Bounded file view and anchored published changes |
-| `exec` | Container command; workspace mode determines source writability |
-| `experiment` | Container command with readonly source and ephemeral work area |
-| `command_evidence_read` | Read an exact retained command record from this project's runs (current or prior), limited by `command_evidence_sources`; no listing or path input; ungranted by default |
-| `experiment_evidence_read` | Read an exact retained experiment wrapper from this project's runs (current or prior), limited by `experiment_evidence_sources`; independent of the command grant; ungranted by default |
-| `verify` | Execute operator-owned command strings and bind proof to code digest |
-| `check_job` | Submit and inspect asynchronous frozen-input sandbox checks: `verify`, an ordinary `experiment` and a read-only `exec` return a job instead of blocking, and the role continues independent work, finishing with `outcome=wait, wait_for_check=<id>` when nothing else remains. A result is imported only while the source digest, the configured commands and the environment still match, so a source change cannot inherit a passing result. Writable execution stays synchronous. A request may carry an optional `purpose` (1-64 printable characters, no path separators): a later request with the same purpose from the same role replaces that role's earlier unfinished job for that purpose, which leaves the queue and keeps its evidence; a purpose never retires another role's job. See [check jobs](check-jobs.md) |
-| `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
-| `feed_updates` | Query-free RSS/Atom discovery with a current identity set per project role and configured feed; ungranted by default |
-| `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
-| `insights` | Read proposals |
-| `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1–100, default 25; rows at most 8192 canonical bytes), a closed-item page over `done`/`dropped` items (`closed=true`, narrowed by `status`, `origin`, `closed_after` and `closed_before`; no `after_rev`), or one exact seeded item by ID in any status, including terminal states, with current origin staleness and paged immutable history (`after_rev` exclusive 0–256, default 0; limit 1–100, default 25; chain at most 256 revisions; ordinary records at most 131,072 bytes, with resolution-bearing transition events at most 131,593 bytes). Closed-page `total` counts all rows after filters. Each response is capped at 1 MiB and is a fresh live view, not a frozen snapshot; unsafe or malformed store data fails closed. This read grant does not imply transition authority |
-| `work_items_transition` | Append one CAS-bound status revision; actor is fixed to the role, stale revisions require a fresh read, `snapshot_id` on a doing-to-doing revision first records an exact retained published snapshot/scope binding (the binding event stores `snapshot_id` as null), `done` requires that prior binding and exactly its `snapshot_id` with valid embedded or independently retained digest-bound acceptance (not live workspace equality), dropped-to-done correction requires the independently retained receipt, `dropped` requires a reason, and new transitions to `blocked` require a supported structured wait (historical no-wait records remain readable). An optional scope (1-4000 nonblank characters) states the scope in force from that revision on; omitting it inherits the previous revision's scope, a scope is never cleared, a scope change is its own recorded event with a reason naming what it supersedes, and a `done` closure may not change the scope it inherits (record the change in an earlier transition). Granted only to the example worker role |
-| `decide` | Record a revision-bound accept/modify/defer/reject and rationale, with optional accept/modify work-item intent and explicit 1–16 `work_items` task list (title/description, atomic group, total event ≤131072 bytes); accept/modify may also state the accepted scope (1-4000 nonblank characters), which is recorded with the decision and carried by the seeded work item, while defer and reject store no scope; revise after any substantive decision |
-| `submit_insight` | Submit proposal with route-derived identity |
-| `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
-| `withdraw_insight` | Withdraw one of the role's own proposals as author retraction, not rejection (source fixed to the role, bound to the read rev); a current accept/modify blocks withdrawal by default |
-| `withdraw_decided` | Supplemental opt-in allowing a role already granted `withdraw_insight` to withdraw over a revision-current accept/modify; requires `withdraw_insight`, has no default grants, and does not affect the direct operator CLI |
-| `consult` | Ask named read-only roles through their own profile or selector (default from `consult_role`, fail-closed when unset), no nested consultation |
-| `attach_evidence` | Append an attributed evidence entry to any open insight (bound to the read rev, title/body/rev unchanged; at most 16 entries of 8192 chars each; no role holds it by default) |
-| `report` | Stage a Markdown document for static artifact publication; also exposes `mizu_report_read` for the previous published report preview |
-| `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
-| `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; the `publications` op lists the project's recorded publication receipts from local durable evidence (exact `code_digest`, `branch` or `published_sha` filters, one bounded page with `total`, `truncated` and `scan_stopped`, where `total` is a lower bound once a scan bound stopped the search) and contacts no provider; the `ci_requests` op lists the recorded CI requests grouped by UTC day, with the work items each request covered and whether each attempt is resolved, terminally `not_dispatched`, or unresolved, plus legacy duplicate-spend risk, so CI activity is visible per day; `ci_costs` derives a bounded, explicitly partial observed runner-wall-seconds view using exact publication-bound status reads (see below); never publishes (read roles may hold it) |
-| `vcs_publish` | Push a branch or open a PR via the trusted VCS adapter behind a recorded human `GO <branch>` approval (writable workspace only; consultation roles cannot hold it) |
-| `vcs_retire` | Retire an owned temporary integration branch at an exact expected sha behind the configured `retire_grant` (read workspace suffices: integration authority is the capability plus the grant, never source-write access; consultation roles cannot hold it; never combines with `decide` (ordinary `submit_insight` is allowed but can never mint an operator-channel approval)) |
-| `vcs_dispose` | Close or merge an external proposal at exact assessed endpoints behind per-action grants (`close_grant`; `merge_grant` plus human `GO <branch>` for merge); also permits an explicit `close_if_adopted` action with exact proposal/target pins, `close_grant`, and the separate host-adapter `[vcs] close_adopted` gate. Role capability plus both gates are required; a valid `closed: false` adapter receipt is retained without retry/refetch/merge. Read workspace suffices; consultation roles cannot hold it; never combines with `decide`; observation never closes automatically |
-| `research_read` | Read this role's own current research state record with its generation (read roles and consultation roles may hold it) |
-| `research` | Replace this role's own current research state record under the read generation; stale generations refused, audit in `research-state.json` (consultation roles cannot hold it) |
-| `work_order` | Record the writer's explicit ordered work-item plan and expose `mizu_work_order_read` (least-privilege writer grant only; consultation/delegation roles cannot hold it) |
-| `finish` | Seal result; cannot acquire new permissions |
+| `exec`, `experiment` | Bounded container commands; `experiment` has a readonly source and ephemeral work area |
+| `verify` | Execute operator-owned command strings and bind proof to the exact code digest |
+| `check_job` | Submit and inspect asynchronous frozen-input sandbox checks; results import only while source, commands and environment still match |
+| `fetch`, `search`, `feed_updates`, `probe` | Allowlisted retrieval, trusted discovery, query-free feed observation and one policy-bounded HTTPS probe |
+| `queues` | Append to, read, acknowledge and look up messages in declared queues under the principal grants |
+| `consult`, `delegate` | Bounded read-only consultation and one-shot implementation children under their own role grants |
+| `report`, `finish`, `review_verdict` | Stage a report, seal a work unit, or record a typed publication review receipt |
+| `sync`, `vcs_read`, `vcs_publish`, `vcs_retire`, `vcs_dispose`, `vcs_request` | Trusted VCS adapter operations behind their separate operator grants and recorded human approval |
+| `research_read`, `research` | Read and replace this role's bounded current research-state record |
+| `materialize`, `command_evidence_read`, `experiment_evidence_read`, `result_read` | Apply digest-bound offline inputs and read exact retained command, experiment or tool-result evidence |
+| `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1-100, default 25), a closed-item page over `done`/`dropped` items (`closed=true`, narrowed by `status`, `origin`, `closed_after` and `closed_before`; no `after_rev`), or one exact seeded item by ID in any status, including terminal states, with paged immutable history (`after_rev` exclusive 0-256, default 0; limit 1-100, default 25). Closed-page `total` counts all rows after filters; each response is capped at 1 MiB and is a fresh live view, not a frozen snapshot. This read grant does not imply transition authority |
+| `work_items_create`, `work_items_transition`, `work_items_reopen`, `work_order` | Create immutable seeds, append CAS transitions, audited reopening, and record the writer's ordered plan |
 
 ### On-demand state reads
 
@@ -2203,8 +1570,6 @@ fresh live projections, and plan reads see current storage against the same
 unit-opening generation; none promises a pinned cross-call snapshot. Existing
 reservation and reduced-grant fences still apply.
 
-For post-decision withdrawal, add `withdraw_decided` to the same role's TOML `capabilities` array only when intentional; it is supplemental to
-`withdraw_insight`, never granted by default, and the operator CLI stays deny-by-default.
 Neither `read`, `exec` nor `experiment` implies either retained-evidence grant.
 The two grants are independent and expose only their own record kind. Their
 scope is confined to the current project (current or prior runs). Independent
@@ -2222,11 +1587,10 @@ for locators, paging, byte bounds, trust and failure behavior.
 
 Consultation and delegation require a live caller execution-slot lease from `Engine.run` (unadmitted calls fail with `Busy` before child inference). They use that held slot without acquiring another; consultation fan-out is bounded by `parallel_consults`, and child contexts cannot lend onward.
 
-A consultation names its answering roles explicitly (`roles` array of at most 8, or single `role`, default from the configured `consult_role`, fail-closed when unset). Each child unit runs the named role as configured — its own fixed `profile` or a bounded selector preview with no routing consumption and no classifier inference — so retry, `on_error`, and fallback apply with no new mechanism and the model is stated once on the role. The `delegate` capability names one-shot implementation children: a role holding it hands a self-contained `task` to a `role` (default from the configured `delegate_role`, fail-closed when unset) that works in the caller's live workspace while the caller waits holding its workspace lock, so exactly one writer touches the tree. The child takes grants, profile or selector, and policy from the delegate role's own configuration, never `decide`, insight-write, vcs-mutating, or `delegate` grants (refused at delegation time); the mechanism ensures a terminal `finish` seal (idempotent when the configured role already carries `finish` for its own top-level runs) that returns its summary to the caller, and verification and publication stay with the caller. The child's normal requests, tools, and daily budget count against the caller's unit. Caller and child share atomic per-run spend accounting, including native tools and both wrap-up shares; daily admission refusals do not debit per-run allowances. Request and tool invocation identities remain local to each context. The child's wall and logical-request deadlines belong to the child's own role/Context, never `min(child,parent)`. Delegated children share only the configured aggregate portion of the wrap-up allowance (`delegate_wrap_up_requests` and `delegate_wrap_up_tools`, each clamped to the spend role's effective `wrap_up_requests`/`wrap_up_tools` total minus one); unused child share is available to the root, while the root always retains at least one request and wrap-up tool for its seal. These child shares aggregate across repeated delegations and do not enlarge the total allowance. Consultation units are independent and unaffected. Nested delegation and consultation stay disabled so no spend escapes. Consultations likewise use their answering roles' own deadlines. An already admitted synchronous child/join drains even if the parent's wall expires: parent transport cleanup waits rather than cancelling the child. Explicit operator stop, pause/unarm/authority revocation, and child-local timeout still cancel their intended scope. After the join, an expired finite parent receives no further inference allowance; neither its wall nor any enclosing query/turn request deadline is renewed. Each delegation records its task, child run, and result beside the run like consultations do. The `consult` capability names the operation (bounded child units on the same snapshot, answers returned unranked); role and profile names are operator configuration — avoid naming a role or profile `consult` when that overload confuses review, since the capability, role, profile, and `consult_role` key are distinct.
+A consultation names its answering roles explicitly (`roles` array of at most 8, or single `role`, default from the configured `consult_role`, fail-closed when unset). Each child unit runs the named role as configured — its own fixed `profile` or a bounded selector preview with no routing consumption and no classifier inference — so retry, `on_error`, and fallback apply with no new mechanism and the model is stated once on the role. The `delegate` capability names one-shot implementation children: a role holding it hands a self-contained `task` to a `role` (default from the configured `delegate_role`, fail-closed when unset) that works in the caller's live workspace while the caller waits holding its workspace lock, so exactly one writer touches the tree. The child takes grants, profile or selector, and policy from the delegate role's own configuration, never vcs-mutating or `delegate` grants (refused at delegation time); the mechanism ensures a terminal `finish` seal (idempotent when the configured role already carries `finish` for its own top-level runs) that returns its summary to the caller, and verification and publication stay with the caller. The child's normal requests, tools, and daily budget count against the caller's unit. Caller and child share atomic per-run spend accounting, including native tools and both wrap-up shares; daily admission refusals do not debit per-run allowances. Request and tool invocation identities remain local to each context. The child's wall and logical-request deadlines belong to the child's own role/Context, never `min(child,parent)`. Delegated children share only the configured aggregate portion of the wrap-up allowance (`delegate_wrap_up_requests` and `delegate_wrap_up_tools`, each clamped to the spend role's effective `wrap_up_requests`/`wrap_up_tools` total minus one); unused child share is available to the root, while the root always retains at least one request and wrap-up tool for its seal. These child shares aggregate across repeated delegations and do not enlarge the total allowance. Consultation units are independent and unaffected. Nested delegation and consultation stay disabled so no spend escapes. Consultations likewise use their answering roles' own deadlines. An already admitted synchronous child/join drains even if the parent's wall expires: parent transport cleanup waits rather than cancelling the child. Explicit operator stop, pause/unarm/authority revocation, and child-local timeout still cancel their intended scope. After the join, an expired finite parent receives no further inference allowance; neither its wall nor any enclosing query/turn request deadline is renewed. Each delegation records its task, child run, and result beside the run like consultations do. The `consult` capability names the operation (bounded child units on the same snapshot, answers returned unranked); role and profile names are operator configuration — avoid naming a role or profile `consult` when that overload confuses review, since the capability, role, profile, and `consult_role` key are distinct.
 Any configured role qualifies as long as it stays read-only (`workspace = "read"`)
-without write/execute grants (`exec`, `experiment`, `verify`, `decide`,
-`submit_insight`, `revise_insight`, `withdraw_insight`, `withdraw_decided`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,
-`diff`, `insights`, `fetch`, `search`) stay operator choice plus the required
+without write/execute grants (`exec`, `experiment`, `verify`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,
+`diff`, `fetch`, `search`) stay operator choice plus the required
 `finish`. Anything broader is refused before any model call by the single
 shared gate (`runtime.check_consult_role`, also used by `smoke --live`).
 How answers are combined is worker judgment under policy, never a mechanism
@@ -2642,7 +2006,7 @@ timeout, oversize response, nonzero exit, or malformed/non-object JSON. A normal
 
 Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_grant` (default `false`) is the explicit operator grant for branch retirement; `owned_prefixes` (default `[]`, e.g. `["mizu/"]`) names the temporary integration namespaces; `protected_refs` (default `[]`, e.g. `["main"]`) names exact long-lived refs that always win over owned prefixes. Prefixes and protected refs are at most 256 characters; protected refs must be nonempty and contain no whitespace. Mizu `close_grant` (default `false`) is required for routine proposal close and conditional close; the separate operator-owned host adapter `[vcs] close_adopted` gate must also allow conditional close. Mizu does not configure or verify that adapter setting. `merge_grant` (default `false`) is the separate explicit grant for proposal merge; merges additionally require a recorded human `GO <branch>` approval for the integrated tree. No project, bot, or provider names are hardcoded: an empty policy classifies nothing as owned, so nothing retires. `request_grant` (default `false`) is the explicit operator grant for asking the provider to run CI at an exact published commit; without it the `vcs_request` capability stays unusable even for a role that holds it.
 
-`ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. `ci_wake_extra_branches` (default `[]`) adds up to 64 valid branch names to the wake set; the effective set is the deduplicated nonempty `ci_branch` plus these extras. Thus absent/empty extras preserve `[ci_branch]`, while an empty `ci_branch` and no extras still fails closed. Extra names use the VCS branch-name validation rules; malformed entries and arrays over 64 fail configuration load. Every full and delta opening carries a fixed `external_check_wake` key (never gated by a section): bounded facts, one per waking subject/revision, with the non-passing-check count and an incompleteness flag, plus a detail read route derived from the role's `vcs_read` capability. The optional `ci` section is strictly opt-in via `context_sections.include = ["ci"]`; when selected it carries `ci_summary` aggregates for all observed subjects and never per-check rows. Per-check rows stay available through the `vcs_read` read operations for CI cost accounting. Wake facts are independent of insight decisions. A parked role with `ci_wake` (writable roles by default) wakes on a selected red only on change -- a new branch/SHA/check/run fact in the whole selected set, a moved published head, or every `ci_rewake_seconds` (default `1800`, range 60-86,400) for an otherwise unchanged red -- so a red belonging to a previous head cannot re-admit a waiting writer every tick while its fix is in flight. The wake record stores a bounded digest of the selected branch-specific facts. Adapters MUST keep run identity stable for the same run across polls (churn would re-wake every poll). Reporters must select CI evidence explicitly and never guess a branch. Unknown keys still fail load; `ci_branch` must be a string no longer than 256 chars and without whitespace.
+`ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. `ci_wake_extra_branches` (default `[]`) adds up to 64 valid branch names to the wake set; the effective set is the deduplicated nonempty `ci_branch` plus these extras. Thus absent/empty extras preserve `[ci_branch]`, while an empty `ci_branch` and no extras still fails closed. Extra names use the VCS branch-name validation rules; malformed entries and arrays over 64 fail configuration load. Every full and delta opening carries a fixed `external_check_wake` key (never gated by a section): bounded facts, one per waking subject/revision, with the non-passing-check count and an incompleteness flag, plus a detail read route derived from the role's `vcs_read` capability. The optional `ci` section is strictly opt-in via `context_sections.include = ["ci"]`; when selected it carries `ci_summary` aggregates for all observed subjects and never per-check rows. Per-check rows stay available through the `vcs_read` read operations for CI cost accounting. Wake facts are independent of role judgements. A parked role with `ci_wake` (writable roles by default) wakes on a selected red only on change -- a new branch/SHA/check/run fact in the whole selected set, a moved published head, or every `ci_rewake_seconds` (default `1800`, range 60-86,400) for an otherwise unchanged red -- so a red belonging to a previous head cannot re-admit a waiting writer every tick while its fix is in flight. The wake record stores a bounded digest of the selected branch-specific facts. Adapters MUST keep run identity stable for the same run across polls (churn would re-wake every poll). Reporters must select CI evidence explicitly and never guess a branch. Unknown keys still fail load; `ci_branch` must be a string no longer than 256 chars and without whitespace.
 
 CI observation retention is configured independently of polling and presentation.
 Each failure/success mapping retains at most 2048 rows, a fixed local safety
@@ -2843,8 +2207,7 @@ required_approvals = 2
 The unit prompt exposes host-supplied `review_authority = {authorized, reviewed_snapshot}`
 (including full and delta prompts). The reviewer supplies only `finish.review_verdict = "approve"` or
 `"changes_requested"`. The host supplies `reviewed_snapshot`, `role` and `run`
-from trusted unit context; these are not finish arguments. Findings remain
-separate Insights and summary/state text never grants approval. Missing,
+from trusted unit context; these are not finish arguments. Findings and summary/state text never grant approval. Missing,
 legacy prose, malformed or unauthorized verdicts never approve. Invalid finish
 arguments are denied before sealing and can be corrected in the same unit.
 Bounded runs cannot approve. Consultations/delegations return advice only and
@@ -2880,7 +2243,7 @@ addition to the existing recorded human `GO <branch>`. A state-only successor
 with identical code inherits the approval; a changed code digest does not.
 Publish the candidate as a local
 snapshot, let the configured holders assess it, then publish externally from a
-later writer unit without changing the tree. Worker-authored Insights/shared
+later writer unit without changing the tree. Worker-authored prose and shared
 records are never review evidence. The run-local publication observation's
 `review` field is a list of all counted typed review receipts in configuration
 order, including for singular selection. It is not part of publication identity
@@ -2888,7 +2251,7 @@ or the publication receipt. This gate does not replace human approval,
 verification, projection checks or immutable publication dispatch safeguards.
 
 Full and delta unit prompts include the fixed field
-`publication_state = {cause, verdict, reviewer, finding_insights}`. It describes
+`publication_state = {cause, verdict, reviewer}`. It describes
 recorded evidence, not permission to publish or the status of a dispatch:
 
 | Cause | Meaning |
@@ -2928,10 +2291,8 @@ store remain visible to ordinary listings but gain keyed resolution only
 through such a writer rebuild.
 
 Only `changes_requested` names a `verdict` and `reviewer` (the first rejecting
-holder in configuration order). Its `finding_insights` contains up to 16
-unique IDs matched from insights already in the opening by exact reviewer
-role and reviewed snapshot. Findings are never invented; the other causes
-have null `verdict` and `reviewer` and an empty `finding_insights` list.
+holder in configuration order); the other causes have null `verdict` and
+`reviewer`.
 
 `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`
 and the local `publications` listing of recorded publication receipts, which contacts
@@ -3090,7 +2451,7 @@ Durable project evidence lives outside the workspace at
 Records are create-only under a per-ID lock and bounded no-follow reads
 (8 KiB each). Every new intent uses schema 3 and binds `publication_id`,
 `source_commit`, `code_digest`, `branch`, `op`, all three projection fields,
-`approval` (human approval insight ID), and `run` (the originating run ID).
+`approval` (operator approval message ID), and `run` (the originating run ID).
 New external receipts also require the projection and use schema 3. Historical
 schema-1 intents/receipts and schema-2 external receipts remain readable as
 immutable legacy history; no new projection-less writes or reinterpretation
@@ -3263,7 +2624,7 @@ content: results and retained evidence remain `external-untrusted`. Supporting
 this response schema and codepoint-boundary rejection is the operator adapter's
 responsibility; this read-side API does not modify or deploy that adapter.
 
-`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, group?, namespace?, attempt?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. Artifact listing pages follow the scope/cursor contract above; `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, size, offset, next_offset, page_digest, trust}` (see the byte-page contract above; whole-file reads remain available with the configured character cap (524288 by default)). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
+`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, group?, namespace?, attempt?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. Artifact listing pages follow the scope/cursor contract above; `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, size, offset, next_offset, page_digest, trust}` (see the byte-page contract above; whole-file reads remain available with the configured character cap (524288 by default)). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are appended as messages to the configured `[vcs] observation_queue` by `record_proposal_state`: its id is derived from the proposal id and rendered facts, so identical facts append nothing while changed head/base/check/state facts append a new message. The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
 
 Status execution identity is an optional complete bundle: existing `run`
 (1-128 characters), `group` (1-128 characters), `namespace` (1-256 characters),
@@ -3301,10 +2662,9 @@ adapter adopting typed cost attribution must supply the complete opaque bundle;
 an adapter reporting only legacy status rows continues to settle CI normally.
 
 
-The daemon polls CI only when `poll_enabled` is true, on the same `poll_interval_seconds` cadence under the same per-project lock and shared timestamps: each tick derives branches from injected refs (all when they fit `poll_max_branches`, else a rotating window tracked in poll state so every branch is covered; `main` when no refs exist), calls `status` once per branch with the `poll_status_timeout_seconds` per-call cap, and caches failure/success evidence without creating insights. Each successful tick refreshes the shared `vcs-poll.json` `failures` map and bounded `successes` evidence map (each using the configured retention, default 128 branches x 16 checks within 2048 rows): polled failure branches are replaced wholesale, polled success evidence is retained for cross-poll comparison, unpolled branches are kept, and refs that vanished are pruned. Green/superseding failure facts therefore update independently of insight decisions. A projected failure is annotated `nondeterministic: true` with one validated `passed_on` branch only if the retained success cache contains the same SHA/check; this is informational, does not clear the failure or change wake/gate/retry behavior, and absence of an annotation is not proof of determinism because evidence is bounded. `should_run` and dispatch admission consult cached failures (best-effort local read, never an adapter call), wake a role with `ci_wake` while a red remains on the configured wake set (`ci_branch` plus extras), and expose fixed `external_check_wake` facts to the woken role with admission `ci` in `started.json`; aggregate detail for other subjects is available only through the opt-in `ci` section and remains readable on demand. Adapter errors leave cached facts untouched. Explicit branch lists longer than `poll_max_branches` are refused. Failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.
+The daemon polls CI only when `poll_enabled` is true, on the same `poll_interval_seconds` cadence under the same per-project lock and shared timestamps: each tick derives branches from injected refs (all when they fit `poll_max_branches`, else a rotating window tracked in poll state so every branch is covered; `main` when no refs exist), calls `status` once per branch with the `poll_status_timeout_seconds` per-call cap, and caches failure/success evidence without creating queue messages. Each successful tick refreshes the shared `vcs-poll.json` `failures` map and bounded `successes` evidence map (each using the configured retention, default 128 branches x 16 checks within 2048 rows): polled failure branches are replaced wholesale, polled success evidence is retained for cross-poll comparison, unpolled branches are kept, and refs that vanished are pruned. Green/superseding failure facts therefore update independently of role judgements. A projected failure is annotated `nondeterministic: true` with one validated `passed_on` branch only if the retained success cache contains the same SHA/check; this is informational, does not clear the failure or change wake/gate/retry behavior, and absence of an annotation is not proof of determinism because evidence is bounded. `should_run` and dispatch admission consult cached failures (best-effort local read, never an adapter call), wake a role with `ci_wake` while a red remains on the configured wake set (`ci_branch` plus extras), and expose fixed `external_check_wake` facts to the woken role with admission `ci` in `started.json`; aggregate detail for other subjects is available only through the opt-in `ci` section and remains readable on demand. Adapter errors leave cached facts untouched. Explicit branch lists longer than `poll_max_branches` are refused. Failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.
 
-External publication requires recorded human approval (AGENTS.md: "no external publication without recorded human approval"): an insight titled exactly `GO <branch>` with source `operator` (`mizu insight submit`) whose body carries a `digest: <code_digest>` line for the exact workspace `code_digest` at call time, with an `accept` decision recorded via `mizu insight decide` (run `operator`) on that insight ID and the same current insight revision. The decision revision must equal the current inbox revision; revising approval content requires a fresh GO. Model-submitted insights and model `decide` records are refused as forged (`operator channel`). Missing, stale, undecided, or non-accept records are `Denied` (stale digests and revisions name the staleness). `vcs_publish` requires a writable workspace, is forbidden on consultation roles, and must not share a role with `decide` (config load refuses the combination; use a dedicated publisher role). A publisher may hold `submit_insight` for ordinary reports: only operator-channel `GO` records satisfy the approval gate. Role names `operator`, `vcs`, and `editor` are refused at load so model roles cannot mint those sources. CI status uses the dedicated bounded `vcs-poll.json` cache, not the insight inbox. Configured `ci_wake` roles receive failures through the existing SHA/check/run-aware wake path, its configured branch selection and retry interval; prompts carry bounded aggregate external-check wake facts (plus opt-in `ci_summary`), never per-check failure rows, and `vcs_read` provides current per-job details on demand. Successes clear current failures and retain bounded evidence; they do not independently wake a role. Receipt-pinned work-item CI waits deliver terminal success or failure to their holder without creating insights or changing task status. External PR observations still use their separate, explicitly enabled proposal-insight path. Historical CI insights remain readable audit records; this change does not decide or complete them.
-
+External publication requires recorded human approval (AGENTS.md: "no external publication without recorded human approval"): an operator-written `GO <branch>` message in the configured `[vcs].approval_queue`, authored by `operator` through `mizu queue PROJECT write`, whose title and body carry the `GO <branch>` line and a `digest: <code_digest>` line for the exact workspace digest at call time. A merge approval additionally carries `target:`, `proposal:`, `sha:` and `base:` lines matching the assessed proposal endpoints. Only the newest bounded scan of operator-authored messages is considered; model-authored messages, stale digests, mismatched endpoints and undecided approvals are `Denied`. `vcs_publish` requires a writable workspace and is forbidden on consultation roles. CI status uses the dedicated bounded `vcs-poll.json` cache; configured `ci_wake` roles receive failures through the SHA/check/run-aware wake path, and prompts carry bounded aggregate external-check wake facts (plus opt-in `ci_summary`), never per-check failure rows. `vcs_read` provides current per-job details on demand. Successes clear current failures and retain bounded evidence; they do not independently wake a role. Receipt-pinned work-item CI waits deliver terminal success or failure to their holder without changing task status. External PR observations use their separate explicitly enabled proposal path.
 ## VCS acquire (exact-revision external content)
 
 `vcs_read` `acquire` materializes proposal content for assessment at an explicit scope: it sends `{"op": "acquire", "id", "sha", "scope"}` where `sha` is the exact head sha from the proposal record and `scope` is `"head"` (the head commit only) or `"full"` (the base revision through the head: every proposal commit), plus an optional `base_sha` pin with `"full"` taken from the observed base endpoint. The adapter returns `{"id", "sha", "scope", "digest", "content"}` plus `"base_sha"` exactly for `"full"` scope. `head` content is immutable for the sha but omits earlier commits, so it must never be treated as the whole proposal; review and integration acquire `"full"` so the receipt binds both revisions. The product checks the `id`/`sha`/`scope` echo against the request (a pinned `base_sha` must echo back unchanged; an unpinned `"full"` binds whatever base the adapter served), and recomputes `digest` locally as sha256 over `fs.canonical(content)` instead of trusting the echo. A moved head, a moved base, a scope mismatch, or a digest mismatch is `Denied`: the caller re-observes `proposals` and retries with the fresh revision pair, so a retargeted base with an unchanged head acquires fresh content under a fresh digest rather than passing as old evidence. No branch is needed: the endpoint travels in the proposal record, so fork heads resolve by id and sha alone. Provider fetching lives in the operator adapter, which labels the immutable scope it actually serves; the generic request, validation, receipt, and retry discipline live in the product. Results stay `external-untrusted` with per-invocation `vcs-read/` evidence files named in the response `evidence` path. `acquire` mutates nothing and needs no grant; final disposition and retirement stay separate operations.
@@ -3319,7 +2679,7 @@ External publication requires recorded human approval (AGENTS.md: "no external p
 
 `vcs_dispose` serves `close`/`merge` (`{"op", "id", "sha", "base", "target", "branch"}`): `branch` names the integration branch holding the approved tree, `id` names the proposal, `sha` is the exact assessed head, `base` the exact assessed base, and `target` the assessed target branch. Close is routine terminal reconciliation behind `close_grant = true` alone. Merge promotes the tree behind `merge_grant = true` plus a recorded human `GO <branch>` approval for the current `code_digest` (checked before the adapter spawns), so main/release promotion without a matching approval is refused. The merge approval must additionally bind the assessed destination and proposal endpoints with body lines `target: <branch>`, `proposal: <id>`, `sha: <head>`, and `base: <base>` naming exactly the merge arguments: a digest-only approval, or one bound to another target or other proposal content, never authorizes the merge (a moved head, moved base, or retarget refuses until the operator re-observes and re-approves). Either op then sends `{"op", "id", "sha", "base", "target"}`. The adapter must act only while the proposal is still open at all three assessed endpoints (compare-and-dispose immediately before action: a moved head, a moved base, a retargeted proposal, or an externally superseded proposal refuses) and echo `id`/`sha`/`base`/`target` with the terminal state (`close` ends `closed`, `merge` ends `merged`), else the call is `Denied`. Tree-content approval stays local to the `GO` gate: the adapter contract binds endpoint identity only, never pretended content atomicity. Disposition is explicit per action: no automatic merges, no bot rules, and the main promotion flow is untouched. A failed call implies nothing about the remote proposal; reconcile by re-observing `proposals`, which revises the recorded observation on state change. Evidence lands in a per-invocation `vcs-dispose/<uuid>.json` file named in the response `evidence` path (with the approval for merges). Safe mutation stays blocked when required evidence is unavailable: tombstoned heads carry no sha to dispose, and an incomplete enumeration never implies terminal disposition.
 
-`close_if_adopted` is an additional explicit `vcs_dispose` action, not polling and not an automatic response to observing a proposal or insight. The role needs the `vcs_dispose` capability and both independent configuration gates must allow it: Mizu `[vcs].close_grant = true` (default false) and the operator-owned adapter's `[vcs] close_adopted = true`. The adapter gate and its behavior are operator-reported; Mizu neither edits nor independently verifies the adapter configuration. The request carries exactly `{id, head_sha, base_sha, target_repo, target_ref, target_sha}` from the operator-reported observation. A usable response echoes every pin unchanged, names predicate `changed-path-tree-entries/v1`, and has strict boolean `closed` plus a nonblank `reason` of at most 4,096 characters. No other keys are allowed except the optional paired `mismatched_paths`/`mismatched_count`: the count must be an integer (not a boolean) from 0 through 2,000, and the list may contain 0 through `min(mismatched_count, 50)` distinct nonempty paths, each at most 4,096 characters. The list can therefore be partial or empty, and a count larger than 50 permits up to 50 paths. Reason and paths must not contain terminal controls. A `closed: true` response cannot report mismatches. The full adapter response is retained in a per-invocation `vcs-dispose/<uuid>.json` file named in the response `evidence` path, and returned. Mizu permits at most one validated conditional-close adapter dispatch per work unit; later conditional-close attempts are refused before dispatch, so they cannot replace the first receipt or retry an uncertain result. Invalid local pins/grants do not consume this one-shot dispatch. A well-formed `closed: false` is a refusal receipt, not success and not a trigger for refetch, retry, or merge. Malformed or stale echoes fail closed. The predicate and adoption decision are adapter claims: Mizu validates their shape and pin binding, not whether the provider's changed-path tree comparison is correct or whether the tree is a sufficient review. This is distinct from routine `close` and merge/GO behavior, which remain unchanged.
+`close_if_adopted` is an additional explicit `vcs_dispose` action, not polling and not an automatic response to observing a proposal. The role needs the `vcs_dispose` capability and both independent configuration gates must allow it: Mizu `[vcs].close_grant = true` (default false) and the operator-owned adapter's `[vcs] close_adopted = true`. The adapter gate and its behavior are operator-reported; Mizu neither edits nor independently verifies the adapter configuration. The request carries exactly `{id, head_sha, base_sha, target_repo, target_ref, target_sha}` from the operator-reported observation. A usable response echoes every pin unchanged, names predicate `changed-path-tree-entries/v1`, and has strict boolean `closed` plus a nonblank `reason` of at most 4,096 characters. No other keys are allowed except the optional paired `mismatched_paths`/`mismatched_count`: the count must be an integer (not a boolean) from 0 through 2,000, and the list may contain 0 through `min(mismatched_count, 50)` distinct nonempty paths, each at most 4,096 characters. The list can therefore be partial or empty, and a count larger than 50 permits up to 50 paths. Reason and paths must not contain terminal controls. A `closed: true` response cannot report mismatches. The full adapter response is retained in a per-invocation `vcs-dispose/<uuid>.json` file named in the response `evidence` path, and returned. Mizu permits at most one validated conditional-close adapter dispatch per work unit; later conditional-close attempts are refused before dispatch, so they cannot replace the first receipt or retry an uncertain result. Invalid local pins/grants do not consume this one-shot dispatch. A well-formed `closed: false` is a refusal receipt, not success and not a trigger for refetch, retry, or merge. Malformed or stale echoes fail closed. The predicate and adoption decision are adapter claims: Mizu validates their shape and pin binding, not whether the provider's changed-path tree comparison is correct or whether the tree is a sufficient review. This is distinct from routine `close` and merge/GO behavior, which remain unchanged.
 
 ## VCS proposal lifecycle (observe, integrate, dispose, retire)
 
@@ -3439,7 +2799,7 @@ cannot hold it; `none`-workspace roles are refused at call time.
 
 ## Role research state (bounded current coverage, replacement only)
 
-Each role may hold one current research record under `role-state/<role>.json`: investigated questions with conclusions, consequential unknowns, coverage/evidence references, and explicit revisit conditions. The store is a bounded generic JSON object (nesting at most 4, keys at most 64 chars, each new replacement record within `role_state_bytes`); section choice is role policy, never a hardcoded topic list. Existing records remain readable up to the supported 65,536-byte ceiling, so a record written under a higher previous bound stays current under a lowered write bound and may be compacted by a smaller replacement, while records above the ceiling stay unavailable. Updates replace the whole record under a generation compare-and-swap: first write expects generation 0, each replacement expects the generation its writer read, and stale expectations are refused so newer evidence is never overwritten. Read-compare-write runs under a per-role non-blocking lock, so overlapping writers never share a generation: the loser is refused and re-reads. The write bound covers each new full stored record (state plus envelope and authoring run token); non-finite numbers, non-JSON values, bad run tokens, and boolean generations are refused before the store is touched. Reads distinguish `absent` (never written, generation 0) from `unavailable` (unreadable or malformed, no generation): absence never reads as "nothing researched", and unavailable records refuse replacement until an operator clears the file, while atomic writes keep interrupted updates from disturbing the previous record. History lives only in run records; insight submission is never a research-memory store. Retention follows run records: current state persists until replaced, audit evidence under the existing log-retention windows. Retrieval is capability-gated: `research_read` serves the caller's own record with its generation (consultations may read), while `research` replaces the own record from a JSON `state` at the read `expected_generation` and writes `research-state.json` with the new generation and stored state as run-record audit (consultations cannot hold it, and malformed JSON is refused before the store is touched). Prompts inject the own record for capable roles in both full and resumed deltas: whole while within `role_state_prompt_bytes`, else `truncated` with generation and sizes and no partial content. Retention is configuration without a new knob: the current record is never a prune candidate and persists until replaced; run-record audit (`research-state.json` receipts) persists with the run like other receipts, and only bulky engine logs age out under the event-log windows. Normal backup/restore includes each bounded raw `role-state/<role>.json` record, including malformed records that must remain `unavailable`; per-role lock and `.new-*` temporary files are excluded, and unsafe, unrecognized, or over-bound entries refuse the operation rather than becoming `absent`.
+Each role may hold one current research record under `role-state/<role>.json`: investigated questions with conclusions, consequential unknowns, coverage/evidence references, and explicit revisit conditions. The store is a bounded generic JSON object (nesting at most 4, keys at most 64 chars, each new replacement record within `role_state_bytes`); section choice is role policy, never a hardcoded topic list. Existing records remain readable up to the supported 65,536-byte ceiling, so a record written under a higher previous bound stays current under a lowered write bound and may be compacted by a smaller replacement, while records above the ceiling stay unavailable. Updates replace the whole record under a generation compare-and-swap: first write expects generation 0, each replacement expects the generation its writer read, and stale expectations are refused so newer evidence is never overwritten. Read-compare-write runs under a per-role non-blocking lock, so overlapping writers never share a generation: the loser is refused and re-reads. The write bound covers each new full stored record (state plus envelope and authoring run token); non-finite numbers, non-JSON values, bad run tokens, and boolean generations are refused before the store is touched. Reads distinguish `absent` (never written, generation 0) from `unavailable` (unreadable or malformed, no generation): absence never reads as "nothing researched", and unavailable records refuse replacement until an operator clears the file, while atomic writes keep interrupted updates from disturbing the previous record. History lives only in run records; queue messages are never a research-memory store. Retention follows run records: current state persists until replaced, audit evidence under the existing log-retention windows. Retrieval is capability-gated: `research_read` serves the caller's own record with its generation (consultations may read), while `research` replaces the own record from a JSON `state` at the read `expected_generation` and writes `research-state.json` with the new generation and stored state as run-record audit (consultations cannot hold it, and malformed JSON is refused before the store is touched). Prompts inject the own record for capable roles in both full and resumed deltas: whole while within `role_state_prompt_bytes`, else `truncated` with generation and sizes and no partial content. Retention is configuration without a new knob: the current record is never a prune candidate and persists until replaced; run-record audit (`research-state.json` receipts) persists with the run like other receipts, and only bulky engine logs age out under the event-log windows. Normal backup/restore includes each bounded raw `role-state/<role>.json` record, including malformed records that must remain `unavailable`; per-role lock and `.new-*` temporary files are excluded, and unsafe, unrecognized, or over-bound entries refuse the operation rather than becoming `absent`.
 
 ## Writer explicit work order (bounded ordered plan, review-gated display only)
 
@@ -3447,11 +2807,11 @@ The writer may record one explicit order under `work-order/current.json`: ordere
 
 Revisions are absolute, increasing integers. The only authoritative plan is the canonical `work-order/current.json` record, bounded to 8,192 bytes including the envelope and newline. New writes use schema 2 with exactly `schema`, `rev`, `generation`, ordered `items`, `rationale`, `actor`, `updated_at` (timezone-aware ISO timestamp), and `run` (the authoring run's 32 lowercase hexadecimal ID). Actor and run are supplied by the runtime, not the tool caller. A valid existing schema-1 current record with the same fields except `run` remains readable as a legacy plan; the next explicit write creates schema 2 at the next revision. Missing current reads `absent`, even if legacy audit files exist. Unsafe or malformed current reads `unavailable` and refuses writes, never an empty/current plan. Existing `history/` and `checkpoint.json` files are not read, repaired, pruned or deleted; their presence or corruption does not affect a valid current record.
 
-Under `insights.lock`, a write checks the exact revision and unit-opening generation, revalidates live actionability, and atomically replaces current using the existing `atomic_write`/`sync_dir` primitives. An interruption leaves the old or new complete current record (or absent before the first replacement), not a partially committed plan. There is no recovery scan, automatic retry or cleanup of abandoned temporary files. A publication/sync error is reported immediately; if replacement already happened the new revision may be visible despite the error. Re-read before a new explicit write; stale revisions and generations remain refused. Durability follows the existing platform primitives and adds no Windows power-loss guarantee.
+Under `records.lock`, a write checks the exact revision and unit-opening generation, revalidates live actionability, and atomically replaces current using the existing `atomic_write`/`sync_dir` primitives. An interruption leaves the old or new complete current record (or absent before the first replacement), not a partially committed plan. There is no recovery scan, automatic retry or cleanup of abandoned temporary files. A publication/sync error is reported immediately; if replacement already happened the new revision may be visible despite the error. Re-read before a new explicit write; stale revisions and generations remain refused. Durability follows the existing platform primitives and adds no Windows power-loss guarantee.
 
 After current is replaced, the runtime writes a complete immutable copy of that record as `work-order-<sha256>.json` in the authoring run directory; the full SHA-256 is over the canonical receipt bytes, and the tool response names that exact path. Each revision therefore has a distinct, fixed-length receipt path; later writes in the same run do not replace earlier receipts. Each file is bounded by the same 8,192-byte record limit and follows existing run retention rather than a second plan-history retention policy. Receipts are audit evidence, not another authority or recovery source. Receipt writing follows the current-record commit: if it fails, the tool reports the error without rolling back current or retrying, so the current record may already have advanced; it retains its authoring run identity. Prompt and status projections do not add the run field.
 
-The generation binds semantic unit-opening inputs, captured once per unit and reused for prompt projections and review: goal digest, open-work page plus a constant-size full open-inventory fingerprint of bounded accepted scopes and origin redecisions (including off-page items and truncated scope tails), ready-work display (without volatile ages) plus inventory signature, the full bounded pending-insight inventory plus backlog, CI failures, and the dispatch-frozen actionable inputs (decision events and the visible decision-page summary when present, diagnostics, terminal events, structured waits including due waits, and obligations). Full prompts display that pending inventory; resumed-session deltas can omit already-offered bodies while retaining the same frozen inventory for generation and backlog. Arrivals after opening stay unreviewed until the next unit. A change in the configured actionable-input set -- including an event disappearing after acknowledgement -- is a semantic input change and may make the next unit `review_due`; there is no requirement to preserve `current` across acknowledgements and no ack-stable historical scan. The fingerprint is folded into the existing locked open-page scan, without retaining bodies or changing the page or ready-work signature; upgrading the generation format makes existing plans review-due. Operator `status` recomputes a fresh generation from the same sources without auto-refresh or scheduling.
+The generation binds semantic unit-opening inputs, captured once per unit and reused for prompt projections and review: goal digest, open-work page plus a constant-size full open-inventory fingerprint of bounded accepted scopes (including off-page items and truncated scope tails), ready-work display (without volatile ages) plus inventory signature, CI failures, and the dispatch-frozen actionable inputs (diagnostics, terminal events and structured waits including due waits). Full prompts display the ready inventory; resumed-session deltas can omit already-offered bodies while retaining the same frozen inventory for generation and backlog. Arrivals after opening stay unreviewed until the next unit. A change in the configured actionable-input set -- including an event disappearing after acknowledgement -- is a semantic input change and may make the next unit `review_due`; there is no requirement to preserve `current` across acknowledgements and no ack-stable historical scan. The fingerprint is folded into the existing locked open-page scan, without retaining bodies or changing the page or ready-work signature; upgrading the generation format makes existing plans review-due. Operator `status` recomputes a fresh generation from the same sources without auto-refresh or scheduling.
 
 ## Project metadata
 
@@ -3512,18 +2872,12 @@ bounded retained snapshot/receipt discovery; each append rechecks it under locks
 and CAS. There is no new index or cursor. Read tools, ready/open pages, status,
 and work-order review reads never perform these transitions. Supported resolutions are:
 
-- `object_resolved`: `{kind:"object_resolved", subject}` with one of
-  `{type:"insight", id}`, `{type:"record", kind, id, digest}`, or
-  `{type:"work_item", id}`. Insights follow the current revision and are due
-  only on `accept`/`modify`/`reject`; defer is pending and withdrawal impossible.
-  Records require an exact declared role-question from the holder and an
-  enabled operator answer route at registration; only an exact authenticated
-  answer is due. Work items require validated target history with status
-  `done`/`dropped`, including exhausted-chain retirement. Registration refuses
-  self-dependency, cycles and uncertain work-item traversal. Missing is
-  impossible only when established; unavailable/corrupt is unknown. New
-  insight/record registrations use this kind; historical `insight_decided` and
-  `record_closed` waits replay without rewriting.
+- `object_resolved`: `{kind:"object_resolved", subject}` with
+  `{type:"work_item", id}`. It is due only on validated target history with
+  status `done`/`dropped`, including exhausted-chain retirement. Registration
+  refuses self-dependency, cycles and uncertain work-item traversal. Missing
+  is impossible only when established; unavailable/corrupt is unknown. Older
+  object subjects remain inert stored history and replay without rewriting.
 - `code_change`: a validated observed snapshot ID and code digest differ from
   the wait's stored code-digest baseline.
 - `publication_ci`: a retained, strict descendant of both the bound delivery
@@ -3534,8 +2888,7 @@ and work-order review reads never perform these transitions. Supported resolutio
 
 Missing, unknown, corrupt, ambiguous, or bounded-out proof leaves the wait
 pending. This does not request hosted CI, declare a CI result, finish work, or
-change the target object. Exact-result `dependency` waits, CI and proposal
-waits retain their separate routes. Non-superseded CI waits keep their exact receipt/result
+change the target object. Exact-result `dependency` waits and CI waits retain their separate routes. Non-superseded CI waits keep their exact receipt/result
 route. A stale CAS is not retried. Exhausted revision chains are not retired
 automatically. The manual policy does not rewrite earlier resolutions.
 
@@ -3550,10 +2903,8 @@ unheld. The immutable `wait_resolution` member records `wait_rev`, SHA-256
 and `evidence` (exact `snapshot_id`/`code_digest`, plus `publication_id` and
 canonical `receipt_digest` for supersession; for object resolution, immutable
 `event`, canonical `digest`, exact target `rev` and resolving `state`). The
-prior wait digest binds the exact target identity. An Insight proof pins the
-immutable substantive decision event; a record proof pins the authenticated
-answer and uses the immutable question digest as its revision; a work-item
-proof pins the exact terminal history revision (or retirement projection).
+prior wait digest binds the exact target identity. A work-item proof pins the exact terminal history revision (or retirement
+projection); older stored object proofs remain historical evidence only.
 Replay does not consult the current target decision/status or answer catalog,
 so later revisions, additional answers and dropped-to-done corrections do not
 revoke an earlier valid resolution. Item identity is the enclosing
@@ -3659,67 +3010,3 @@ See [trusted CI acceptance](ci-acceptance.md) for all fields, bounds, review gat
 and the operator-only retention command. `vcs_read` remains read-only; green
 status and ordinary CI waits do not establish equivalence.
 
-### Exact published-proposal merge waits
-
-A blocked work-item transition may explicitly request
-`{"kind":"proposal_merged","publication_id":"<64 hex>","proposal_id":"<exact VCS id>"}`.
-This is work-item-only (not an Insight deferral, decision task or installation
-wait). It uses the existing `work_items_transition` grant and requires both
-`vcs.poll_enabled` and `vcs.poll_proposals_enabled`, plus a configured adapter;
-all remain disabled by default. No merge/review approval or external write is
-granted by a wait.
-
-Registration validates the completed, local immutable Publication receipt, then
-reads the existing `vcs` proposal observation for that explicit ID. A complete
-observation must have been retained by proposal polling; missing, ambiguous,
-malformed, partial or deleted/unpinned endpoints are refused. Registration also
-requires exact membership in the latest durably recorded complete enumeration:
-the host-only `vcs-poll.json` field `proposal_complete_facts` maps at most 256
-proposal IDs to SHA-256 digests of canonical normalized `{title, body}` facts
-(including `enumeration: complete`). Polling publishes the whole map, including
-omissions, under `insights.lock` before per-row insight writes. A failed row write
-therefore cannot authorize stale facts; absent, malformed or unavailable inventory
-refuses registration. Partial/page polls preserve the last complete map. This
-inventory is not exposed in role prompts or VCS events, and stored waits do not
-depend on it. The proposal head
-ref (short and `refs/heads/` spellings compare equivalently) and exact SHA must
-match the receipt's branch and `published_sha`. The normalized wait persists
-both endpoints' exact `repo`, `ref` and `sha`, including the base revision.
-Callers cannot supply their own endpoint pins. Subsequent history replay validates
-the immutable receipt and stored endpoints without rebinding to newer observations.
-Normal work-item holder/authority, scope, smoke references and expected-revision
-CAS rules still apply; a stale CAS requires a fresh read, not automatic retry.
-
-Only a complete enumeration with exactly one matching ID in state `merged` at
-both pinned endpoints produces a wake. The existing proposal-page/timeout bounds
-are unchanged: at most 256 rows and one adapter call per due poll. For this wait,
-a complete enumeration is one page with neither input nor output cursor and
-`complete: true` (or the existing legacy response without completeness/cursor
-metadata). A partial page or a final page reached through a cursor never suffices;
-pages are not stitched into an allegedly atomic observation. All rows are validated
-and duplicate IDs refused before any proposal observation is recorded. Empty/missing
-rows, closed proposals, malformed data, changed head/base repo/ref/SHA, and branch
-movement cannot create merge evidence. Adapter failures preserve the cursor for
-retry on the next configured poll; there are no extra adapter calls or same-tick retries.
-
-A positive observation creates one immutable `proposal.wait` SharedRecords event
-per exact blocked revision, authenticated as `host.vcs`. This reuses generic
-shared-record receipts, not a parallel proposal receipt store. It retains only
-bounded normalized identities/endpoints, not raw adapter or prompt text. Its
-source event time is the blocked revision's `updated_at`; a later missing/moved
-observation does not erase a previously proven merge. Retained evidence is not
-new delivery authority: only the still-current blocked revision's holder can
-receive it. Deliveries are read-only, oldest-first, at most 10 events by default
-(mechanism maximum 100, each envelope at most 8192 bytes), and appear in
-`wait_events` with role/record/digest-bound `ack_token`s. An unacknowledged event
-replays, including after interruption/restart; exact repeated polls are no-ops.
-
-The holder explicitly selects handled tokens in `finish.ack_events`; omission
-acknowledges none. Foreign, stale, duplicate or undelivered tokens are refused
-before finish intent. Revision/holder and immutable event digest are rechecked
-before applying receipts after durable successful completion. Failed or
-bounded/bound-hit units and finishes registering `wait_for_check` apply no
-proposal receipts. Neither polling, delivery nor acknowledgement transitions or
-completes the work item: the holder keeps the completion decision. No wait is
-registered merely because a branch or publication exists. Review and installation
-waits remain unsupported.

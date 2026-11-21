@@ -19,18 +19,17 @@ digest transfers to a same-code successor, so a state-only republication needs n
 new review while a changed digest re-arms it. For an unscheduled role, `on_change`
 also selects the published-change event wake; for an unscheduled capability
 holder, that wake likewise observes the code digest rather than the exact
-snapshot ID. Pending eligible
-operator records are a separate role-addressed event source, not the project
-operator wake-generation cursor.
+snapshot ID. Pending role-readable queue messages are a separate role-addressed event
+source, not the project operator wake-generation cursor.
 
-Enabled operator answers/notices are additional role-addressed input. With the
-default `wake = true`, pending SharedRecords admit event/on-change dispatch with
-`operator_record`; they also admit armed daemon readiness before the `done`
-gate. Existing scheduling controls still win, and no Insight lifecycle is
+Enabled `answers` and `notices` queues are additional role-addressed input. With
+the default `wake = true`, due messages in role-readable queues admit
+event/on-change dispatch and armed daemon readiness before the `done` gate.
+Existing scheduling controls still win, and no queue-message lifecycle is
 changed. Service-managed scheduled, event-subscribed and unscheduled on-change
-roles additionally watch the sharded `shared-records/operator` partition
-(triggers are not recursive); explicit-run-only roles stay explicit-run-only. See [shared-records.md](shared-records.md)
-for exact routing, frozen retrieval, acknowledgements and immutable closures.
+roles watch their configured queues (triggers are not recursive);
+explicit-run-only roles stay explicit-run-only. See [kernel.md](kernel.md) for
+delivery, cursors and acknowledgements.
 
 The shipped example (`config/config.example.toml`) exercises each pattern:
 
@@ -63,7 +62,7 @@ not ordinary schedules or admission; those can still deliver inputs earlier.
 Daemon roles reject this setting. See [configuration](configuration.md) for the
 separate `event_poll_seconds` policy and unchanged delivery/acknowledgement rules.
 
-`roles.<name>.event_wakes` narrows which wake kinds (operator record, decision,
+`roles.<name>.event_wakes` narrows which wake kinds (queue message,
 work item, wait, CI, operator wake, ready work, code change) may admit a
 standalone `--event` dispatch of a role; the default is all kinds. The runtime
 masks unlisted kinds in the facts passed to `evaluate_dispatch`, so a masked
@@ -78,8 +77,8 @@ waits). For an enabled writer, an exact committed/reserved internal continuation
 then supplies readiness, subject to the producer veto. Prepared intents never
 supply readiness; see [the registry](#internal-writer-continuation-registry).
 Otherwise it checks changed goal digest and operator wake-generation, then an
-independent ready-set change, owned check-result wake / receipt-pinned CI wait, and eligible operator-record
-read in evaluator order. Owned check results and operator records are checked before the `done` gate;
+independent ready-set change, owned check-result wake / receipt-pinned CI wait, and pending role-readable queue
+messages in evaluator order. Owned check results and queue messages are checked before the `done` gate;
 the existing project wake-generation cursor remains a separate signal.
 `mizu arm` and explicit `mizu wake` advance the operator wake generation.
 `mizu resume` resets health and clears pause/drain; a true-to-false drain
@@ -182,9 +181,9 @@ Next, an eligible owned check-result wake or unacknowledged receipt-pinned CI
 wait evidence admits the role (daemon reason `ci_wait`), including after `done`.
 The CI wait routes only to its current blocked holder. Without changed ready
 work, an internal continuation or either check/CI signal, `done` still ignores
-inbox, ordinary routed events, general CI, `wake_at` and progress. Pending eligible
-operator records are checked before this gate; a changed goal or operator
-wake-generation also admits it.
+inbox, ordinary routed events, general CI, `wake_at` and progress. Pending role-readable queue
+messages are checked before this gate; a changed goal or operator wake also
+admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the
@@ -211,8 +210,8 @@ snapshot records; legacy snapshots without it remain readable, but their prose
 is never parsed for a step.
 
 Readiness requires `continue` or `bounded`, a validated role-matching progress
-record, and at least one selected work signal (`tool`, `code`, `decision`, or
-`insight`). State rewording and delivered input alone are not work. Pure reads
+record, and at least one selected work signal (`tool`, `code`, `state`, `message`, or
+`input`). State rewording and delivered input alone are not work. Pure reads
 (including check-job `list`, `logs`, and queued/running `result`) do not
 count as tool work. Terminal result retrieval still qualifies as work; exact
 check-result wake/acknowledgement and verification import are unchanged. The
@@ -262,12 +261,10 @@ when its bound passes: the role may act on its own open work at any time, and a
 timer grants it no special standing. Held CI waits use a separate
 [exact absence and requester test](#exact-sha-work-item-ci-waits).
 
-A role asks the operator through a
-[configured SharedRecords question kind](shared-records.md#opt-in-role-questions-to-the-operator).
-A held `object_resolved` wait on that record follows the exact authenticated
-answer route. Retained Insight questions do not contribute independent wait
-liveness. Waits on Insights still require a substantive decision on the current
-revision, not an answer record.
+A role asks the operator by appending to the declared `questions` queue; the
+operator appends a referring message to `answers`. Queue messages carry no
+lifecycle beyond what role policy assigns them, and acknowledging a message is
+not an answer.
 
 The host records `finish.wait_liveness` in the existing finish intent/result:
 `true` for an owned queued/running check, a pending external ledger wait, or a
@@ -310,48 +307,23 @@ default for `read`/`none` roles) runs at the ordinary cadence when the project
 is armed and neither paused nor draining, without consulting `should_run`.
 
 A readiness signal does not itself name a delivered event. The normal
-prompt projects pending insights; decision events, terminal work-item events,
+prompt projects ready work and the work order; terminal work-item events,
 due waits, and CI facts are fetched by separate readers with their own role,
 route, and batch policies.
 
-Scheduled timer dispatches are one-shot runs. Only timed roles with a nonempty
-`scheduled_inputs` declaration receive the internal `mizu run --scheduled`
-marker; other timers remain plain `mizu run`. The marker is threaded through
-CLI/Engine only by platform schedule definitions, not event jobs or daemons.
-Per-role
-`scheduled_inputs = []` (the default) preserves open-ended periodic execution.
-Opting in with `["deferred_insights"]` requires a timed role with `insights`;
-unknown or duplicate sources are refused at config load. Before model/run-slot
-admission, the strict insight reader queries the insight index under the existing
-project record lock for any exact current defer across all sources;
-decision-delivery acknowledgements do not remove a deferral.
-Proven emptiness alone still does not skip: the gate reuses the authoritative
-pre-admission projection and only returns `skipped: no-scheduled-input` (with the
-current snapshot ID/code digest, without a run directory or acknowledgement)
-when no other scheduled input is pending (subscribed decisions, terminal
-work-item events, due waits, current CI failures, operator records, ready-work
-sets, explicit wakes, progress self-admission or unobserved code change). An
-unavailable
-projection never proves emptiness and falls through to ordinary execution.
-Unreadable, unsafe or malformed evidence falls through to ordinary execution.
-Explicit operator wakes and pending continuations bypass this gate. Direct
-`mizu run`, event jobs, daemons and all existing admission/authority checks are
-unchanged; the marker grants no capability and adds no persisted store or retry.
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
-triggers or the recovery/poll triggers below) admits on a pending eligible
-operator record, a substantive decision event, a terminal `work_item_events`
+triggers or the recovery/poll triggers below) admits on a pending role-readable queue message, a terminal `work_item_events`
 row, a due structured wait, a due CI red for that role, a changed role-eligible
 ready set, an unconsumed role-cursored operator wake for a read-only role, or
 an unobserved code change for an `on_change` role, and otherwise exits with `skipped: no-event` before
 allocating a run directory or any model use. The code-change event carries
 admission `change` when no more-specific event wins. For `on_change` roles
 whose code snapshot is already observed, `Engine.run` otherwise skips
-unchanged-code dispatch unless there is a pending eligible operator record, a
-substantive decision, a terminal event, a due wait, or a due CI red.
+unchanged-code dispatch unless there is a pending role-readable queue message,
+a terminal event, a due wait, a changed ready set, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
-inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
-operator records and changed role-eligible ready work bypass it independently
-of workspace mode. A writer next-step handoff or a read-only role-specific
+operator wake or prior-wait expiry. Operator wakes and changed role-eligible
+ready work bypass it independently of workspace mode. A writer next-step handoff or a read-only role-specific
 progress continuation can also bypass the unchanged-code gate. Writers have no
 self-resolvable-wait timer fallback to bypass it. Read-only roles
 never inherit goal/inbox/run-wait generations or the
@@ -359,8 +331,8 @@ publisher's progress. Event probes still exclude generic goal/inbox/run-wait
 changes, next-step handoffs and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
 workspace mode. The recorded
-`admission` label is `operator_record` / `decision` / `work_item` / `wait` /
-`ci` / `operator` / `ready_work` / `next_task` / `change` / `schedule`, or `continuation` for an exact internal
+`admission` label is `queue` / `work_item` / `wait` / `ci` / `operator` /
+`ready_work` / `next_task` / `change` / `schedule`, or `continuation` for an exact internal
 committed/reserved intent. Such an intent bypasses both dispatch skips, not
 control/producer/check holds or fresh admission checks. Without that intent,
 existing event labels take precedence over ready work;
@@ -416,7 +388,7 @@ snapshot generation.
 
 The progress field uses the existing validated bounded progress schema and
 `role_progress_signals` / `progress_disposition` policy. Supported tool,
-state, decision, insight and delivered role-input signals are recorded; code
+state, message, input and delivered role-input signals are recorded; code
 progress is always false. State comparison uses a digest of the role's last
 completion state, not another role's state. The consecutive no-progress count
 saturates at 101 and advances on every outcome whose input observation is
@@ -434,7 +406,7 @@ this slice changes on-change dispatch, not schedule modes or spacing.
 
 Both full and delta prompts always include `ready_work`, independently of the
 ordinary `open_work_items` page, filtered by the receiving role/holder. It has `items`, `total`, `overflow_count`,
-`truncated`, `unseeded_decisions`, `coverage_complete`, and a bounded `unknown_blocked` count. Each item contains
+`truncated`, `coverage_complete`, and a bounded `unknown_blocked` count. Each item contains
 `id`, `title`, `status`, `stale`, `redecision`, ledger `updated_at`, and
 `age_seconds`: time since the latest work-item ledger update (normally creation
 or a transition), not time since the daemon last ran. Age is
@@ -444,9 +416,9 @@ produce JSON null, never a fabricated age. Age is display-only and does not
 prioritize admission.
 
 A blocked item with a satisfied `deadline`, `code_change`,
-`object_resolved` (historically `insight_decided`), or `dependency` wait re-enters `ready_work` for reassessment.
-Decision tasks may start blocked and unheld with one of these waits, atomically
-with their open or blocked siblings. No per-task transition or wait registration
+`object_resolved`, or `dependency` wait re-enters `ready_work` for reassessment.
+Imported blocked seeds may start unheld with one of these waits, with the wait
+recorded in the immutable seed. No per-task transition or wait registration
 is needed. Once satisfied, an unheld blocked seed is claimable just like unheld
 open work; a held blocked item is routed only to its holder. Dependency
 `recipient` keeps its existing condition semantics, not task assignment.
@@ -462,16 +434,13 @@ work, and the page reports `coverage_complete: false` with the bounded
 `unknown_blocked` count so a zero `total` never reads as an exhaustive claim.
 The ledger stays
 blocked at the same revision until the writer decides what work or evidence
-remains. An ordinary pending wait is not ready, regardless of age. A holder-owned blocked `ci`,
-`publication_ci`, or `proposal_merged` item also re-enters when its existing
+remains. An ordinary pending wait is not ready, regardless of age. A holder-owned blocked `ci` or
+`publication_ci` item also re-enters when its existing
 receipt-bound route validates local terminal evidence for its exact current
 revision, holder and wait. CI reuses the exact source/publication/check validators
-(including declared host publication outcomes); proposals require the immutable
-merge envelope written only after a complete validated enumeration, not proposal
-facts alone. Readiness makes no adapter calls or evidence writes. Its bounded
+(including declared host publication outcomes). Readiness makes no adapter calls or evidence writes. Its bounded
 `wait_liveness` has `state: "terminal"`, `reason: "receipt_route_terminal"`,
-`wait_kind`, `outcome` (`success`/`failure`, `merged`, or a declared publication
-outcome), and `evidence: {record_digest}`; no logs or proposal body
+`wait_kind`, `outcome` (`success`/`failure` or a declared publication outcome), and `evidence: {record_digest}`; no logs or proposal body
 are copied. The digest binds the same envelope as notification delivery without exposing its record ID.
 Missing evidence stays pending indefinitely; corrupt, ambiguous, mismatched or
 unavailable evidence is unknown and non-ready regardless of age. Notification acknowledgements stay one-shot
@@ -490,8 +459,7 @@ one ready row; prompts retain at most
 size, as for `page_open`. Reads never change item status or resolve waits.
 Unsafe or malformed stores provide no ready-work wake (other explicit wakes
 keep their existing behavior); prompt construction fails closed rather than
-silently omitting the unreadable projection. Unseeded legacy decisions and
-`unknown` blocked liveness are reported as coverage gaps, never guessed ready:
+silently omitting the unreadable projection. `Unknown` blocked liveness is reported as a coverage gap, never guessed ready:
 an `unknown` item is skipped while known ready rows are still returned, with
 `unknown_blocked` counting the skipped role-eligible blocked items. Retrying reads yields a new
 live view; admission and prompt reads are not a frozen transaction.
@@ -500,28 +468,20 @@ New transitions to `blocked` require a supported observable wait; historical
 no-wait events remain readable and replayable, without rewriting history. A
 work-item-only `object_resolved` wait supports one durable subject:
 
-- `{type:"insight", id}` follows the current revision: only `accept`, `modify`,
-  and `reject` are due. `defer` stays pending; withdrawal is impossible.
-- `{type:"record", kind, id, digest}` pins an exact declared role-question
-  record. Registration requires its authenticated writer to hold the item and
-  the operator answer route to be enabled. Only an exact authenticated answer
-  through that route is due; incomplete/unsafe catalog evidence is unknown.
 - `{type:"work_item", id}` is due only on validated target history with status
   `done` or `dropped` (including explicit exhausted-chain retirement). Self
   references and dependency cycles are refused before writing; missing or
   uncertain traversal cannot authorize a new edge.
 
 Missing targets are impossible only when absence is established; corrupt or
-unavailable targets are unknown. New registrations use this one kind;
-historical `insight_decided` and `record_closed` bytes replay unchanged. Exact
-`dependency` revision/action waits and Insight deferrals keep their existing
-semantics. Read tools never reopen items. Under project
+unavailable targets are unknown. Only work-item subjects are registered now;
+older object subjects stay as inert stored history and never resolve on their
+own. Exact `dependency` revision/action waits keep their existing semantics. Read tools never reopen items. Under project
 `work_item_wait_resolution = "reopen"`, unit-opening reconciliation may reopen
 only the waiting item's holder with immutable proof binding the exact subject,
 revision and resolving state. It never mutates or completes the target. Manual
 policy leaves reopening to the holder's explicit CAS transition. See
-[resolution policy and proof](configuration.md#work-item-wait-resolution) and
-[SharedRecords question closure](shared-records.md#opt-in-role-questions-to-the-operator).
+[resolution policy and proof](configuration.md#work-item-wait-resolution).
 CI/proposal notifications remain separate holder-routed wakes; validated terminal
 evidence also keeps the blocked item ready after notification acknowledgement.
 A run-level `wait` does not block unrelated ready ledger work: record a work
@@ -554,9 +514,8 @@ not a new authority or watcher. It never locks, recovers, writes, assigns or
 transitions work. Rows carry `id`, `rev`, `holder`, `wait_kind`, `state`, and a
 bounded reason code, plus `blocked_since`, `blocked_age_seconds` (integer seconds,
 clamped to zero after clock rollback). States are
-`absent` (legacy no-wait), `pending`, `due`, `impossible` (missing/withdrawn
-insight target or an exact dependency revision superseded or substantively
-conflicting), `terminal` (the same exact CI/publication/proposal route as holder
+`absent` (legacy no-wait), `pending`, `due`, `impossible` (missing work-item target or an exact dependency revision superseded
+or substantively conflicting), `terminal` (the same exact CI/publication/proposal route as holder
 readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
 exact route. The local liveness classifier can report `self_resolvable` as
@@ -566,9 +525,8 @@ or grant timer re-admission.
 `coverage_complete` reports inventory/observation completeness; `truncated` and
 `overflow_count` separately identify omitted diagnostic rows. An incomplete
 view is not proof that no holder-only or external cause exists.
-Missing legacy bodies, orphan identity/decision records, unsafe
-paths, inconsistent revisions, incomplete archives and malformed evidence cannot
-prove an impossible releaser or terminal outcome.
+Unsafe paths, inconsistent revisions and malformed evidence cannot prove an
+impossible releaser or terminal outcome.
 
 Blocked age is diagnostic only: elapsed time never changes liveness, ready-work
 membership or transition permissions. Pending and unknown releasers remain
@@ -601,10 +559,10 @@ problem/actionable rows (`absent`, `impossible`, `due`, `terminal`, `unknown`) b
 follows ledger size. `total` and fixed state `counts`
 cover the full scan, including omitted rows. `truncated` and `overflow_count`
 report omitted seeded rows, independently of inventory `coverage_complete`.
-Unseeded decisions or unknown observations set coverage false and total/counts
-to null, with `diagnostic: "incomplete"`; an unsafe, malformed or incomplete
-ledger scan returns `diagnostic: "unreadable"`, empty rows, null totals/counts,
-null truncation/overflow/unseeded count, and false coverage. These are unknown
+Unknown observations set coverage false and total/counts to null, with
+`diagnostic: "incomplete"`; an unsafe, malformed or incomplete ledger scan
+returns `diagnostic: "unreadable"`, empty rows, null totals/counts, null
+truncation/overflow, and false coverage. These are unknown
 results, never evidence of zero blockers. `Project.status()` derives both
 `backpressure.open_work_count` and `blocked_work` from one validated read-only
 open scan; it does not run a second count-only pass. Both values fail together
@@ -621,12 +579,12 @@ their existing meaning. Object-question waits use the authenticated answer route
 ### Externality of a blocker
 
 A structured wait observes recorded state; it does not prove that an outside
-actor caused the condition. In particular, `code_change`, `object_resolved` (historically `insight_decided`),
-and `dependency` do not attest who produced the code change or decision, and
+actor caused the condition. In particular, `code_change`, `object_resolved`,
+and `dependency` do not attest who produced the code change or resolution, and
 a dependency's `recipient` does not assign the task or restrict who may satisfy
 its condition. The task author should use `blocked` only when its condition is
 genuinely outside the active writer's control. If the writer can cause the
-code change or decision, or can retrieve the needed CI, log, artifact, or
+code change or dependency resolution, or can retrieve the needed CI, log, artifact, or
 experiment evidence with its own tools, it should keep the work actionable
 rather than waiting on that condition. This is a usage rule; readiness checks
 do not mechanically establish externality.
@@ -690,8 +648,7 @@ the immutable completed receipt, stores its branch and published SHA in the
 wait, and revalidates that binding on stored reads. The receipt is either the
 product's own publish receipt or one recorded afterwards by an operator-run
 publisher; both validate through the same path, and neither is inferred from a
-branch head. Insight `decide`/defer waits
-do **not** accept either CI wait.
+branch head. Retired stored object waits do not accept either CI wait.
 
 Before a publication receipt exists, register the independent snapshot-bound form:
 
@@ -926,7 +883,7 @@ not completion proof.
 
 Only the matching current blocked holder receives this evidence, in full and
 delta prompt `wait_events` and the run's `wait-events.json` (at most ten CI
-records per run, separately from insight waits). Reopened/replaced waits or a
+records per run, separately from other waits). Reopened/replaced waits or a
 changed holder do not receive old evidence. Each eligible result is projected
 into the existing SharedRecords store as `ci.wait`, writer `host.ci`, identity
 `ci-wait:<item>:<blocked-rev>`, with the blocked revision's `updated_at` as event
@@ -999,9 +956,10 @@ or published head changes, or the configured `ci_rewake_seconds` elapses;
 status remains separately available to prompts. **Current behavior to revisit,
 not a future guarantee:** for outcomes other than terminal `done`, the generic
 inbox-generation check in `should_run` runs before the CI-specific gate, so a
-writable daemon can still wake on a VCS-sourced insight through the generic
-inbox signal even with `ci_wake = false`. Do not read `ci_wake = false` as
-excluding every VCS-derived input from a writable daemon's generic wake.
+writable daemon can still wake on a queue message delivered by a VCS driver
+through the generic message signal even with `ci_wake = false`. Do not read
+`ci_wake = false` as excluding every VCS-derived input from a writable daemon's
+generic wake.
 
 ## Platform triggers
 
@@ -1073,46 +1031,6 @@ with up to one second of timer accuracy slack. Scheduled services are unchanged.
 Daemon ticks and
 scheduled runs likewise recheck their inputs (`src/mizu/services.py` and
 `docs/configuration.md` terminal-subscription section).
-
-## Producer admission
-
-Producer admission (`src/mizu/scheduling.py` `ProducerFacts` /
-`evaluate_producer`, `src/mizu/producer_admission.py` `producer_hold`) holds only
-configured non-writer project roles that carry `submit_insight` (the writer
-can still resolve, merge, defer, or reject input at capacity), before any model
-or run-slot use, when their role-name source's unresolved live input count
-(undecided plus deferred; resolved and archive-only history excluded) reaches
-`[limits].producer_inputs_per_source` (unchanged, default 20; 0 disables).
-Independently, `[limits].open_work_items` (default **0**, disabled) can hold
-these producers only when `roles.<name>.held_at_capacity = true` (boolean,
-default **false**) and the threshold is positive. The gate holds at an
-authoritative open/doing/blocked count **>=** the configured threshold, and
-releases below it. A zero threshold or false role policy skips that metric
-entirely during admission; active gates fail closed on invalid/unreadable
-counts or policy. Neither gate cancels a running unit or limits work-item
-seeds, accept/modify transactions, or legacy reconciliation. Writers,
-non-producers, unconfigured roles, and external input channels are outside
-this gate. The existing bounded `open_work_items` prompt section still reaches
-insight producers, decision makers, and work-item roles by default, with
-explicit context-section overrides. Status continues to report workload even
-with disabled gates; an unavailable visibility metric alone does not hold a
-producer that does not need it.
-Status reports each held source (role name), reason,
-and exact `thresholds` map in `backpressure.held`. The policy applies to direct, scheduled,
-event-triggered, and daemon admission: `Engine.run` checks
-before FIFO slot admission, and `should_run` vetoes an otherwise-ready daemon
-iteration. A held attempt returns `skipped: producer-held`, claims no run
-directory, slot, or lock, and acknowledges no event or cursor, so pending
-decision, terminal-work-item, wait, CI, and operator inputs stay durable. It
-fails closed when the load cannot be read; a running unit may finish. Release
-follows the wake-semantics default: no duplicate queue or implicit schedule
-is added, so a held producer resumes only through an existing schedule tick,
-interval/calendar firing, event trigger with pending input, or daemon
-readiness re-evaluation, with repeated state-based triggers coalescing
-through the existing durable stores. `submit_insight` does not implicitly
-subscribe its sender to decision events for its proposals. A role without a
-schedule or declared event subscription has no subscribed events pending to
-lose; its proposals remain durable, but submission creates no wake path.
 
 ## Workspace and lock isolation
 

@@ -83,7 +83,7 @@ Pi and pi-durable intentionally omit live authority from those identities.
 All sandbox fields are bound, including runtime command/storage settings, image,
 namespace helper, cgroup policy, resource limits, mounts, network and configured
 environment values. Tool policy binds web, VCS, materialization, exclusions,
-workspace cache, insight-decision and operator-record configuration. Configuration
+workspace cache and queue declarations. Configuration
 origin, data directory and configured/resolved budget timezone are also bound. Entire
 role/limit/sandbox records are included conservatively: changes to unrelated
 fields may also invalidate the digest. This is not a compatibility/session key.

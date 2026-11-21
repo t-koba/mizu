@@ -24,7 +24,7 @@ from .errors import Busy, Denied, LimitExceeded
 
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-#: Fixed mechanism preview bound (128 KiB): diff/editor/insight previews and
+#: Fixed mechanism preview bound (128 KiB): diff/editor previews and
 #: canonical list framing. Not a TOML knob; file_bytes/snapshot_bytes stay policy.
 PREVIEW_BYTES = 131072
 #: Maximum decoded characters in one file-read page. This keeps escaped tool
@@ -633,7 +633,7 @@ def relative_parts(name: str) -> tuple[str, ...]:
     parts = tuple(name.split("/"))
     # A leading "/" yields an empty first component and a Windows drive needs
     # ":" in the second position (backslashes were refused above), so pathlib
-    # runs only for the one shape it can still decide.
+    # runs only for the one shape it can still accept.
     if (name[1:2] == ":" and PureWindowsPath(name).drive) or any(p in ("", ".", "..") for p in parts):
         raise Denied("Path must be relative, without empty, '.' or '..' components")
     if _platform.IS_WINDOWS and any(':' in p or p.endswith((' ', '.')) or

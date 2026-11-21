@@ -69,8 +69,8 @@ def _stored_wait(value) -> dict:
     if not isinstance(kind, str):
         raise Denied("Invalid stored work-item wait")
     # Only a live work-item subject is authorized as an evaluated wait. A
-    # retired object subject (insight, record) is inert stored history: keep
-    # it bounded and replayable without resubscribing, while the creation path
+    # retired object subject is inert stored history: keep it bounded and
+    # replayable without resubscribing, while the creation path
     # still validates new work-item waits strictly.
     if kind == "object_resolved" and evaluated(value):
         from .object_waits import normalize

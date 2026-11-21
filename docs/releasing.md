@@ -52,7 +52,7 @@ the Pi release Atom feed `https://github.com/earendil-works/pi/releases.atom` in
 `[web].feeds` (with `github.com` allowed under `[web].hosts`). The configured
 searcher consults it through `mizu_search`; search results are external-untrusted
 inputs
-that reach the writer as insights, not adoption decisions. There is no
+that reach the writer as queue messages, not adoption decisions. There is no
 Pi-specific release-check command or automatic package update. Use
 `docs/upstream.md` to confirm the currently adopted version. Every new stable
 release enters lockstep adoption review on its own, whether or not its changelog
@@ -128,18 +128,9 @@ claim of byte-reproducible transitive npm resolution.
 
 Version lives in `src/mizu/__init__.py` and product metadata. When removing a
 reader for a stored format, keep a bounded conversion at promotion and make the
-runtime refuse unconverted data, naming the migration. Promotion currently
-converts flat shared records, legacy work-item resolution filenames, and legacy
-insight identity files with no live or archived body (into verified archive
-tombstones) only after verified project backups and before switching `current`.
-Source identity files are preserved because the runtime still reads and writes
-`insight-ids/` for live insights; their conversion establishes the archive rows,
-not reader removal. The `migrations` result and its receipts cover only those
-named conversions. The promotion result's `uncovered_families` map lists what
-the invocation does not cover, not what is present in a project: decision
-receipts are reconciled separately by a route-bound host operation. Neither
-`migrations: []` nor a successful conversion of one family establishes absence
-or conversion of decision receipts, or justifies removing their legacy reader.
+runtime refuse unconverted data, naming the migration. Current promotions do not
+convert removed record families; operator-led conversions of stored project data
+are described in [operations](operations.md).
 
 Activation removes the replaced managed release after successful pointer and
 launcher updates. Keep its source bundle and the pre-conversion archives for rollback;

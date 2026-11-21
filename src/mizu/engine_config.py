@@ -564,7 +564,7 @@ def session_age_seconds(path, saved=None):
 
 
 def rotation_due(limits, path, saved, engine="unknown"):
-    """Decide whether a resumed persistent session must restart.
+    """Determine whether a resumed persistent session must restart.
 
     Schema: reads ``[limits] session_max_tokens``, ``session_max_cost_usd``
     and ``session_max_age_seconds`` (0 disables each). Bounds: token/cost

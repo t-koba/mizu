@@ -140,7 +140,7 @@ Offline tests require no API credentials, internet access, or running container 
 
 Test categories include path/symlink/hardlink refusal, immutable ID retries,
 budget races and day changes, process cancellation/orphan pipes, unchanged
-review skipping, goal/snapshot consistency, late Insight wakeup, stale verification,
+review skipping, goal/snapshot consistency, late queue wakeup, stale verification,
 source changes after verification, read-only Editor transport, unsafe ingest,
 backup traversal/links/limits, hostile HTML, exact model mismatch, early Pi exit,
 Unicode LF framing and agent_end vs agent_settled.
@@ -405,7 +405,7 @@ CI or deployment is asserted by these offline tests.
 checks the paid-probe caps with fake engines and the shared lifecycle without
 calling a provider. `test_smoke_retention.py` constructs disposable pairs and
 project record stores to cover atomic publication and member identity,
-cross-project typed pins, exact Insight revisions, inherited task seeds,
+cross-project typed pins, exact work-item revisions, inherited task seeds,
 blocked waits, active versus terminal owners, missing/malformed/oversized/linked
 metadata, scan caps, strict age boundaries and zero, busy coordination, immutable
 previews, pending rollback, committed partial-deletion recovery, and honest

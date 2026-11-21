@@ -125,7 +125,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     adapter call per branch per due poll under the adapter timeout; status
     checks capped at 1024 rows each. Trust: host side only; adapter facts
     stay external-untrusted. Bounded failure and success facts are cached for
-    dedicated CI wake selection and prompts; neither creates insights.
+    dedicated CI wake selection and prompts; neither creates work items.
     Receipt-pinned CI wait delivery is independent of this branch-head cache.
     Retry/cancellation: no retry; ``last_poll`` and the rotation cursor
     advance even on failure so one bad adapter cannot busy-loop or pin the

@@ -16,11 +16,11 @@ provides units, scheduling, declared message queues, accounting, drivers and
 tools; it names no role, queue, message kind, state or workflow and keeps no
 record state. Roles, what each queue carries and what a reader does with it,
 what completion or publication requires, and what models are told are
-deployment configuration and policy. Parts of the current code still
-embed one development workflow; [os-migration.md](os-migration.md) is the plan
-that removes them, and the component table below describes the code as it is
-during that migration. A Markdown policy explains which work to choose; it
-cannot grant capabilities or change limits.
+deployment configuration and policy. [os-migration.md](os-migration.md) records
+the stages that removed the built-in workflow: proposals, decisions, questions,
+answers, notices and receipts are now queues, work items and host records, and
+role policy text. A Markdown policy explains which work to choose; it cannot
+grant capabilities or change limits.
 
 The trusted computing base consists of the host OS kernel, the operator account,
 Python, the Mizu release, Node/Pi/CLIs and their installed dependencies, the
@@ -58,14 +58,8 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `protocol.py` | Tool schemas and strict parameter validation | Tool implementation semantics |
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
-| `insights.py` | Submission identity, revisable proposals, decision history/legacy receipts, source-current shared-decision projection and page construction, initial work-item seeds | Acceptance or rejection |
-| `kernel_shadow.py` | Userland mapping of authoritative legacy insight/decision facts onto declared generic kernel objects | Legacy authority, acceptance or projection policy |
-| `insight_tools.py` | Context-bound insight tool adaptation: paged reads, role/run/snapshot provenance, grant checks, and evidence-attachment audit records | Insight persistence/decision semantics or dispatch/schema policy |
 | `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
 | `host_records.py` | Declared publisher-outcome validation and host-only exact-snapshot record route | Publisher observation, generic record storage, work-item lifecycle or completion |
-| `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement; dispatches shared, queue-backed or legacy reads | Host activation or other event-family routing |
-| `queue_decision_delivery.py` | Stage-2 userland adapter for non-shared decision reads and exact settled receipts on the declared queues; not kernel code | Queue names, schemas and meanings, or workflow policy |
-| `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and shared activation after per-role pending-set parity; also publishes queue authority from the operator's conversion and verify reports | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
 | `work_order.py` | Writer's bounded atomic current plan with CAS, run receipt, and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
@@ -84,15 +78,11 @@ otherwise a loopback TCP socket carrying the same per-run token — connecting
 each extension to its work unit. Files are the inter-process handoff.
 JSON is the machine format; Markdown is the human policy/report format.
 
-The [shared-record delivery](shared-records.md) mechanism is implemented as a
-bounded immutable store with manifest-scoped reads and receipts. A host-only,
-one-way marker selects the `insight.decision` authority: absent means legacy,
-`"shared"` activates shared delivery after exact legacy-receipt migration and
-full per-role pending-set parity, and `"queues"` selects the stage-2 queue
-adapter after the example conversion and verify gate pass. The two activations
-are mutually exclusive and shared precedence in reads is unchanged. Legacy
-remains the default until one of those explicit activations. Other event
-families keep their existing authorities and are not switched by these pilots.
+[Shared records](shared-records.md) are a bounded immutable store with
+manifest-scoped reads and exact receipts for CI waits and host publisher
+outcomes. Questions, answers, notices and proposals are declared queues; their
+routing, wake rules and meaning are configuration and role policy, not a
+runtime authority marker or adapter.
 
 ## Work-unit transaction
 
@@ -288,7 +278,7 @@ Snapshot retention is storage-owned policy, not a publication side effect.
 At the existing per-project automatic-prune boundary, `snapshot_retention_days`
 (default 31; 0 disables) permits removal of old superseded history generations
 and unreferenced manifests; no timer or pause is added. Current history,
-continuations/fences, runs, artifacts, live/revised/archived insights, pending
+continuations/fences, runs, artifacts, pending
 editor submissions/claims, and every historical work-item delivery/done citation
 remain roots. Recent superseded histories also pin their IDs until expiry.
 Generation age uses immutable file mtime; manifest age uses validated
@@ -302,7 +292,7 @@ all-history roots and pause requirement.
 
 The existing collector validates all generations, including expired ones, before
 allowing deletion; incomplete scans fail closed. Automatic GC takes the existing
-workspace/role/editor/insights quiescence exclusions nonblocking, plus publication,
+workspace/role/editor/record quiescence exclusions nonblocking, plus publication,
 all check-slot exclusions and the editor outbox submission lock. Check runners
 capture content outside role units, so even never-used configured slots must be
 excluded. CLI submit/revise/report/export take publication before observing a
@@ -310,7 +300,7 @@ snapshot and hold it through storing its citation/export. Capsule writers have
 only the outbox mount and serialize submissions on `.submit.lock`; no project
 access is added. These writers acquire nonblocking and refuse as Busy on
 contention before observing/storing a reference; callers can retry later (CLI
-exit 75, editor tool error), rather than waiting for a maintenance scan. Publication precedes insights, as in delivery binding. The
+exit 75, editor tool error), rather than waiting for a maintenance scan. Publication precedes record writes. The
 acceptance audit also opts into nonblocking locking for this sweep. There is no
 new snapshot-write locking layer or changed publication authorization. Unlink
 histories before manifests before unused objects; interruption leaves extra data
@@ -320,15 +310,14 @@ and shared-smoke retention are independent and unchanged. See
 [configuration](configuration.md#automatic-snapshot-retention) for the exact
 root/age/result contract and outbox lock permissions.
 
-Work orders keep one bounded canonical `work-order/current.json` record, atomically replaced under `insights.lock` with exact revision/generation CAS. Each committed revision receives a distinct immutable `work-order-<sha256>.json` receipt under the authoring run and existing run retention; the tool result names its exact receipt. Legacy history/checkpoint files are unused and left untouched; valid schema-1 current records remain readable. There is no recovery scan, cleanup or automatic retry. See the writer work-order contract in `configuration.md` for schema, bounds and failure behavior.
+Work orders keep one bounded canonical `work-order/current.json` record, atomically replaced under `records.lock` with exact revision/generation CAS. Each committed revision receives a distinct immutable `work-order-<sha256>.json` receipt under the authoring run and existing run retention; the tool result names its exact receipt. Legacy history/checkpoint files are unused and left untouched; valid schema-1 current records remain readable. There is no recovery scan, cleanup or automatic retry. See the writer work-order contract in `configuration.md` for schema, bounds and failure behavior.
 
 The history index retains published IDs up to the configured limit (default
 128, tunable 8–1000000 via `limits.history_index`). The active generation/window
 is always retained; older storage follows reference-aware retention below. Prompts carry a bounded, capability-gated projection: up to
 `limits.prompt_snapshots` recent anchored summaries with exact IDs and code
 digests, plus only the actionable context the role is granted to use.
-`work_order` freshness (`absent`/`current`/`review_due`/`unavailable`) is offered only to roles with `work_order`, sharing the unit-frozen full pending-inventory generation across full and delta even when a delta omits already-offered bodies; `pending_insights` is offered only to roles with `insights`/`decide`, newest
-kept up to `limits.pending_insights`;
+`work_order` freshness (`absent`/`current`/`review_due`/`unavailable`) is offered only to roles with `work_order`, sharing the unit-frozen full pending-inventory generation across full and delta even when a delta omits already-offered bodies;
 `acceptance_commands` only to roles with `verify`. Exact snapshot references
 (`id`, `code_digest`, `state`, `verification`) are always pinned, never
 summarized. `diff` compares the anchored
@@ -350,7 +339,7 @@ on the effective configured wake set (`ci_branch` plus deduplicated
 `ci_wake_extra_branches`; an empty set disables the wake) for roles with
 `ci_wake` (writable roles by default; an unchanged red re-wakes only on a new
 branch/SHA/check/run fact, a moved head, or every `ci_rewake_seconds`). Failures
-remain visible independently of insight decisions until green or superseded.
+remain visible independently of role judgements until green or superseded.
 `blocked` needs a wake or new information. `done` is not reopened by news
 alone; an explicit wake or changed goal can reopen it. Other scheduled roles
 are independent until the project is paused/disarmed. Projected red CI checks
@@ -366,7 +355,7 @@ qualify; any selected true signal is progress. The default selects successful
 non-finish Mizu operations except pure reads of existing workspace, proposal,
 research, VCS or retained command/experiment evidence and exact web-receipt
 replays; new native engine-tool authorizations (not idempotent replays), changed
-code, successful decisions and insight actions, and fresh/due one-shot input
+code, successful queue writes and work-item transitions, and fresh/due one-shot input
 also qualify. The free-text `state` signal remains opt-in; a paraphrase alone is
 not progress under the default. Input means a changed inbox or operator
 wake generation, consumed decision/wait events, CI failures due for this
@@ -432,273 +421,21 @@ rather than authorizing an admission; `mizu status` and `mizu explain` expose
 only its bounded signal/count/timestamp projection and a finite disposition,
 not a scheduler prediction.
 
-## Insight handoff
-
-The submitting route assigns the source identity. A record contains ID, source
-(authority channel), opaque origin (actual caller sharing the transport, null
-means unknown and never guessed), created time, base snapshot, title, Markdown
-body, revision identity (`rev`) and update time. Origin is set once at submit by
-trusted host callers, preserved across revisions, never routed on, and never
-grants operator approval. Ordinary prompts, lists, and reads expose only
-the current content, its current decision/evidence gap and `rev`; obsolete
-claims are replaced, never appended. The first submission creates `rev` 1.
-New insights store `kind` (`proposal` only), `addressee` (`writer`, `operator`,
-or a configured role name), and `urgency` (`low`, `normal`, or `high`),
-defaulting to `proposal`/`writer`/`normal`. Use `mizu_record_write` with a
-[configured SharedRecords question kind](shared-records.md#opt-in-role-questions-to-the-operator)
-to ask the operator a question. Stored `kind = "question"` insights remain
-readable and are not migrated; submit and revise cannot write that kind.
-Core storage validates
-addressee syntax using the configured-role identifier bound (1–63 lowercase
-ASCII letters/digits/underscore/hyphen, first character alphanumeric); model
-tool submissions additionally validate explicit addressees against configured
-roles plus the two named attention targets. These fields are optional tool
-inputs, not decision authority. Undecided current revisions now route a bounded
-`kind=insight.pending` event through the existing `decision_events` transport to
-the configured **project** role. `writer` means the submitting source role, not
-the project's publishing role. An operator submission with the default `writer`
-alias is resolved at read/delivery time to `[insight_decisions].operator_addressee`
-when that configured recipient is set, so the deciding project role receives the
-pending event and wake; attention names that same role. Stored records stay
-byte-unchanged, so undecided operator insights created before the setting exist
-remain deliverable without resubmission. An explicit `operator` addressee stays
-in the human host open-insight inbox: no model role or wake is created. The
-operator CLI accepts `--addressee` on submit/revise to name `operator` or a
-configured project role explicitly. A removed/unconfigured destination is isolated:
-it stays visibly unresolved in the host inbox with no fallback destination or
-inferred resolution and never blocks valid routes for other configured
-recipients; malformed sources still fail closed. Legacy omissions do not
-invent routes. Current decisions, including deferrals, retain their existing
-subscription/admission behavior rather than gaining a duplicate attention wake;
-a new insight revision reopens attention. Urgency stays display-only, with no
-admission bypass, priority ordering or response deadline enabled.
-
-Model-facing prompt rows, insight tool reads/lists, and delivered
-`insight.pending` rows display stored routing `addressee` as `attention`, resolving
-`writer` to the submitting `source`; explicit targets remain unchanged. They
-omit `addressee`. Undecided rows additionally show `decide: "you"` exactly when
-the reader has the `decide` tool capability, irrespective of routing or source.
-Readers without that capability and already-decided rows get no `decide` mark.
-This is a display-only projection: stored records, routing, event identity and
-acknowledgement tokens remain unchanged.
-
-Stored attention rows contain `event`, `insight`, `rev`, `source`, `target`, `addressee`,
-`title`, `body`, `created_at`, `kind=insight.pending`, and the explicitly stored
-`insight_kind` and `urgency` when present. Evidence notes remain on the source
-insight, not in a new mutable delivery identity. Events are revision/content/
-target-bound, oldest-first, sharing the existing decision-event count limit
-(1–100). In active shared mode they also share the configured decision page byte
-budget and manifest-only `decision_read` references; an attention-only role with
-no explicit budget uses the existing 1 MiB transport ceiling. The combined
-current shared page retains at most the configured `[limits].decision_projection_records`
-(default 512) oldest routed unacknowledged rows per scan across both decisions
-and pending attention, and advances after acknowledgements. The legacy source scan
-streams individually bounded inbox records and filters to the current recipient
-before retaining attention rows; the prompt/result bounds stay at the existing
-1–100 count limit. Its scan work scales with retained inbox history, but unrelated
-human-addressed, decided, removed-role, and other-recipient records do not
-consume the recipient's projection bound or block its pending route. In legacy
-mode the combined decision/attention prompt
-contribution is bounded to the existing 1 MiB transport ceiling by omitting only
-newest attention rows (oldest attention prefix kept, exact tokens preserved,
-omitted rows stay pending, truncation visible via the returned page); current
-decision events are never omitted for bytes. Shared envelopes are immutable
-derivations of Insights, never a second content authority. Absent the existing
-decision-authority marker, delivery uses the existing legacy exact per-token
-receipt mechanism, with a distinct pending-insight token domain; existing
-decision token identities are unchanged. Corrupt legacy receipt content yields
-a bounded unresolved diagnostic; unsafe stores fail closed. Active shared mode
-never falls back to legacy delivery or receipts. A `"queues"` marker routes the
-same non-shared page through `queue_decision_delivery`, which derives tokens
-from converted queue metadata and appends settled receipts only to the declared
-host-writable `receipts` queue, with stable ids and exact token revalidation.
-Legacy file receipts and SharedRecords receipts are never written in that mode;
-this routing does not activate either store. Only host-only reconciliation
-activates an authority. That
-reconciliation maps both `insight.decision` and addressed `insight.pending`
-receipts: it pins current per-role pending sets and their source/receipt bytes,
-preflights existing shared receipts, writes only missing exact records, requires
-per-role parity, and publishes the one-way authority marker last. Previously
-acknowledged pending attention therefore does not replay solely because of
-cutover. There is no dual-read fallback or model-granted activation.
-
-The role explicitly selects handled tokens in `finish.ack_events`; only durable
-successful finish (and writer publication) applies receipts. Reading or finishing
-alone acknowledges nothing. No answer, decision or insight status transition is
-automatic, and no decide grant is added. New dispatches omit superseded routes;
-a frozen unit may still explicitly acknowledge its exact old delivered payload,
-which cannot suppress the new revision/target. The existing event-trigger gate,
-role exclusion and admission limits are reused. Linux/macOS non-daemon role
-watches add the inbox as a coarse hint (including attention-only roles); daemons
-recheck on existing ticks. Windows keeps its existing scheduled/manual delivery
-limits; no new scheduler or installed service changes are made here.
-
-Legacy records lacking any field keep it absent (visibly unspecified), including
-in bounded list/archive summaries and reads. No default is injected on read and
-`Q:` prose is never interpreted as metadata. Omitted revision fields inherit
-only explicitly stored values; a missing legacy field stays missing. Explicit
-metadata-only changes create and archive revisions and affect content identity.
-Stable-ID submit retries with omitted metadata preserve the stored shape;
-legacy retry digests remain unchanged. Auto-ID dedup compares metadata too,
-using new defaults for omitted inputs while returning legacy matches unchanged;
-explicit metadata never matches an absent legacy field. The existing byte
-limit includes metadata, invalid explicit values (including null) fail closed,
-and old revisions remain accessible only through history.
-
-The original submitter may revise under the stable ID via compare-and-swap on
-`expected_rev`; identical retries are no-ops that do not advance the inbox
-generation, while a meaningful revision archives the prior record to
-`insight-revisions/<id>.r<rev>.json` and becomes pending again. A crashed
-revise converges on retry: an orphan archive for the still-current rev is
-overwritten, and a same-content retry preserves the stored `run` (revision
-provenance recorded only on meaningful change). The transport exposes revise/history/withdraw to the operator (`mizu insight revise/history/withdraw`);
-each runtime role holding `revise_insight`/`withdraw_insight` may revise/withdraw its own insights
-via the runtime, which fixes source to the role name and binds to the read rev. A current
-`accept`/`modify` blocks withdrawal unless that role also has `withdraw_decided`; no role
-receives that supplemental grant by default. The direct operator CLI remains deny-by-default
-for a current `accept`/`modify`. History stays a read path. Decisions carry the same binding:
-the decide interface accepts the `rev` from the read, and a decision naming
-a superseded revision is rejected without writing anything, so a prior
-rationale never authorizes changed content while the current revision stays
-pending for reassessment. Prior
-revisions are returned only by the explicit history path, never injected into
-routine context, and are durable audit like decisions (backed up, never
-pruned). Explicit history pages bound both exact numeric revision-path reads
-and returned records by `insight_history_entries` (default/ceiling 1,000), or a
-smaller caller limit; no shared revision-directory discovery occurs. An exclusive
-`after_rev` cursor advances over missing/invalid files too. Pages exclude the
-current revision and later orphans when its validated revision is known; otherwise
-completeness stays unknown and continuation remains available. Direct ID reuse
-with different content outside revise is rejected.
-Decisions bind to the reviewed `rev`, so a prior approval never authorizes
-changed content; deferral still requires a revisit condition and stays
-pending. A substantive accept/modify/reject prevents conflicting further
-decisions on that revision; an exact keyed replay is a no-op returning the
-original event, and a meaningful revision reopens it. Accept/modify store the resolved
-`work_item_intent` (`create`/`none`), from an explicit override or configured
-trusted-source default (global fallback `create`; see configuration.md).
-`none` durably records no work with no seed. When the task list is omitted,
-`create` places an initial durable `work_item` seed in that same immutable decision-history event (and the
-matching current-decision record). Its ID is `wi_<event-id>`; it records
-the current insight title and `{insight_id, rev}` origin, starts `open` at item
-revision 1 with no holder, and uses the decision timestamp for creation and
-update. `defer` and `reject` do not create a seed.
-
-An explicit `work_items` list instead names 1–16 tasks (title, description
-and optional structured wait), without parsing the reason. Its resolved intent must be `create`;
-policy `none` requires an explicit create override. The history event embeds
-the ordered `work_item_specs` and complete `work_items` seed manifest in one
-atomic write. For groups with waits, a parallel `work_item_waits` array binds
-each normalized condition (including a captured code-change baseline) to its
-seed. No per-member seed files or mutable index are needed: group
-lookup scans immutable events for a hashed task ID; enumeration reuses each
-manifest. IDs hash the decision key, complete ordered specs and member index,
-so missing/reordered/tampered members fail closed against the whole set.
-All specs and seed slots, then the complete event's `PREVIEW_BYTES` bound
-(131072 UTF-8 bytes), are checked before commit. A crash exposes no group or
-the entire group; an exact ordered-list retry validates every seed/chain and
-repairs only a missing/stale non-substantive current pointer. Conflicting
-retries fail. Old single-seed/no-work events keep their exact shapes. Task
-seeds inherit any decision-level scope and remain unheld. Tasks without waits
-keep the open seed shape. Tasks with one existing observable wait (`deadline`,
-`code_change`, `insight_decided`, `dependency`; not `ci`) start blocked with the
-normalized wait in that same immutable event (new `insight_decided` task waits
-are normalized to Insight-subject `object_resolved`; historical manifests keep
-their old shape). Raw specs, including waits, bind
-IDs and exact replay; first commit captures the code-change baseline in
-`work_item_waits`, and replay validates that manifest against the blocked seeds
-without rebasing. Other waits must strictly correspond to their normalized raw
-specs. No sidecar or second transaction is needed; `_wait_due` supplies the
-existing readiness re-evaluation. Only group
-seeds accept blocked/wait shapes; direct and legacy seed rules are unchanged.
-Task-specific scope is not part of this mechanism. Current projections name all
-`work_item_ids`, and submitter status uses `{items: [...]}` for groups only.
-See configuration.md for field bounds and the CLI file interface.
-
-An accept/modify decision may also state the accepted scope: the work the
-decision authorizes (1-4000 nonblank characters). It is recorded in that same
-immutable decision event and in the seeded work item, so the scope a work item
-is held to is a recorded fact rather than prose absorbed into a description or
-reason. A decision that states no scope leaves its item without one; that
-older shape stays readable history, and such an item's closure may state the
-scope it delivers. The scope is immutable in the seed, like the title and the
-origin, and is validated as bounded nonblank text. The compact page rows carry
-the scope in force as a bounded preview beside the description it belongs to.
-
-New decisions carry a `decision_key`: the first 32 lowercase hex characters of
-SHA-256 over canonical JSON `["insight-substantive-decision", insight_id, rev]`.
-Accept/modify/reject use that key as their immutable event filename; defer keeps
-a random 32-hex event filename. First decisions and keyed defers use one keyed
-content lookup, not a scan of historical event contents. Before any event write
-(including reject, defer and withdraw), the shared preflight validates/recovers
-recognized atomic-write temporaries in decision-history and refuses a symlinked
-or otherwise unsafe decision-history, decisions (always), or waits (when a
-registered wait will be written) parent without following it; it enumerates
-metadata, not historical event contents. Key collisions (including old random-ID events at
-that filename) fail closed. Work-item history readers validate every present
-key against the event's insight/revision and require the keyed filename for
-accept/modify/reject; legacy records without a key and without an explicit
-work-item intent marker remain readable. If the event
-committed but its current pointer write
-failed, an exact retry (action, reason, revisit, and an explicit intent if
-supplied) restores the pointer and returns the original record/seed; omitted
-intent reuses the recorded value and a retry run does not replace original run
-provenance. Seed replays first validate the item storage and complete transition
-chain; corrupt history cannot succeed or repair a pointer. Valid transitions
-leave the returned creation event unchanged. Conflicts are refused; a completed
-current substantive decision still requires revision to reopen.
-Only a revision-current legacy defer lacking `decision_key`, with no keyed
-substantive event, requires scanning old random-ID history to detect a hidden
-substantive decision. Old events are never rewritten.
-
-`Project.work_items` provides internal `get(item_id)`, the locked readers
-`page_open(cursor=None, limit=25)`, `projection(item_id)` and
-`explain(item_id, *, after_rev=0, limit=25)`, the unlocked, non-recovering
-read-only `page_closed(cursor=None, limit=25, status=None, origin=None,
-closed_after=None, closed_before=None)`, plus
-`transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
-snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the three
-page modes through the existing `work_items_read` grant and exposes transition
-only through its separately granted operation described below. Other modules
-use only the public seams `current`, `current_items`, `unseeded_decisions`,
-`closed_items`, `history`, `committing` and `audit`. The event's title is the
-immutable title authority, not the subsequently revisable insight.
-
-### Current-state index
-
-The revision files, the inbox and the decision files are the durable history.
-The index has two domains with separate tables, schema numbers and build
-state: work items (below) and insights. The insight domain holds `insights`
-(one row per known insight: the live inbox record with its source, kind,
-addressee, creation time, content identity and exact record, or the newest
-archived revision; unreadable inbox files are rows marked invalid) and
-`decisions` (one row per current decision pointer, marked valid when readable
-with a known action and revision, and linked when it also has the full
-persisted shape and equals its immutable `decision-history` event). The inbox
-generation is a digest of an epoch (the contents at build time) and a
-sequence that advances in the transaction of each write that changes a live
-record's content identity. Writes (`submit`, `revise`, `attach_evidence`,
-`decide`, `withdraw`, archival) use the same intent, file, replay protocol with
-keys `i:ID` and `d:ID`. Counts, listings, pages, `scan_source`, the deferral
-gate, origin staleness (a join of items, insights and decisions) and event
-origin routing are indexed queries; fail-closed readers refuse while an
-invalid row exists.
+## Current-state index
 
 The revision files are the durable, append-only history. Current state is read
 only from the per-project ledger index `ledger.sqlite3` in the project root
 (stdlib SQLite, WAL journal, `synchronous=FULL`, connections opened per
 operation with the configured lock timeout as busy timeout). Its `items` table
 holds one row per seeded item: ID, revision, status, holder, creation and
-update order keys, origin insight and revision, wait kind, the derived doing
-start and blocked start, the task decision that carries a task seed, and the
-complete current record. `unseeded` lists legacy accept/modify decisions that
-no reconciliation resolved; `meta` holds the schema version and whether the
-build completed; `intents` holds announced writes. Page, count, readiness,
+update order keys, opaque origin, wait kind, the derived doing
+start and blocked start, and the complete current record. `meta` holds the schema version and whether
+the build completed; `intents` holds announced writes. Page, count, readiness,
 closed, event and wait reads are indexed queries; origin staleness, hold ages
 and wait liveness are still computed from the current record on every read.
 
-Every commit of a work-item record (direct creation, decision seeding,
-legacy reconciliation, transition, wait resolution, retirement) runs inside
+Every commit of a work-item record (direct creation, transition, wait
+resolution, retirement) runs inside
 `WorkItems.committing(ids)` under the record lock: it commits an intent row,
 the caller writes its file, and the named items are then replayed once from
 their files, with full chain validation, into their rows while the intents are
@@ -744,20 +481,15 @@ with the index. It reports corrupt chains and divergent rows without changing
 anything; `--repair` rebuilds the index when every chain validates. Reads
 never revalidate history.
 
-Both direct creation and decision seeding call the same lock-held
-`WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
-binding, safe empty item slot, and exact current origin revision. New seeds
-recover a recognized regular orphan temporary (removed without promotion) and
-then refuse any pre-existing direct record, legacy sidecar, numeric history,
-unknown entry, or unsafe/ambiguous temporary. Preflight writes no
-seed: direct creation commits `create.json`, while decision seeding commits only
-the embedded seed in its immutable decision event (never a two-file seed/event
-transaction). Committed retries use a shared storage/chain validator without
-rechecking the live origin. Project wires this service to Insights; standalone
-Insights readers do not instantiate it.
+Direct creation calls a lock-held `WorkItems.create_seed` preflight: title,
+optional description and scope, opaque origin validation, safe empty item slot
+and exact ID binding. New seeds recover a recognized regular orphan temporary
+(removed without promotion) and then refuse any pre-existing direct record,
+imported sidecar, numeric history, unknown entry, or unsafe/ambiguous temporary.
+Preflight writes no seed; direct creation commits `create.json`. Committed
+retries use a shared storage/chain validator.
 
-Mutations share `locks/insights.lock` with insight revisions and seed
-creation. A positive non-bool expected revision must match against a full
+Mutations share `locks/records.lock` with seed creation. A positive non-bool expected revision must match against a full
 replay of the item's chain; each change exclusively atomically appends the
 full state to `work-items/<item-id>/<next-rev>.json` and updates its index row.
 Reconstruction requires consecutive revisions, with at most 256 revisions
@@ -786,8 +518,8 @@ with unchanged accepted scope and normal revision CAS. The binding event stores
 for other statuses.
 It validates the exact immutable manifest and retained published membership
 under the snapshot store's `locks/publication.lock`
-then `insights.lock`, holding both through append. `Snapshots.publish` takes only
-the publication lock, never the insights lock. Thus eviction either precedes the
+then `records.lock`, holding both through append. `Snapshots.publish` takes only
+the publication lock, never the records lock. Thus eviction either precedes the
 binding and refuses it, or follows a committed binding.
 
 New transition records carry `delivery_schema: 1`, `delivery` (null before a
@@ -880,8 +612,7 @@ The separately granted `work_items_create` operation calls
 `Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
 self-directed work and splits. The runtime binds `actor` to the role, never a
 model argument. The example grants it only to `worker`; consultation and
-delegation children explicitly forbid it. Creation itself does not assign work,
-make an insight decision or publish; the independent writer readiness gate may
+delegation children explicitly forbid it. Creation itself does not assign work or publish; the independent writer readiness gate may
 admit a run for role-eligible ready work, as described in
 [scheduling](scheduling.md); a read-only role needs the separate
 `work_items_transition` capability and still cannot edit source through its
@@ -892,46 +623,33 @@ unit stopped, while prose `state` is a short working note and typed `next_step` 
 immediate handoff, not a second backlog.
 
 Required arguments are `idempotency_key` (1–128 characters) and `title` (1–200).
-Optional `origin` is exactly `{"insight_id": <id>, "rev": <positive int>}` or
-`{"work_item_id": <wi_id>, "rev": <positive int>}`. Omission stores null.
-The referenced insight (live or archived) or parent item's **current** revision
-must match at first creation under the shared lock. Missing/unsafe references,
-bool revisions, unknown fields and self-parent references are denied; local
-I/O errors propagate. This is provenance, not decision coverage: direct work
-never resolves an unseeded accept/modify decision. Insight staleness retains
-its existing semantics. Null/parent origins project `current_origin_rev: null`,
-`stale: false`, `redecision: null`; parent provenance is an immutable split
-reference, not a dependency or a staleness subscription.
+Optional `origin` is an opaque nonblank string of at most 512 characters, or
+null. Stored seeds may carry an older small JSON object, which is replayed as
+written and never interpreted. A local I/O error propagates; the origin is
+provenance only and grants no routing, lifecycle or dependency semantics.
 
 The actor-scoped ID is `wi_` plus the first 32 hex characters of SHA-256 over
 canonical JSON `["direct-work-item", actor, idempotency_key]`. The immutable
 `work-items/<id>/create.json` contains exactly `kind: "direct"`, `actor`,
-`idempotency_key`, and `work_item` (the revision-1 seed). Direct creation and
-`Insights.decide(..., work_item_intent="create")` share the same seed constructor
-and shape validator; old decision IDs, keys, intent fields and stored seeds
-are not rewritten. A seed without `description` retains the exact v1 field set;
+`idempotency_key`, and `work_item` (the revision-1 seed). Direct creation uses the shared seed constructor and shape validator.
+A seed without `description` retains the exact v1 field set;
 a supplied `description` adds only that field (v2), with no version marker.
 Descriptions must be strings of 1–4000 characters containing non-whitespace;
 whitespace is preserved, and explicit null is invalid. Both seed shapes are
-accepted on reads/replay. New single-seed decisions use the exact decision
-`reason` as their description; explicit task seeds use their task descriptions; readers validate this binding only when the description
-field exists, so old events (including longer reasons) remain replayable.
-New transitions preserve their seed's field set: v1 never gains a description,
+accepted on reads/replay. New transitions preserve their seed's field set: v1 never gains a description,
 and v2 must retain exactly its immutable text, rejecting change or removal.
-No migration or rewrite occurs. Direct seeds never live in decision history. A direct ID
-colliding with a decision event fails closed.
+No migration or rewrite occurs.
 
 First writes return `{record, created: true}`. Exact retries return the original
 creation `{record, created: false}`, not the current transitioned item; a changed
-title, origin, description text or description presence with the same actor/key is denied. Retry comparison precedes
-live reference checks so advancing an insight/parent cannot break replay.
+title, origin, description text or description presence with the same actor/key is denied. Retry comparison precedes further validation so the immutable seed stays stable.
 Callers must retain the key and exact request across cancellation or uncertain
 responses; there is no automatic retry. Atomic exclusive writes commit the seed
 before returning; a pre-commit temporary is never promoted. Replays validate
 the committed chain and do not count as tool progress. Direct items use the
 same open/closed pages, full/delta prompt inventory, by-ID reads, CAS/history,
 256-revision and record/page byte bounds, done-verification gates, event receipts
-and backup/restore tree as decision items.
+and backup/restore tree as imported items.
 
 By-ID reads and history retain the full description. Compact open/closed rows,
 full/delta prompt inventories, and terminal event payloads include only
@@ -944,10 +662,13 @@ or authority. Preview clipping never raises the 8192-canonical-byte row/event
 or 1-MiB response bounds; escaped JSON and all other fields still count, and
 excess remaining after permitted preview clipping fails closed.
 
-Terminal routing resolves only an explicit insight origin's submitter.
-Null/parent provenance remains unknown routing (including for `sources="any"`
-subscriptions); it never falls back to the creator, holder, parent actor or
-transition actor. Exact receipts still identify each terminal item/revision.
+Terminal routing by origin is unknown: origins are opaque, and routing never
+falls back to the creator, holder or transition actor. Exact receipts identify
+each terminal item/revision and are routed by the configured role subscription.
+The operator configures which role subscribes and on what schedule; a terminal
+event admits focused work to that subscriber, and the submitting role takes its
+topic back at its next scheduled run when nothing resolved it.
+Keeping scheduled resolution opt-in avoids routine polling when an explicit wake can admit the same work.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 require a scope change or an explicit doing-to-doing delivery binding. Done
@@ -959,9 +680,9 @@ and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
 actor, and other statuses clear it. New transitions to `blocked` require a
-supported structured wait: a deadline, code-change or exact dependency-result wait, a work-item-only
-`object_resolved` wait on an Insight, exact declared operator question from its
-current holder, or work item (unknown evidence stays unknown), or a `ci` wait pinned to a completed immutable publication
+supported structured wait: a deadline, code-change or exact dependency-result wait,
+a work-item-only `object_resolved` wait on a work item (unknown evidence stays
+unknown), or a `ci` wait pinned to a completed immutable publication
 receipt. Historical blocked records without waits remain readable and are never
 rewritten or released automatically. These waits never assign work. Under configured wait-resolution policy,
 proven object/code-change waits may reopen only their holder with immutable
@@ -994,21 +715,20 @@ event storage, assignment, or an admission decision. See
 [configuration](configuration.md#terminal-work-item-subscriptions) for bounds,
 unknown routing, acknowledgement and crash/retry behavior.
 
-`projection(item_id)` returns one bounded view (`item`, `current_origin_rev`,
-`stale`, `redecision`) without changing the immutable seed or CAS record. A newer
-origin revision is stale until that revision has an `accept`, `modify`, `defer`
-or `reject` decision; `withdraw` does not clear staleness. Re-decisions must
-match the action-specific decision schema; an accept/modify must also match its
-immutable decision-history event and pass seed validation (or the explicit
-no-work contract with no seed). Missing current
-origin data is reported stale, while unsafe or malformed origin records fail
-closed. This projection does not yet gate internal transitions.
+The store provides internal `get(item_id)` plus the locked readers
+`page_open(cursor=None, limit=25)`, `projection(item_id)` and
+`explain(item_id, *, after_rev=0, limit=25)`, the unlocked, non-recovering
+read-only `page_closed(cursor=None, limit=25, status=None, origin=None,
+closed_after=None, closed_before=None)`, and CAS transitions; the runtime exposes the three
+page modes through the single `work_items_read` grant and exposes transitions only through their
+separately granted operations described below. `get()` stays internal-only. Origins are opaque;
+no reader falls back to a creator, holder or transition actor on routing.
 
 `page_open(cursor=None, limit=25)` is the bounded page reader used by the
 explicitly granted `work_items_read` operation and by the project-wide
 `open_work_items` prompt projection. Full and delta prompts use the same
 bounded page, capped by `limits.work_items_prompt` (default 20, range 1–100).
-Insight producers, decision makers, and work-item roles receive it by default;
+Roles holding a work-item capability receive it by default;
 `roles.<name>.context_sections` can include or exclude it. The runtime calls
 the fail-closed reader directly,
 so store errors are not converted into empty inventory. The explicitly granted
@@ -1040,7 +760,7 @@ reader). On reaching the byte bound the reader stops retaining contiguous page
 rows but continues replaying and validating the chain/current status. It retains
 only the current record and bounded page under the existing maximum of 256
 revisions. This read uses recognized temporary recovery under
-`insights.lock`, preserves fail-closed seed/chain validation, and remains
+`records.lock`, preserves fail-closed seed/chain validation, and remains
 observational: it does not account progress or affect scheduling/wakeup.
 
 The same `work_items_read` grant selects a third mode with `closed=true`:
@@ -1048,12 +768,11 @@ The same `work_items_read` grant selects a third mode with `closed=true`:
 closed_after=None, closed_before=None)` pages seeded terminal items (`done` and
 `dropped`) ordered by status, then newest `updated_at` first, then ascending ID.
 The exclusive `cursor` carries the last row's status, update-order key and ID
-so a caller reaches the whole set. `status` (done or dropped), `origin` (the
-insight id), and the timezone-aware `closed_after` / `closed_before` timestamps
+so a caller reaches the whole set. `status` (done or dropped), `origin` (exact opaque text), and the timezone-aware `closed_after` / `closed_before` timestamps
 narrow matches but never cap `total`, which counts all rows after filters.
 Rows and pages are byte-bounded; malformed cursors, filters or committed rows
 fail closed. Unlike the open-page and by-ID readers this mode reads with an
-unlocked, non-recovering store view: it neither acquires `insights.lock` nor
+unlocked, non-recovering store view: it neither acquires `records.lock` nor
 performs atomic-write recovery cleanup. It cannot combine with by-ID `id` or
 `after_rev`, and closed filters require `closed=true`. The response is a fresh
 live view, not a frozen snapshot, and remains observational.
@@ -1077,15 +796,13 @@ on a doing-to-doing transition with unchanged scope (the binding event stores
 acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and new `blocked` transitions require the same
 deadline, code-change or exact dependency-result wait, a work-item-only
-object wait (`{kind:"object_resolved", subject}` with Insight `{type:"insight",id}`,
-record `{type:"record",kind,id,digest}`, or work-item `{type:"work_item",id}`),
+object wait (`{kind:"object_resolved", subject}` with `{type:"work_item",id}`),
 or a work-item-only CI wait (`{kind:"ci", publication_id, checks}` or
 `{kind:"publication_ci", snapshot_id, checks}`). Historical blocked
-records without waits, and historical `insight_decided`/`record_closed` bytes,
-remain readable and are not rewritten. Object waits require substantive Insight
-decision, exact authenticated answer, or validated `done`/`dropped` target
-history respectively. They reject self/cyclic work-item edges and fail closed
-on uncertain traversal; missing is impossible only when established. CI wait results use
+records without waits, and retired object subjects in stored history,
+remain readable and are not rewritten. New object waits require validated
+`done`/`dropped` target history. They reject self/cyclic work-item edges and
+fail closed on uncertain traversal; missing is impossible only when established. CI wait results use
 the host event path only to wake the holder; they never change item status.
 Receipt-ID CI waits
 validate a completed immutable publication receipt at registration and on stored reads,
@@ -1204,7 +921,7 @@ recomputes that manifest from the Git publication tree and rejects mismatch,
 and never filters Git ignored state while claiming an exact whole-snapshot
 match. Schema-1/2 records stay readable and are never rewritten.
 
-Under one `insights.lock` section, the reader scans committed
+Under one `records.lock` section, the reader scans committed
 `decision-history/*.json`, validates and reconstructs every seeded item
 (including closed states), and returns only
 `open`/`doing`/`blocked` rows ordered by status (`doing`, `blocked`, `open`),
@@ -1212,17 +929,8 @@ oldest creation timestamp, then ID. Its bounded opaque cursor carries that full
 exclusive sort key; `total` counts all currently open seeded items,
 independent of the cursor. `overflow_count` counts matching open rows remaining
 after the input cursor and beyond this page; `truncated` is exactly whether that
-count is positive. Accept/modify history events without a `work_item` seed are
-counted as `unseeded_decisions` only while unresolved. An explicit
-`work_item_intent: "none"` resolves coverage without a sidecar or seed.
-Explicit task manifests also resolve coverage, validating every member instead
-of treating the absence of singular `work_item` as an unseeded legacy event.
-`coverage_complete` is true only when every such event has an explicit no-work
-marker or a valid reconciliation sidecar; malformed
-sidecars fail closed rather than claiming coverage. No legacy state is inferred. The prompt carries this count,
-truncation, and coverage state; an incomplete projection is not an exhaustive
-inventory. Rows include current origin staleness/redecision, a structured wait
-for blocked items, and an optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
+count is positive. Rows include a structured wait for blocked items and an optional reason preview
+of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
 8192 canonical bytes per row, and 1 MiB for the complete response; selection
 uses O(limit) row memory plus temporary/alias metadata bounded to at most the
 configured `limits.history_temporaries` entries of each type (default 64, range
@@ -1269,7 +977,7 @@ resolution metadata; decision and resolution reasons are 1024-byte previews.
 Proposal bodies are omitted. The 1–100 row, 8192-byte row, 1-MiB response and
 128-character cursor bounds apply. The exclusive event-ID cursor is opaque;
 pages are live, not a frozen snapshot. Each page scans committed history
-under `insights.lock`, including beyond the cursor, and may recover recognized
+under `records.lock`, including beyond the cursor, and may recover recognized
 temporary writes. Unsafe records fail closed.
 
 `mizu work-items reconcile-legacy PROJECT EVENT_ID` resolves exactly one
@@ -1283,7 +991,7 @@ title, creates no active item or seed, and can cover incomplete origin fields.
 Seeded events and explicit work-item intent are refused without changing the
 disposition.
 
-Under the shared insights lock, reconciliation exclusively creates
+Under the shared records lock, reconciliation exclusively creates
 `work-items/wi_<event-id>/decision-resolution.json`. Ordinary readers refuse an
 unconverted `legacy.json` with an actionable `mizu migrate-work-items` message;
 only the explicit host migration/preflight activation reads the old name, and
@@ -1309,7 +1017,7 @@ or scheduling is added.
 
 The host-only `mizu migrate-work-items` defaults to a bounded, read-only
 readiness scan. `--apply` repeats the complete scan with snapshot-GC exclusions
-and the same insights lock as the reconciliation writer. Unresolved, corrupt,
+and the same records lock as the reconciliation writer. Unresolved, corrupt,
 or incompletely scanned sources block conversion. For each validated legacy
 sidecar, apply uses the native exclusive rename, checks the new file's bytes
 and the absence of the old name, then syncs the item directory where supported.
@@ -1331,160 +1039,12 @@ history scan result, not a claim that deployed data has been reconciled. Keep
 free-text Tasks until an authorized per-event pass proves coverage. These APIs
 do not perform automatic migration, retire Tasks, or change scheduling.
 
-Author withdrawal (`mizu insight withdraw`, submitter or operator only)
-closes a pending proposal with an actor-labelled rev-bound record in
-the same decision store. A revision-current `accept` or `modify` blocks
-withdrawal by default, including on the direct operator CLI; only a runtime
-role already holding `withdraw_insight` can opt in with supplemental
-`withdraw_decided`. Pending, deferred and rejected proposals remain
-withdrawable. Stale expected revisions are refused, repeated withdrawal is
-a no-op, and `reject` keeps meaning substantive rejection. A permitted
-post-decision withdrawal appends its own history record and never removes the
-original decision-history entry. A role with configured
-`decision_events` is additionally admitted by unacknowledged decisions routed
-to it (insight source equals role name in `own` mode, any source when
-`decision_sources = "any"`): the dispatch delivers the current
-finding plus the reason as a `decision_events` field inside the role's ordinary prompt
-(all other granted inputs stay present), described factually by a `decision_task` field,
-records the admission and the
-delivered events under the run directory (sized by the role-effective
-`decision_events_limit`, independent of the terminal batch). Each delivered
-row includes a role/payload-bound opaque `ack_token`. Only tokens explicitly
-selected in `finish.ack_events` become exact per-role receipts after the durable
-successful finish (and publication for writers); finish outcome, summary and
-check waits never imply decision acknowledgement. Omitted rows replay globally
-oldest-first (aware timestamp, event ID), before the prompt limit. There is no
-defer rotation or timestamp watermark. Legacy completion cursors are ignored:
-eligible history conservatively replays because old finishes prove no handling.
-Withdrawn, superseded and revision-stale decisions never emit; history is never
-rewritten. A safely read corrupt per-token receipt isolates only that event
-while unrelated events still deliver; see [the receipt contract](configuration.md#decision-event-receipts)
-for bounds, diagnostics, repair, retry and migration limitations.
-
-In `own` mode a deferral alone still never admits a run: event-triggered and
-unchanged-code dispatch exit unless a substantive event or due wait is pending.
-A deferral rides along when the role runs for other reasons, pending until
-explicitly acknowledged or its topic moves out of eligibility. Admission checks
-substantive pending decisions independently of the prompt-size window, so older
-deferrals cannot hide a substantive admission trigger. The delivered window is
-nevertheless globally oldest-first; role policy defines handling, not mechanism.
-A registered structured wait is an additional reconsideration signal, not a gate
-on delivery; subscribe to substantive actions only to gate on the wait. The revisit
-prose is never parsed as an executable condition. A deferral may instead
-register one structured wait (``deadline``, ``code_change``,
-``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the
-current revision and decision, survives restarts as a recorded file, and is
-checked lazily at dispatch, so a satisfied wait admits focused
-reconsideration without polling or model calls until explicitly handled.
-Structured wait and obligation rows carry a persisted registration identity
-(with a stable digest fallback for legacy absent IDs) and a host-issued token
-bound to role, source and canonical payload. `finish.ack_events` selects handled
-rows, validated before intent alongside decision and terminal tokens. Only after
-a durable successful result/publication does the host remove a selected due
-wait whose registration still matches, or write a create-only per-role exact
-obligation receipt. Empty/omitted selections acknowledge none; partial writes
-leave unwritten rows pending, and replay is idempotent. A mid-run re-registration
-survives even at the same timestamp. Global oldest-first bounded scans filter
-obligation receipts before limiting. Registration reads and token-bearing rows
-are capped at 1 MiB, receipt reads at 4 KiB; corrupt/unsafe receipt paths fail
-closed without repair. CI wait rows sharing `wait_events` always use explicit
-SharedRecords per-record tokens, with current source validation at delivery and
-acknowledgement. Legacy auto-ack files are not imported; a current event without
-a shared receipt replays. See [the CI wait contract](scheduling.md#exact-sha-work-item-ci-waits).
-CI status and check jobs do not use these tokens.
-A ``dependency`` wait names an explicit ``recipient`` role as the visibility route
-(not assignment) and binds the assessed requirement as
-``requires`` (result insight, exact revision, required substantive decision): the completion
-is satisfied only by a revision-current decision matching all three, so a moved result never
-satisfies a stale requirement and dispatch alone never counts as fulfillment. Unsatisfied
-obligations are visible to the named recipient when it runs for other reasons but never admit
-a run on their own, so scheduling the fulfiller stays operator configuration and no new wake
-source is implied; the satisfied completion reaches the requester idempotently with current
-result evidence. Triggers reach scheduling
-without a model poll loop: the writer gate consults decision events and due
-waits before suppressing dispatch, and rendered service definitions add
-platform file triggers (systemd path units, launchd WatchPaths) that invoke
-`mizu run` ahead of the next interval; periodic discovery stays independent
-policy and trigger runs with nothing due report unchanged. Retained run
-records carry their own receipts: admission reasons, finish-intent timestamps
-against command records, read-role writable commands, and verification
-self-consistency are checkable from retained files alone. Revision, a new decision, or
-withdrawal unbinds the wait; unsupported conditions are refused at
-registration, naming the supported kinds instead of implying a schedule.
-
-Insight archival is currently a **storage-only phase**. `inbox/` is the live
-working set. On ingest, well-formed current-revision accept/modify/reject/withdraw
-records at least `limits.retention_days` old (default 31; 0 disables) move to
-`insight-archive.sqlite3`. Pending, deferred, stale and malformed records stay
-live. Under `insights.lock`, each `(id, rev)` row stores the complete normalized
-body (including evidence and provenance), plus the terminal decision and identity
-metadata observed at first archival. A FULL synchronous SQLite transaction and
-directory sync complete before inbox unlink. Commit failure keeps the live copy;
-unlink failure leaves both copies and a retry converges. Conflicting content at
-the same archive key retains the inbox rather than replacing audit. The archive
-uses DELETE rollback journals, never WAL; quiescent backup recovers a hot journal
-before copying the self-contained database. Archive rows are never deleted.
-Decisions remain independently durable in `decisions/` and `decision-history/`.
-
-Current lists, projections, source scans and routine prompts enumerate **only the
-live inbox**, not the complete archive. No archive page/cursor API exists yet;
-this phase does not claim to bound pending work or all listing costs. Exact ID
-reads fall back to the latest archived revision; hex-prefix reads resolve across
-both stores and refuse ambiguity (duplicate copies of one ID count once).
-Identical submit/revise retries preserve the stored record without reopening it.
-A meaningful owner-authorized CAS revision reopens into the inbox, retains the
-SQLite row, and writes the prior-revision audit as before. `history(id)` still
-returns only superseded revisions from `insight-revisions/`, never archived
-current content. Work-item origin checks also resolve archived revisions, and
-storage maintenance retains their snapshot references; unreadable archives
-refuse maintenance. Backups/restores include the archive.
-
-On an ID read only, the
-runtime adds an optional compact `work_item_status` for the original submitter
-when the current decision is accept/modify and its seeded item (including a
-validated open legacy reconciliation) exists. The projection includes item ID,
-status, revision, holder, update time and current-origin staleness, plus only
-small relevant status details. It reads the item from the
-ledger index and validates the current decision; pending, other decisions, drop-only/unresolved legacy records,
-other roles and all list paths keep their existing response shape. This is
-observational only: no reconciliation, transition, progress accounting,
-scheduling or wakeup, and it adds no insights/work-item grant. A work-item
-`done` status is an audited work record only; code completion remains determined
-by the writer's published state. The prompt
-offer keeps the newest `limits.pending_insights` proposals so recent evidence
-is never hidden behind the bound. Worker discretion applies to proposals,
-not to the operator's goal or prohibitions.
-
-Deferral evidence may be gathered by a resolver role holding `insights` (to
-list pending deferrals) plus the `attach_evidence` capability: it uses
-`experiment`/`fetch`/`search` to obtain the missing evidence, then appends an
-attributed, append-only entry to the deferred insight itself, bound to the read
-rev like `revise` but without changing title, body, or rev. Ownership and the
-revise/withdraw rights stay with the submitter only: this is not a revision
-and no non-submitter revise grant exists. The attach advances the inbox
-generation so the decider wakes once; pending lists carry evidence counts with
-full entries behind the read path, and a later decision on the topic reaches
-its submitter with the evidence included. Entries are bounded (at most 16 per
-insight, each at most 8192 chars; bulk belongs in referenced run evidence),
-a full insight refuses further attaches until decided, and a meaningful
-revision archives prior entries with the old rev and starts the new rev empty.
-No non-submitter revise grant exists: ownership never moves.
-A resolver role may opt into cross-source `decision_events` with
-`decision_sources = "any"` next to `decision_events = ["defer"]` (unset keeps
-own-source delivery): matching deferrals from any source remain pending and
-admit focused runs until explicitly acknowledged through `finish.ack_events`, so the
-resolver runs on each new deferral instead of on a clock. Own-source deferrals
-keep ride-along delivery and never admit alone. The operator configures which
-role subscribes, to which actions, and its schedule/model/policy; the submitter
-owns its topic and takes it back at its next scheduled run when nothing resolved
-it. Keeping scheduled resolution opt-in avoids routine polling when explicit
-decision events can admit focused work.
-
-Editor uploads are first atomically claimed into a private ingest directory;
+Editor messages are first atomically claimed into a private ingest directory;
 they are not parsed while still mutable in the Editor outbox. Malformed records
 and non-regular objects are quarantined. A crash after claim can be recovered.
-The captured inbox generation belongs to the beginning of a unit, so proposals
-arriving during that unit do not vanish behind an advanced cursor.
+The outbox claim generation belongs to the beginning of a unit, so messages
+arriving during that unit are delivered on the next ingest, not lost behind an
+advanced cursor.
 
 ## Multiple models and recovery
 
@@ -1582,11 +1142,9 @@ pending child admission/tool refusals stay invocation-local. The returned child
 result is the evidence, not grounds to reclassify a later caller provider fault.
 The caller's own subsequent admissions retain their own host refusal evidence.
 A resumed persistent session receives only an append-only delta (goal pin,
-current snapshot pin, proposals not yet offered, plus an `open_insights`
-statement of the still-undecided backlog with ids, total, and explicit
-truncation so already-offered insights never read as done), never the full
-history again; a new or rotated session receives the full prompt, which
-states the same backlog alongside the full entries. The durable adapter exposes
+current snapshot pin and the ready-work/queue facts not yet offered), never the
+full history again; a new or rotated session receives the full prompt with the
+same current facts. The durable adapter exposes
 no internal compaction event; the harness does not infer one.
 
 `limits.session_delta_details` selects `full` or the default `elide` for both
@@ -1699,15 +1257,16 @@ previous failure evidence before further action. It does not resend the last
 command blindly, run `git reset --hard`, or manufacture a successful observation.
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
-references, capability-gated pending insights and acceptance commands, the
-bounded `open_work_items` page for insight producers, decision makers, and roles holding a work-item capability (`roles.<name>.context_sections` restores or removes optional sections), then trailing volatile `run`,
+references, capability-gated acceptance commands, the bounded `open_work_items`
+page for roles holding a work-item capability (`roles.<name>.context_sections`
+restores or removes optional sections), then trailing volatile `run`,
 `now`, and `timezone` fields so repeated stable content forms a longer cacheable
 prefix); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
-`pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for
+`acceptance_commands`) and `prompt_bytes` as evidence for
 reliability review. Its `open_work_items` metadata (null when the role's prompt carries no inventory) records only `shown`, `total`,
-`overflow_count`, `unseeded_decisions`, and `coverage_complete`, never item text.
+`overflow_count`, and `coverage_complete`, never item text.
 All work judgment lives in the role policies under `policies/`. Likewise the `report`
 fallback document (used by `mizu report` with no LLM) and the smoke probe goal
 are labeled mechanism/test vectors, not policy.

@@ -1,6 +1,8 @@
 # Architecture decisions
 
 One short entry per lasting decision: context, decision, consequence.
+Entries are historical records: they name the mechanism in force when written,
+which later stages may have deleted in favour of queues and policy text.
 Interface schema, bounds, trust, retry/cancel, evidence, and failure
 stay in the module docstrings and docs/.
 
@@ -15,8 +17,8 @@ the editor is a separate capsule. No host shell fallback and no
 permissions that are policy text only.
 
 ## ADR-003 — One integrating writer, many independent observers
-Models and review processes submit evidence or proposals; one worker owns
-integration and records each disposition. Read snapshots anchor to one
+Models and review processes submit evidence or proposals through declared
+queues; one worker owns integration and records each disposition. Read snapshots anchor to one
 published state, avoiding cross-agent edit races.
 
 ## ADR-004 — Explicit update promotion

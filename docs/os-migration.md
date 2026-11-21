@@ -1,9 +1,10 @@
 # Migration to the kernel
 
-This document is the plan for moving Mizu from a harness with a built-in
-development workflow to the kernel specified in [kernel.md](kernel.md). It is
-the end state the project works toward; slices are steps toward it, and a
-stage is complete only when its dedicated code is deleted.
+This document records the plan for moving Mizu from a harness with a built-in
+development workflow to the kernel specified in [kernel.md](kernel.md). Stage 2
+is complete: the proposal, decision, question, answer, notice and receipt
+machinery was deleted from `src/mizu`, and those flows are declared queues and
+policy text. A stage is complete only when its dedicated code is deleted.
 
 ## Why
 
@@ -29,38 +30,23 @@ role policy files. For example, "a proposal is decided by the writer, who
 writes a decision message referring to it" is a sentence in the writer's
 policy and a `decisions` queue in the configuration, not code.
 
-Existing records move once, by an operational conversion that reads the
-legacy files and appends equivalent messages. It ships with the example
-userland, runs under the operator, and is not part of the kernel. For the
-decision family, the operator then runs `stage2_activate.py`: it reapplies the
-idempotent conversion, requires `stage2_verify.py` to pass, and publishes the
-durable `"queues"` authority marker. From then on non-shared decision reads and
-acknowledgements use the declared `proposals`, `decisions` and `receipts`
-queues; there is no dual-write or runtime boolean flag. The same marker switches
-the live producer: ordinary `Insights.submit` and `Insights.decide` append their
-proposal and decision envelopes through that adapter's one writer, and
-activation refuses to publish the marker unless the writer is wired and its
-queue declarations grant the write. Legacy inbox and history writes remain only
-as storage for revisions, work items and waits, never as a second delivery path.
-The production userland adapter is `src/mizu/queue_decision_delivery.py`;
-example queue names, schemas, roles and meanings stay in `examples/development/`.
-The shared authority branch keeps precedence and is unchanged. The record family has its
-own `record-authority.json` marker and `stage2_record_activate.py` gate. Once
-activated, questions, answers, notices and per-record acknowledgements are read
-and written through `questions`, `answers`, `notices` and `record-receipts` by
-`src/mizu/queue_record_delivery.py`, reconstructing the legacy shapes exactly.
-Shared record branches for those families remain only until their own switch is
-verified and the dedicated modules are deleted.
+Existing stored records are converted by operator-run procedures that append
+equivalent messages to the declared queues; they are not part of the kernel or
+of a running role. The example userland declares the `proposals`, `questions`,
+`answers` and `notices` queues with their schemas, roles and wakes. There is no
+authority marker, dual-write path, or adapter left in the runtime: decisions are
+plain-English judgements made by roles under policy, and acknowledgements are
+queue cursors. Old record files appear only as stored data for those conversions
+and as historical manifests; see [operations](operations.md) for the procedures.
 
 ## Stages
 
 Each stage: implement the kernel part, express the affected workflow in the
 example userland, switch the code paths to queues, delete the dedicated code,
-keep CI green. There is no shadow or dual-write period in product code: the
-legacy path stays authoritative until a stage switches, and the switch moves
-authority at once together with the one-time conversion. Measure host CPU of
-an idle deployment and of one change before and after the stages that touch
-the daemon (4 onward).
+keep CI green. There is no shadow or dual-write period in product code: a stage
+switches authority at once together with the one-time conversion, then deletes
+the dedicated code. Measure host CPU of an idle deployment and of one change
+before and after the stages that touch the daemon (4 onward).
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
@@ -76,12 +62,9 @@ the daemon (4 onward).
 
 Authentication of authors, append-only history, fail-closed validation,
 bounded reads, sandbox isolation, grants, budgets and the single-holder
-property of a writable workspace are kernel integrity and stay. While the
-legacy object-shadow verifiers remain in place, they check declared base states
-as well as event-driven terminal states: an insight without a decision and a
-question without a published answer must remain `pending`, while a `defer`
-without a parseable revisit instant is a recorded decision whose projected
-state legitimately stays `pending`.
+property of a writable workspace are kernel integrity and stay. States, waits
+and completion are userland policy over queue messages and work-item records;
+the kernel enforces only integrity and bounds.
 
 ## Done
 

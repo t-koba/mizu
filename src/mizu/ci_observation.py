@@ -288,8 +288,8 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
     capped at ``limit`` and optionally annotated from retained successes.
     Empty means no observed red (poll disabled,
     never polled, unreadable, or last ticks green). Trust: host-side poll
-    cache, adapter facts stay external-untrusted; insight decisions
-    are deliberately ignored so a deferred failure stays current until
+    cache, adapter facts stay external-untrusted; recorded decisions
+    are deliberately ignored so a failure stays current until
     green or superseded. Failure: never raises (unreadable reads as none).
     """
     return ci_failures_projection(project, limit=limit)[0]

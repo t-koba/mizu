@@ -170,22 +170,15 @@ mizu cleanup demo
 - `control.json`, `safe-point.json`: プロジェクトの制御状態（arm / pause 等）と安全点 ★
 - `current.json`, `histories/`: 最新の確定状態を指すアトミックなポインタと不変の公開履歴 ★
 - `snapshots/`, `objects/`: 不変なスナップショットマニフェストとコンテンツオブジェクト ★
-- `inbox/`, `insight-ids/`, `insight-revisions/`, `insight-archive.sqlite3`,
-  `.ingest/`: 提案（Insight）の現行作業集合、ID・改訂の索引、決定済み本文・証拠の
-  永続アーカイブ、Editor取り込み状態 ★
-- `decisions/`, `decision-history/`, `decision-authority.json`,
-  `decision-activation-plan.json`, `decision-activation-report.json`,
-  `decision-cursors/`, `decision-receipts/`, `record-authority.json`,
-  `record-activation-plan.json`, `record-activation-report.json`: 採否判断、判断履歴、判断権限・有効化
-  計画、記録権限と受領記録 ★
-- `work-items/`, `work-item-receipts/`, `obligation-receipts/`, `waits/`,
-  `shared-records/`, `shared-record-receipts/`, `selection/`: 作業項目とその受領・
-  待機・共有記録、選択状態 ★
+- `queues/`: 宣言済みキューのメッセージ、読み取りカーソル、受領記録 ★
+- `work-items/`, `work-item-receipts/`, `shared-records/`,
+  `shared-record-receipts/`, `delivery-settlements/`, `selection/`: 作業項目とその受領・
+  共有記録、実行時の配送決済、選択状態 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
 - `role-state/`: 各役割の現行研究状態の JSON レコード ★（role lock と `.new-*` 一時ファイルは除外。安全に読める不正 JSON は raw のまま保存し、復元後も `unavailable` として扱います）
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
-- `ledger.sqlite3`: 作業項目・insight・現行decisionの現在状態インデックス（backup対象外：履歴から導出され、
+- `ledger.sqlite3`: 作業項目の現在状態インデックス（backup対象外：履歴から導出され、
   restore 後や欠落・旧スキーマ時はレコードロックを取る最初の処理が自動で再構築します）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
@@ -293,7 +286,7 @@ it skips busy locks without pausing/draining and retains its latest result in
 `maintenance/workspace-cache.json`. Workspace-cache policy remains separate from operator `mizu prune`.
 
 Prune does not require pause, but refuses a busy workspace, configured/existing
-role, editor-ingest or insights exclusion. Backup and `storage --apply` still
+role, editor-ingest or project-record exclusion. Backup and `storage --apply` still
 require pause. `[limits].automatic_prune_interval_seconds` (default 86,400; 0 disables both
 automatic run pruning and snapshot GC; manual `mizu prune`/`mizu storage` stay) applies that same validated prune
 (`keep_artifacts=0`, so no count-based artifact deletion) at safe execution
@@ -319,7 +312,7 @@ run retention never prunes it.
 `[limits].snapshot_retention_days` defaults to 31 (integer 0–3650; 0 disables
 snapshot GC only). At the same due boundary, without pause, GC keeps `current.json`,
 its active bounded history window, continuations/fences and all durable citations
-(runs, artifact evidence, live/revised/archived insights, queued/claimed editor
+(runs, artifact evidence, queued/claimed editor
 submissions, every historical work-item delivery/done binding, and exact
 snapshot citations in declared host publisher-outcome records). Superseded
 history generations use immutable file mtime; manifests use timezone-aware
@@ -332,7 +325,7 @@ apply still requires pause.
 
 The automatic snapshot scan fails closed on incomplete/malformed references,
 manifest timestamps, unsafe storage roots or unavailable coordination. It takes
-workspace/role/check-slot/editor/outbox/publication/insights exclusions nonblocking;
+workspace/role/check-slot/editor/outbox/publication/record exclusions nonblocking;
 busy skips without consuming the cadence. Capsule writers share the outbox
 `.submit.lock`; provision access for both accounts in separated editor setups and
 never unlink its live inode. CLI reference writers hold publication through their
@@ -409,11 +402,9 @@ error class. A failed result write may leave no new cadence record; normal
 quarantine recovery handles interrupted sweeps. There is no background timer:
 the next safe boundary retries when due.
 
-Only current open/deferred Insight evidence or nonterminal WorkItems/waits with
-explicit `smoke_refs` pin bundles. Attach IDs with the host `attach_evidence`
-API bound to the Insight revision read, or the WorkItem create/transition/wait
-APIs. Insight decision seeds inherit evidence refs, including task-group seeds;
-direct Insight-origin creation also inherits them. Omitting refs on a WorkItem transition inherits the item's pins; `[]` releases
+Only nonterminal WorkItems/waits with explicit `smoke_refs` pin bundles. Attach
+IDs with the WorkItem create/transition/wait APIs. Omitting refs on a WorkItem
+transition inherits the item's pins; `[]` releases
 its item-level pins. A blocked wait carries its own refs.
 Terminal owner history retains the IDs but no longer retains the payload. A
 path, prose citation, or provider/VCS run ID is **not** a pin. Restore validates
@@ -471,15 +462,6 @@ mizu migrate-records demo          # read-only preview (default)
 mizu pause demo
 mizu migrate-records demo --apply  # requires a paused, quiescent project
 ```
-
-During the stage-2 migration, `mizu kernel-shadow <project> <insight>` compares
-one authoritative insight and its recorded decision with the derived kernel
-objects. It is read-only, accepts an insight ID prefix and prints a JSON report
-with `verification.ok` and any concrete mismatches. `mizu kernel-shadow
-<project> <insight> --reproject` explicitly replays the projection before
-verifying; it only writes kernel objects and never changes the authoritative
-legacy record. Projection failures are also retained as a bounded process-local
-`failures` list in the report.
 
 This operator command inspects only top-level `shared-records/*.json` in the
 project's private data directory. It examines at most 1,000 directory entries
@@ -651,191 +633,6 @@ records the operator actor, clears the inert wait (only blocked items carry
 waits), and leaves the item open and unheld. The command is operator-only and
 cannot be combined with the read-only inventory options of `work-items`.
 
-## 人間からの提案 (Insight)
-
-確定した事実は `mizu status`・`mizu usage`・`mizu insight list/read`・`mizu report` と run 記録から読み取ります（外部チャットツール非依存）。表示は各プロジェクト側で作ります。
-
-人間からの回答や指示は、Insight として投入し、`wake` で再開させます:
-
-```sh
-mizu insight submit demo --title "方針の指示" --body -  # 標準入力から Markdown を投入
-mizu wake demo                                         # 作業再開を指示
-```
-
-Worker が `blocked` で終了した場合、人間への質問事項が状態（state）内に番号付きリストとして記録されます。
-
-### Explicit insight history
-
-```sh
-mizu insight history demo --id '<insight-id>' --limit 6
-mizu insight history demo --id '<insight-id>' --after-rev 6 --limit 6
-```
-
-`Insights.history(id, after_rev=0, limit=None)` and `insight history` return:
-
-```json
-{"records": [], "cursor": 0, "next_cursor": 6, "complete": null}
-```
-
-`cursor` echoes the exclusive, nonnegative integer `--after-rev` (default 0).
-Pass `next_cursor` as the next `--after-rev`, even when `records` is empty.
-`--limit` must be a positive integer; it defaults to and is capped by
-`limits.insight_history_entries` (default 1,000). Each page attempts at most that
-many exact numeric revision paths, returning valid prior records in ascending
-order. Missing, corrupt, unsafe or identity-mismatched files consume the budget
-and advance the cursor without returning a row; no revision directory is scanned.
-One separate exact current lookup validates identity/revision and, when known,
-excludes the current revision and later crash orphans.
-
-`complete` is true only when the known current revision's prior-history end has
-been reached (including an empty history or a cursor already beyond it), false
-when that known end remains, and null when absent current state or a legacy
-current/tombstone without a revision leaves the end unknown. Only true has a
-null `next_cursor`. Completion describes numeric traversal, not gap-free archive
-retention. With an unknown end, even empty pages offer further bounded reads;
-the caller decides when to stop rather than inferring completeness from gaps.
-These are live reads of local recorded state, not a frozen traversal: replaying
-a cursor reads the same range against current storage; a later revision may
-extend the end. Unsafe/corrupt current records fail closed (nonzero CLI exit,
-JSON error on stderr, no partial page); repair before retrying. `read_revision`
-remains an independent exact-reference read, not a history continuation.
-`--after-rev` applies only to history; `--limit` to history/page; `--scope` and
-`--cursor` only to page.
-
-### Explicit insight pages
-
-```sh
-mizu insight page demo --scope live --limit 1000
-mizu insight page demo --scope archive --limit 1000
-mizu insight page demo --scope archive --limit 1000 --cursor '<next_cursor>'
-```
-
-`Insights.list_page(scope="live", limit=30, cursor=None)` and the explicit CLI
-return the same JSON envelope:
-
-```json
-{"items": [], "generation": "<sha256>", "next_cursor": null,
- "has_more": false, "cursor_expires_at": "<UTC ISO-8601>"}
-```
-
-- Scope defaults to `live`; limit defaults to 30 and must be an integer 1–1000.
-  `insight list` is unchanged: a bare JSON array of at most the newest 1000 live
-  summaries. `read` returns the exact full record; prior revisions use the
-  separate history interface below.
-- Live pages enumerate **all** projected inbox rows, not just pending proposals,
-  in ascending `(created_at, id, filename)` order. Items have the same summary
-  fields as `list` (including effective decision and evidence count/timestamp).
-  Generation hashes the complete projected live set, full bodies/evidence and
-  effective decisions, including rows outside this page. A changed generation
-  fails continuation as **stale**; restart without a cursor. Meaningless no-op
-  retries do not invalidate it. Pages hold the insight lock during projection;
-  live work depends on inbox size, never archive size.
-- Archive pages enumerate every immutable archived `(id, rev)` row, including
-  older archived revisions of a subsequently revised insight, plus explicit
-  identity-only legacy tombstones (described below). Body items are bounded
-  summaries with the same shape as `insight list` (id, rev, source, title,
-  timestamps, `decision`, evidence count/timestamp); they carry no `body` or
-  full evidence text. Use `insight read` for the exact full body. `decision`
-  is the original terminal decision captured at archival (not a current
-  mutable decision). Order is ascending archival sequence. The first page
-  captures a sequence high-water mark; indexed keyset reads exclude later
-  appends until a fresh traversal. No total count or full archive scan is
-  needed per page.
-- `next_cursor` is null exactly when `has_more` is false. Carry it unchanged to
-  continue. Replaying the same cursor/limit returns the same page and continuation
-  while the generation is valid; changing limit is allowed. Cursors have a fixed
-  expiry from the first request (`limits.insight_cursor_ttl_seconds`, default one
-  day), never extended by continuation. `cursor_expires_at` reports that deadline
-  even on the final/empty page; it does not expire any stored insight.
-- Malformed, expired, foreign-scope or foreign-project cursors fail with `Denied`
-  (CLI: nonzero exit, JSON error on stderr, no partial page). Stale live cursors
-  and unavailable/corrupt archives also fail explicitly. Restart a stale/expired
-  enumeration; retry transient storage failures after repair. Tokens are bounded,
-  checksummed opaque bookmarks, **not authorization or tamper-proof credentials**;
-  project access remains the caller's responsibility. They bind to the project
-  storage location, so restart after restoring/moving to a different location.
-  Cancellation is normal CLI interruption: no continuation is consumed, so it can
-  be replayed. No model, provider, network or external publication is involved.
-- The first archive page or archive write lazily migrates the original SQLite
-  `(id, rev)` schema in an atomic transaction to an AUTOINCREMENT sequence and
-  unique `(id, rev)` index. Existing record/decision/identity bytes are preserved;
-  legacy rowid order establishes the initial sequence. Ordinary ID reads and
-  snapshot-reference scans work both before and after migration. Migration and
-  page failures do not unlink inbox records. The database remains a single-file
-  DELETE-journal archive at quiescence, covered by normal backup/restore.
-
-The archive retention policy is **permanent**, for both bodies and tombstones.
-`retention_days` governs decided insight live-inbox residence, and cursor TTL
-only governs continuation validity. Neither deletes archive rows; there is no
-archive expiry/deletion setting or API.
-
-Closed bodies deleted by old retention before archive storage was introduced
-cannot be reconstructed. On the first archive page, a **one-time identity
-migration** runs under `insights.lock`, before capturing the page high-water:
-
-- It streams `insight-ids/` once. Each filename must be a valid insight ID plus
-  `.json`; each identity must be a regular, non-hardlinked, non-symlink file of
-  at most 4,096 bytes. Pinned reads reject unsafe path components. JSON must be
-  an object without duplicate keys or non-finite values, with matching `id`, a
-  SHA-256 `sha256`, a timezone-aware `created_at`, and (if present) a positive
-  integer `rev` within SQLite's signed 64-bit range. Unknown fields are not
-  projected into tombstone summaries.
-- An identity produces a tombstone only when its ID has neither a live inbox
-  body nor any archived row. Existing live candidates are read safely (at most
-  1 MiB, allowing full attached evidence) and checked as bodies; existing
-  archived candidates are also checked. Unsafe directories/files, malformed
-  identities/bodies, unexpected identity-directory entries, disappearing
-  candidates and enumeration/I/O failures fail the page explicitly, rather
-  than silently dropping a candidate. Missing identity/inbox directories are
-  empty sets, as for a project that has never received an insight.
-- All tombstones and the completion marker commit in one FULL-synchronous
-  SQLite transaction. Cancellation, a killed writer or a failure before commit
-  rolls back the import. Repair malformed/unsafe local state, then retry the
-  page without a cursor. A failure after commit is also safe to retry: existing
-  rows are never replaced, and the durable marker prevents rescanning. The
-  schema migration above can already have completed independently; its rows
-  remain intact even if identity migration fails.
-- Tombstones append to the existing sequence; their import order is not
-  chronological. They participate in the same indexed keyset/high-water
-  pagination as bodies. After migration, pages do not scan identity files.
-  Pre-migration cursors retain their old high-water and exclude imported rows;
-  start a fresh traversal to include them. The database, tombstones and marker
-  travel together through normal backup/restore.
-
-Promotion registers the same import under the internal install-time operation
-`migrate-insight-identities`; that is a report key, not a CLI command. Inspect
-archived state with `mizu insight page --scope archive <project>`. Preflight
-inventories only identities without a live or archived body using a no-recovery
-archive read. Apply runs under project quiescence and `insights.lock`, is
-idempotent for rows and the marker, and verifies each imported tombstone's exact
-row bytes inside the commit. Source identity files are not removed, because the
-runtime still uses them for live insights; their legacy reader stays until a
-separate change moves those writes to the archive.
-
-Two families are deliberately outside install-time conversion. Per-token
-`decision-receipts/` (and the diagnostics-only `decision-cursors/`) remain the
-live acknowledgement authority for a project with no shared/queue marker;
-the runtime writes them on finish and reads them back to suppress redelivery.
-Retained `insight-ids/` files stay because live submit/revise still write and
-read them for stable-ID dedup and body reconstruction. Promotion reports the
-receipts under `uncovered_families` rather than converting them. Neither reader
-is removable on an already-converted proof: for their authority mode they are
-current, not superseded, so removal would lose live write behaviour. A future
-change may drop either reader only after its live writes move to the new format.
-
-A tombstone summary contains `id`, `body_unavailable: true`, validated
-`created_at`, and `rev` **only if explicitly recorded in the identity** (no
-assumed revision 1). It has no invented title, body, source, origin, evidence,
-decision, snapshot or work-item reference. Existing decisions/revision files
-are not used to reconstruct these fields. Exact ID/prefix reads keep reporting
-`Denied: Insight body unavailable` (not `not found`), even if the original
-identity file is later absent; ambiguous prefixes still fail. A tombstone does
-not authorize submit/revise/evidence/decision/withdraw mutations. Existing
-work-item origin projections use only a revision explicitly present in the
-identity; otherwise the current origin revision is unknown and the item is
-reported stale, not treated as a missing-work-item error. Default `insight list`,
-live pages and routine model context remain live-only.
-
 ### Work-item view (read-only)
 
 The CLI is the canonical task-list reader, including for dashboards. Its pages
@@ -856,12 +653,9 @@ the record lock and never changes, recovers or deletes records or the index
 (SQLite may create its WAL shared-memory files to read). The project is opened with
 `Project(..., read_only=True)`. `--audit` instead takes the record lock,
 replays every work-item history with full validation and compares it with the
-index; it prints `items`, `unseeded_decisions`, `index` (`complete`,
-`partial`, `interrupted`, `outdated` or `missing`), `consistent`,
-`repaired`, and bounded `corrupt`, `divergent` and `divergent_unseeded` lists
-with their counts, plus `insights` with the same checks for inbox records,
-decision pointers (shape and immutable-event binding), prior revisions and
-index divergence. It changes nothing unless `--repair` is also given, which
+index; it prints `items`, `index` (`complete`, `partial`, `interrupted`,
+`outdated` or `missing`), `consistent`, `repaired`, and bounded `corrupt` and
+`divergent` lists with their counts. It changes nothing unless `--repair` is also given, which
 rebuilds the index when every history validates. Writers wait for the audit.
 
 - Options and defaults: `--limit` is the open page size (default 25, exact int
@@ -895,8 +689,7 @@ rebuilds the index when every history validates. Writers wait for the audit.
   Each row also has `event_acknowledgements`: a role-name-sorted mapping of **every**
   project role whose `work_item_events` includes that status and whose effective
   `work_item_sources` route matches, to a boolean exact receipt state. `own`
-  matches the origin insight submitter, never the transition actor; unknown
-  origins match only `any`. Nonmatching/unsubscribed roles are absent, and no
+  matches the transition actor. Nonmatching/unsubscribed roles are absent, and no
   matches produces `{}`. True means the exact `work_item:<id>:<rev>` receipt
   exists for that role; false means it does not. This is independent of the
   ten-ID summary sample, including for older rows outside that sample.
@@ -908,33 +701,24 @@ rebuilds the index when every history validates. Writers wait for the audit.
   disposition inventory, not here.
 - `event_delivery` reports up to 100 roles subscribed to `work_item_events`
   (non-subscribers are omitted), in name order. Each has `role`, `subscribed`
-  terminal types, `sources` (effective `work_item_sources`, not decision routing),
+  terminal types, `sources` (effective `work_item_sources`),
   exact `pending` and `acknowledged` counts for the
   current subscription/route, up to 10 oldest `pending_event_ids` and up to 10
   most-recent `acknowledged_event_ids`, plus truncation flags, `unknown_routing`,
-  `routing_complete`, `unseeded_decisions` and `coverage_complete`. It contains
+  `routing_complete` and `coverage_complete`. It contains
   no event payload rows. `total` and `truncated` report role coverage; the
   summary is at most 1 MiB. Counts scan validated seeds/chains and exact
-  receipts, not a timestamp watermark. Unseeded legacy decisions make seeded
-  coverage incomplete; unknown routing is reported independently and excluded
+  receipts, not a timestamp watermark. Unknown routing is reported independently and excluded
   in `own` mode (only explicit `any` opt-in receives it). A matching retained
   event with no per-role receipt is pending even if it predates enabling that
   subscription; receipts persist across unsubscribe/re-subscribe and backup /
   restore. These are current exact receipt counts, not lifetime totals across
-  subscription settings. Dispatch batches are independent per source: the
-  role-effective `work_item_events_limit` bounds terminal delivery while the
-  role-effective `decision_events_limit` bounds only decisions (each a role
-  override when set, else the project `[limits]` default). Delivered decision
-  and terminal work-item rows, structured insight waits and dependency obligations
-  carry `ack_token`; select only handled rows in `finish.ack_events`. Finishing
-  alone acknowledges none of these sources. Unselected rows replay oldest-first,
-  including deferrals; batch limits bound prompt size, not handling. Structured
-  wait consumption matches exact registration IDs, preserving mid-run
-  re-registrations. Per-role exact obligation receipts suppress only handled
-  observations, never assign work or fulfill the requirement. Both apply only
-  after durable result/publication; failures leave unwritten/unselected rows
-  pending. Corrupt/unsafe obligation receipts fail closed without repair. CI
-  waits sharing `wait_events` have no token and retain their current behavior.
+  subscription settings. The role-effective `work_item_events_limit` bounds terminal delivery (a role
+  override when set, else the project `[limits]` default). Delivered terminal
+  work-item rows carry `ack_token`; select only handled rows in
+  `finish.ack_events`. Finishing alone acknowledges none. Unselected rows replay
+  oldest-first; the batch limit bounds prompt size, not handling. CI waits
+  sharing `wait_events` have no token and retain their current behavior.
   The 10-ID samples here are display bounds on a read-only diagnostic, not
   dispatch batches. Open, closed and event-delivery pages are
   individually bounded to 1 MiB (whole document at most 3 MiB plus field names).
@@ -946,7 +730,7 @@ rebuilds the index when every history validates. Writers wait for the audit.
   view. Closing earlier items does not offset-skip later rows, but membership
   is not frozen: items created, closed or transitioned between calls can move
   rows. Restart without a cursor for a fresh traversal.
-- Read-only, no recovery: the view never acquires `insights.lock`, never
+- Read-only, no recovery: the view never acquires `records.lock`, never
   creates the lock file, and never removes atomic-write leftovers. Validated
   `.new-*` orphans/aliases are ignored (never promoted); unsafe or unexpected
   names, malformed records, incomplete chains and bound violations fail closed.
@@ -1013,7 +797,7 @@ The change response is exactly `{items, cursor, next_cursor, has_more}`:
 A blocked work item can use `wait = {kind:"ci", publication_id, checks}` through
 `work_items_transition`. Obtain `publication_id` from a completed publication
 receipt; do not guess a SHA from the current branch head. Supply 1–64 unique
-exact check names (1–256 characters each; the serialized set is at most 2048 UTF-8 bytes). This is not an insight deferral wait.
+exact check names (1–256 characters each; the serialized set is at most 2048 UTF-8 bytes). This is not a retired decision wait.
 Automatic VCS polling and its trusted adapter must be enabled before
 registration; run the polling daemon to observe results.
 Before the receipt exists, use `{kind:"publication_ci", snapshot_id, checks}`
@@ -1081,7 +865,7 @@ mizu publication record demo \
   --projection-schema 1 \
   --projection-algorithm mizu-public-source-v1 \
   --projection-digest fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 \
-  --approval 'GO mizu (insight id)'
+  --approval '<operator approval message id>'
 ```
 
 `--code-digest` names the approved whole capture, not the filtered Git tree.
@@ -1139,7 +923,6 @@ mizu status demo-restored
 - `mizu backup --verify` はアーカイブのメンバー数 (`members`) と既定の復元メンバー上限 (`default_restore_member_limit`) を報告します。メンバー数が既定の 100,000 件を超える場合は、内容を確認したうえで `mizu restore NAME --archive FILE --max-members N` を明示してください。
 - 展開バイト数は独立した 1 GiB 既定値で制限され、大容量時は `--max-bytes` を別途指定します。パストラバーサルや危険なリンクは上限を変更しても拒否されます。
 - バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物、役割ごとの現行研究状態等）です。`role-state/<role>.json` は raw record として保存し、role lock と `.new-*` 一時ファイルは含めません。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
-- `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。`insight list` は live inbox のみ、ID 読み取りはアーカイブも参照します。全件列挙には `insight page --scope live|archive` を使います（前述）。
 
 ## バージョン更新とロールバック
 
@@ -1159,15 +942,10 @@ mizu smoke --live
 昇格（promote）処理時には、導入時に記録されたソースコードのマニフェスト、ファイルのハッシュ値、実行権限ビット、および依存パッケージロックファイルのハッシュ値が検証されます。これは同一運用者によるステージング後の意図しない変更を検知するための仕組みであり、暗号署名の検証や悪意ある別ユーザーによる改ざんを防ぐものではありません。また、インストール済み依存ライブラリの全バイナリ検査や脆弱性スキャンの代わりになるものでもありません。
 
 Use the candidate release's installer. With the configured projects stopped,
-promotion performs bounded checks for flat shared records and legacy work-item
-resolution filenames, and verifies retained insight identities before importing
-missing archive tombstones, before switching `current`. Staging does not touch
-project data. Promotion uses the same bounds as the migration commands: 1,000
-top-level shared-record entries and 10,000 entries per work-item scan. Identity
-conversion streams `insight-ids/` under the project lock and uses the archive's
-existing 4,096-byte pinned read per identity. An unreadable or incomplete scan
-blocks promotion; the installer does not raise the bounds or skip a project on
-retry.
+promotion verifies the staged manifest and dependency locks before switching
+`current`. Staging does not touch project data. Conversion of stored project
+data is a separate operator procedure (see the migration sections above), not
+part of promotion; an unreadable or incomplete verification blocks promotion.
 
 If a conversion is needed, pause the affected project and leave services
 stopped. The installer creates one project archive per affected project, then
@@ -1224,9 +1002,9 @@ mizu explain demo                 # プロジェクトに有効な役割が1つ�
 mizu explain demo --role worker   # 複数役割の場合は対象を明示
 ```
 
-`mizu explain` は単一役割の JSON 根拠ビューを標準出力に返します。トップレベルは `schema_version` / `generated_at` / `project` / `role` / `observation` / `project_facts` / `role_facts` です。`project_facts` は保存済み control（reasonは512文字まで）、プロジェクト全体の現在snapshot、読み取り専用budget peekです。`role_facts` は対象roleのhealth/active記録、設定済みprofile/selector、daemon/interval/calendar/on-change/decision-event/source/CI-wake設定、選択制約、最終run結果（`runs/<id>/result.json`または`error.json`からの`kind`/`status`/`finished_at`のみ）とprobe待機（`selection/<role>-wait.json`からの`next_evaluation_at`と監査run）を含みます。保留中InsightやInsight構造化waitはinbox走査が必要なため対象外とし、`unknowns`に残します。選択制約ではblock key、sponsor project/role、rule、probeのnext timeと`until`、観測時刻での`probe_due`を示します（実際のprobe起動やsponsor認可を確認した意味ではありません）。selectorが設定されたroleでは、run履歴を走査しないため`current_choice`は`unknown`です。selectorがなければ設定済みprofileを示します。出典はローカルのbounded current recordと静的role設定に限り、任意のerror textやInsight本文は出力しません。control/health/activeは各64 KiB、selection stateは既存の1 MiB上限、budget peekは当日ファイルを`limits.budget_day_file_bytes`（既定4 MiB）まで読み、上限超過はcounterなしの`unavailable`として報告します。値を大きくするとstorage/read/parseの資源使用量も比例して増えます。budget peekは`gc`を行いません。コマンドは状態を書き換えず、engine/modelやVCS、service managerを呼びません。欠損・不正な個別記録は`absent` / `unavailable`として値を捏造せず示します。設定やproject/role指定が無効ならstderrにエラーを出して失敗します。修復後はコマンドを再実行してください。
+`mizu explain` は単一役割の JSON 根拠ビューを標準出力に返します。トップレベルは `schema_version` / `generated_at` / `project` / `role` / `observation` / `project_facts` / `role_facts` です。`project_facts` は保存済み control（reasonは512文字まで）、プロジェクト全体の現在snapshot、読み取り専用budget peekです。`role_facts` は対象roleのhealth/active記録、設定済みprofile/selector、daemon/interval/calendar/on-change/キューソース/CI-wake設定、選択制約、最終run結果（`runs/<id>/result.json`または`error.json`からの`kind`/`status`/`finished_at`のみ）とprobe待機（`selection/<role>-wait.json`からの`next_evaluation_at`と監査run）を含みます。保留中キューや構造化waitの内容は走査が必要なため対象外とし、`unknowns`に残します。選択制約ではblock key、sponsor project/role、rule、probeのnext timeと`until`、観測時刻での`probe_due`を示します（実際のprobe起動やsponsor認可を確認した意味ではありません）。selectorが設定されたroleでは、run履歴を走査しないため`current_choice`は`unknown`です。selectorがなければ設定済みprofileを示します。出典はローカルのbounded current recordと静的role設定に限り、任意のerror textやキュー本文は出力しません。control/health/activeは各64 KiB、selection stateは既存の1 MiB上限、budget peekは当日ファイルを`limits.budget_day_file_bytes`（既定4 MiB）まで読み、上限超過はcounterなしの`unavailable`として報告します。値を大きくするとstorage/read/parseの資源使用量も比例して増えます。budget peekは`gc`を行いません。コマンドは状態を書き換えず、engine/modelやVCS、service managerを呼びません。欠損・不正な個別記録は`absent` / `unavailable`として値を捏造せず示します。設定やproject/role指定が無効ならstderrにエラーを出して失敗します。修復後はコマンドを再実行してください。
 
-選択結果の予測、run 履歴の走査、Insight 本文の読み込み、queue や process/service-manager の確認は行いません。正確な次回起動、外部サービス状態、queue 順位、active process の生存・yield 可否、および pending Insight/structured wait は未検査であるため `unknown` として明示します（役割の最終記録 outcome は `role_facts.last_outcome` で報告します）。snapshot の outcome はプロジェクト全体の outcome であり、この役割の outcome ではありません。この出力は複数ファイルをまたぐ非 atomic な記録時点の観測で、scheduler verdict ではなく、役割が実行されるかどうかを示すものではありません。既存の `mizu status` は従来どおりです。
+選択結果の予測、run 履歴の走査、キュー本文の読み込み、process/service-manager の確認は行いません。正確な次回起動、外部サービス状態、queue 順位、active process の生存・yield 可否、および pending キュー/structured wait は未検査であるため `unknown` として明示します（役割の最終記録 outcome は `role_facts.last_outcome` で報告します）。snapshot の outcome はプロジェクト全体の outcome であり、この役割の outcome ではありません。この出力は複数ファイルをまたぐ非 atomic な記録時点の観測で、scheduler verdict ではなく、役割が実行されるかどうかを示すものではありません。既存の `mizu status` は従来どおりです。
 
 ### Local driver-dispatch measurements
 
@@ -1383,7 +1161,7 @@ Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
 `roles.<name>.work_items_doing` may override it (integer **1–100**, the existing
 page-row ceiling). Entering `doing` or transferring an existing `doing` hold
 to a different role counts validated current holders across the ledger atomically
-with the transition CAS under `insights.lock`. The actor comes from the role,
+with the transition CAS under `records.lock`. The actor comes from the role,
 never a tool argument. A denied claim appends nothing; re-read and release
 (`open`), block, complete or drop existing work before retrying. Blocked waits
 consume no doing slot. Lowering the cap never invalidates history: existing
@@ -1413,7 +1191,7 @@ stores `snapshot_id` as null and persists the delivery object; `snapshot_id`
 is refused for other statuses). Use the returned
 revision for the next CAS. Bind before history eviction; a manifest existing
 on disk alone is not sufficient. Binding and publication serialize under the
-publication lock, before the insights lock.
+publication lock, before the records lock.
 
 Once bound, ordinary `done` names that exact ID as `snapshot_id` and requires
 valid embedded verification or matching late retained acceptance. Independent
@@ -1507,63 +1285,13 @@ authorizes no deployment and does not assert that this recovery has been run.
 ## Work-load visibility
 
 There is no project-wide cap on accepted work. Review the bounded
-`open_work_items` page in full and delta prompts: insight producers, decision
-makers, and work-item roles receive its current `total`, `overflow_count`,
-truncation/cursor metadata, and at most `[limits].work_items_prompt` rows by
-default. `roles.<name>.context_sections` can include or exclude this section.
-Use paginated `work_items_read` when granted to inspect further work. The
-writer decides which work to accept, merge, defer, or reject; active `doing`
-slots remain limited separately. Direct create, seeded decisions, and legacy
-reconciliation remain all-or-nothing with exact retry semantics. Validation,
-manifest byte/task bounds, and corrupt-state refusals still apply.
-
-## Producer admission
-
-`[limits].producer_inputs_per_source` holds congested producers (provisional
-default **20**, **0 disables**). This is a provisional congestion threshold,
-not a measured optimum; tune it to project capacity.
-
-Only configured non-writer project roles that hold `submit_insight` are gated;
-the writer remains free to resolve, merge, defer, or reject input at capacity.
-The gate runs before any model or run-slot use, when their role-name source's current unresolved live
-input count (undecided plus deferred; resolved and archive-only history
-excluded) reaches the per-source limit. Independently, `limits.open_work_items`
-(default **0**, disabled) holds opted-in `roles.<name>.held_at_capacity = true`
-producers (default **false**) at the open/doing/blocked threshold. This holds
-only next admission, never work-item seeding or insight decisions. `mizu status`
-reports each held role in `backpressure.held` with its reason and a `thresholds`
-map containing the exact configured bound. Operator, vcs, and
-editor input channels are never role names, so they are never held. The check applies to direct,
-scheduled, event-triggered, and daemon admission, and runs before any event or
-cursor is acknowledged; a held attempt (`skipped: producer-held`) claims no
-run directory, slot, or lock, consumes no event, and leaves every pending
-input durable. Fail closed: when the required load cannot be read, the
-producer is held. A run already in progress may finish; this is an admission
-threshold, never a cancellation.
-
-Release follows the documented wake-semantics default: held producers resume
-only through existing schedules or subscriptions. A skipped run consumes no
-decision, terminal-work-item, wait, CI, or operator event and advances no
-cursor, so repeated state-based triggers coalesce through the existing durable
-stores (decision history receipts, work-item events, waits, CI wake state)
-instead of a duplicate queue or an implicit schedule. The next ordinary
-schedule tick, interval/calendar firing, event trigger with pending input, or
-daemon readiness re-evaluation admits the producer once its counts drop below
-the per-source limit (after inputs are decided) or after an operator
-raises or disables a limit. No separate wake is added and none is needed.
-
-`mizu status` reports the congestion view under `backpressure`: the
-configured per-source limit, the current open-work count, per-producer
-unresolved input counts, held producers, and hold reasons (`per_source_full`,
-`load_unavailable`). Counts come only from the current project's Insights live
-inbox and WorkItems ledger; no private or ignored state is read. Status
-attempts both current counts even when the per-source bound is 0. An unreadable
-metric is reported as `null` with `load_ok: false`; it holds a producer only
-when the enabled per-source metric is unavailable (invalid limits also hold
-fail-closed).
-Admission counting rejects unsafe, unreadable, oversized or malformed live
-rows and decisions, including ID/filename mismatches and invalid revisions
-or decision actions; tolerant prompt/list projections are unchanged.
+`open_work_items` page in full and delta prompts: roles holding a work-item
+capability receive its current `total`, `overflow_count`, truncation/cursor
+metadata, and at most `[limits].work_items_prompt` rows by default.
+`roles.<name>.context_sections` can include or exclude this section.
+Use paginated `work_items_read` when granted to inspect further work. Work-item
+creation and operator-led re-seeding remain all-or-nothing with exact retry
+semantics. Validation, byte bounds and corrupt-state refusals still apply.
 
 ### Failed cooperative safe-point seals
 

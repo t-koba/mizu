@@ -17,7 +17,7 @@ from .protocol import tool_definitions
 
 #: Operations admitted during wrap-up (plus bridge bookkeeping). Everything
 #: else is refused once a per-run bound is reached.
-WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"})
+WRAP_UP_OPS = frozenset({"finish", "research", "attach_evidence"})
 
 
 class ContextLifecycleMixin:

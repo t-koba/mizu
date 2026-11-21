@@ -54,7 +54,7 @@ malformed entries, and a dedicated volume quota is needed for total bytes.
 | `read_file` | Bounded safe read with hash verification |
 | `search_files` | Literal bounded text search; no executable regex or shell |
 | `get_changes` | Anchored published diff |
-| `submit_insight` | Append a proposal file to the dedicated outbox |
+| `write_message` | Append a bounded `title`/`body` message to the outbox; no control authority |
 
 Search accepts a nonempty literal query up to 1,000 characters. Operator policy
 in top-level `[editor]` is captured at export time, not read from live config:
@@ -100,16 +100,12 @@ future engine that sends protocol version or capabilities only in `_meta`, or
 expects `server/discover`, is an explicit compatibility revisit trigger: it must
 be pinned and tested before this handshake or its version list is changed.
 
-After submission, the Worker daemon ingests proposals even while idling.
-Explicit ingestion is also available:
-
-```sh
-mizu insight ingest demo
-mizu insight list demo
-```
-
-Source identity is stamped by ingestion, not trusted from proposal prose. The outbox accepts only `title`/`body`/`base_snapshot`; any `origin`/`source` fields are quarantined. Trusted host callers may record their actual origin alongside the authority channel (`mizu insight submit --origin ...`); model submissions keep runtime-bound provenance with unknown origin. Origin never grants operator approval.
-Worker accepts, changes, defers or rejects with a reason. A human goal change
+After submission, the Worker daemon ingests outbox messages into the configured
+editor queue even while idling. The queue accepts only `title` and `body`;
+any other fields are refused, and the message author is stamped by the host,
+not trusted from prose. Read the messages with `mizu queue demo read <editor-queue>`
+and acknowledge them with `mizu queue demo ack <editor-queue> SEQ`. A role
+decides what a message means under the deployment's policy; a human goal change
 belongs in the operator-owned `PROJECT.md` while paused, not disguised as an
 Editor technical suggestion.
 

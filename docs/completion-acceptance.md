@@ -35,15 +35,15 @@ OpenHands/Aider/Mizuの名称だけで包括的優位性を判定しません。
 
 受入テストはWriterの編集可能範囲の外に固定してください（運用者所有）。Writerが編集したテストの成功は独立した証拠になりません：課題とテストが矛盾する場合、テストの編集・期待値の固定・防御の削除で辻褄を合わせる報酬ハッキングが同じ失敗分類です（外部動機としてSpecGuard概要 arXiv:2610.09159 を参照。形式的検証は導入しません）。`done` の前にはテスト差分を必ず審査してください。
 
-ローカル走査の測定は `python scripts/benchmark.py --files 500 --bytes-per-file 4096 --records 1000 --report private-validation/benchmark.json`。時間とtracemallocピークは現在のファイルシステム上の単回値で、プロセスRSSやモデル性能とは別です。履歴差分は必要な直近manifestまで、Insight/decision/runの表示選択は上限までメモリを保持します。残る全件走査はディレクトリ列挙、Insight/decisionの件数確認、バックアップ・復元です。DBや常駐キャッシュは導入していません。測定証跡は再生成物であり、コミットしない。
+ローカル走査の測定は `python scripts/benchmark.py --files 500 --bytes-per-file 4096 --records 1000 --report private-validation/benchmark.json`。時間とtracemallocピークは現在のファイルシステム上の単回値で、プロセスRSSやモデル性能とは別です。履歴差分は必要な直近manifestまで、キューの開示状況・キューメッセージ/runの表示選択は上限までメモリを保持します。残る全件走査はディレクトリ列挙、キュー条件の件数確認、バックアップ・復元です。DBや常駐キャッシュは導入していません。測定証跡は再生成物であり、コミットしない。
 
 ## ローカルで完了する検査と外部環境の境界
 
 Writerの検証はコードダイジェストと最終スナップショットの表現可能性に結び付きます。コード変更または表現不能項目があれば単位の `done` を拒否します。work-item は先に doing→doing のリビジョンで `snapshot_id` を指定し、保持された公開スナップショットと変更しない受理スコープを明示的に結び付けます（binding イベントの `snapshot_id` は null のまま delivery オブジェクトを保持します）。新しい `done` はその既存 binding と完全一致する `snapshot_id` を要求し、現在の作業空間との一致は要求しません。検証はスナップショット内の有効な digest-bound 証拠、または `Project.effective_verification` が選ぶ遅着した retained acceptance receipt を使います。後者は厳密な receipt ID と acceptance-scope digest を記録し、再読時は現在の設定や index ではなく不変 receipt を検証します。スナップショットは変更しません。`delivered_tree` は binding の code digest です。dropped→done の前進訂正だけを許し、以前の delivery binding と独立した retained acceptance が必須です。過去の dropped リビジョンや旧形式の履歴を書き換えません。詳細は ADR-050 と architecture.md を参照してください。
 
-`tests/test_remaining.py` は、離脱した孫による出力パイプ保持、部分入力失敗、Pi送信期限、ログ保存失敗時の既知利用量、未知量、時差付きdecision、相談キャンセル、並行Writer、模擬UTC日境界、実行中bridgeの回収を検査します。`tests/fault_publication.py` を別プロセスで起動し、オブジェクト・manifest・履歴世代・currentの全write/fsync/link/replace呼出しの前後へEIO/ENOSPC/即時終了を注入します。各回に新しい読み手で公開ポインター、履歴末尾、参照本文を検査します。電源断、実ディスクの枯渇、OSのキャッシュ喪失を模擬成功に含めません。
+`tests/test_remaining.py` は、離脱した孫による出力パイプ保持、部分入力失敗、Pi送信期限、ログ保存失敗時の既知利用量、未知量、タイムゾーン境界、相談キャンセル、並行Writer、模擬UTC日境界、実行中bridgeの回収を検査します。`tests/fault_publication.py` を別プロセスで起動し、オブジェクト・manifest・履歴世代・currentの全write/fsync/link/replace呼出しの前後へEIO/ENOSPC/即時終了を注入します。各回に新しい読み手で公開ポインター、履歴末尾、参照本文を検査します。電源断、実ディスクの枯渇、OSのキャッシュ喪失を模擬成功に含めません。
 
-測定対象はキャプチャ、実体化、履歴、差分、Insight一覧・世代ハッシュ・GC、Editor取込み、利用量run走査、decision一覧、予算GC、配布一覧、pruneのdry-run、バックアップ、復元です。ファイル数・各記録数・時間・Python割当ピークを `private-validation/benchmark.json` に残します（再生成物、コミットしない）。データ作成は計測から除外します。単回測定は性能上限や比較優位性の証明ではありません。
+測定対象はキャプチャ、実体化、履歴、差分、キュー開示状況・キュー読取り、Editor取込み、利用量run走査、予算GC、配布一覧、pruneのdry-run、バックアップ、復元です。ファイル数・各記録数・時間・Python割当ピークを `private-validation/benchmark.json` に残します（再生成物、コミットしない）。データ作成は計測から除外します。単回測定は性能上限や比較優位性の証明ではありません。
 
 比較課題は `examples/comparison/`。`python scripts/comparison.py prepare /tmp/new-comparison-task` で新規ディレクトリへ同じ初期状態とSHA-256一覧を配置します。初期状態で受入テストが失敗し、契約を満たす修正で成功することはオフライン検査済みです。製品ごとに同じ課題の別コピーを用い、前記5シナリオを最低3回実行します。復旧の停止地点は推論中・検証直後・公開直前／直後を別試行にし、待機は入力なし10分、権限は課題外パスへの読取・変更・コマンドを要求して前後ハッシュを保存してください。
 

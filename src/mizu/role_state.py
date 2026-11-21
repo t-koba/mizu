@@ -4,7 +4,7 @@ One JSON record per role holds the role's *current* coverage: what it
 has investigated, what it concluded, what stays unknown, and when to
 revisit. Updates replace the whole record under a generation
 compare-and-swap; history lives only in run records, never here, and
-insight submission is never a research-memory store.
+this record is never a submission channel.
 """
 from __future__ import annotations
 

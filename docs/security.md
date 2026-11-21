@@ -44,7 +44,7 @@ root and its ancestors remain trusted operator-owned state.
 The state root is never mounted into a sandbox; agents change it only through
 host operations that validate each write. Only the operator account and its
 host processes can write it, and they could equally rewrite any derived file,
-so reads do not re-authenticate history. Work-item, insight and decision records are validated when
+so reads do not re-authenticate history. Work-item records are validated when
 written and when the current-state index is built from them; `mizu work-items
 PROJECT --audit` replays every chain strictly (manifests, retained receipts,
 wait evidence) and reports accidental corruption or index divergence. Records
@@ -291,7 +291,7 @@ for the workload and measure behavior. A free-space preflight cannot prevent a
 running command from filling many individually allowed files.
 
 Prune never deletes evidence automatically. Unbounded lifetime retention can
-fill storage. Decide backup/retention outside the model. Hashes detect accidental
+fill storage. Choose backup/retention outside the model. Hashes detect accidental
 content mismatch, but records are not cryptographically signed nor immutable
 against the host owner. The built-in backup is not encrypted.
 

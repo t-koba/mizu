@@ -10,8 +10,8 @@ error behavior and tests. Do not add arbitrary host callbacks for model prose.
 Create a policy in the private policy directory and add a `[roles.NAME]` table
 with profile, workspace, capabilities and optional schedule. Add that role to a
 project's operator-owned `project.toml`. Regenerate units for schedule changes.
-The runtime does not require a new subclass or a new queue. Reuse `submit_insight`
-for observers and retain one integrating writer.
+The runtime does not require a new subclass or a new mechanism. Reuse the declared
+`proposals` queue for observer messages and retain one integrating writer.
 
 ## A new inference engine (not a new provider)
 
