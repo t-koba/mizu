@@ -2344,6 +2344,18 @@ incomplete scan as proof of exact uniqueness. Standalone readers and work-item
 stores use the same defaults when no policy is supplied. These settings do not
 affect receipt writes, CI-request evidence budgets, dispatch or provider reads.
 
+A page no larger than both budgets instead reads the writer-owned key index in
+`evidence/publication-keys` as a complete receipt inventory. Its schema-3
+entries carry each validated receipt's ordering instant and exact filter
+fields, so one bounded fixed-path read supplies the order, filters and match
+count while only that page's receipts are revalidated from bytes and checked
+against the same metadata; continuations therefore reach every indexed receipt
+even when a directory scan would stop early. A missing, stale, incomplete,
+legacy-schema or mismatched index, and any page wider than either budget or
+from a strict reader, falls back to the bounded scan with its `scan_stopped`
+semantics. Index metadata never becomes a caller-visible row without that
+revalidation.
+
 The top-level `[publication]` section owns the local Git HEAD command timeout:
 
 ```toml

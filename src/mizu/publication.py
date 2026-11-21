@@ -23,6 +23,17 @@ observation without changing its publication identity. A filtered projection
 digest is never stored or compared as a ``code_digest``, and no exact
 whole-snapshot match is claimed for a filtered tree. Legacy records stay
 readable and are never rewritten; new external writes require schema 3 or 4.
+
+The writer-owned key index (``publication-keys/receipt-key-index.json``) also
+serves as the complete receipt inventory of a narrow listing. Schema-3 index
+entries carry the ordering instant and exact filter fields of a validated
+receipt, so one bounded fixed-path read can order, filter and count a page
+while only that page's receipts are revalidated from bytes and cross-checked
+against their metadata. An absent, stale, incomplete, legacy or mismatched
+index is never served: the listing falls back to the bounded directory scan
+and keeps reporting its scan bound. Wide listing requests (a page larger
+than either configured bound) and strict readers also use that scan, so the
+policy bounds keep their meaning for ordinary listings.
 """
 from __future__ import annotations
 
@@ -142,7 +153,10 @@ MALFORMED_RECEIPT_NAME = re.compile(r"(?:external|receipt)\.json")
 KEY_INDEX_DIR = "publication-keys"
 KEY_INDEX_FILE = "receipt-key-index.json"
 KEY_INDEX_LOCK = "receipt-key-index.lock"
-KEY_INDEX_SCHEMA = 2
+#: Schema 2 entries carry only identity and a byte digest; schema 3 adds the
+#: listing order/filter metadata. Legacy schema-2 indexes are read-only.
+KEY_INDEX_SCHEMA = 3
+KEY_INDEX_LEGACY_SCHEMA = 2
 KEY_INDEX_BYTES = 1 << 20
 #: Maximum characters of an operator approval or run reference.
 REFERENCE_CHARS = 256
@@ -274,6 +288,20 @@ def _receipt_order(record: dict) -> tuple[int, str]:
     stamp = record.get("recorded_at")
     return (_timestamp_order(stamp) if stamp is not None else 0,
             record["publication_id"])
+
+
+def _index_metadata(record: dict) -> dict:
+    """Listing metadata of one validated receipt, stored in the writer index.
+
+    Unstamped legacy product receipts share order zero; the publication ID
+    carried beside each index entry breaks equal instants. Only the exact
+    filter fields are stored: no caller-visible row is built from this
+    metadata, which is cross-checked with the validated bytes before use.
+    """
+    return {"order": _receipt_order(record)[0],
+            "branch": record["branch"],
+            "code_digest": record["code_digest"],
+            "published_sha": record["published_sha"]}
 
 
 def _external_record(record, publication_id: str) -> dict:
@@ -751,8 +779,21 @@ class Publication:
         return store
 
     @classmethod
-    def _read_key_index(cls, store, policy):
-        """Read and structurally validate the writer-owned key index."""
+    def _read_key_index(cls, store, policy, *, for_listing=False):
+        """Read and structurally validate the writer-owned key index.
+
+        ``for_listing`` reads the same fixed-path artifact as a complete
+        receipt inventory. It checks the schema-3 ordering/filter metadata
+        structurally but applies no receipt-count policy bound here: this
+        reader validates no receipt bytes, and the fixed ``KEY_INDEX_BYTES``
+        read bounds the metadata it may inspect. The caller's bounds instead
+        cap the receipts a listing page validates. Keyed observation validates
+        every indexed receipt, so it keeps the ``policy.record_limit`` entry,
+        key and ID bounds. Legacy schema-2 indexes have no listing metadata
+        and are refused there (the caller falls back to the bounded scan),
+        while keyed observation can still use their witnessed bytes. Failure:
+        ``Denied`` for any invalid index.
+        """
         _, path, _ = _key_index_paths(store)
         try:
             path.lstat()
@@ -768,26 +809,46 @@ class Publication:
             raise Denied("Invalid publication key index") from exc
         if (not isinstance(value, dict)
                 or set(value) != {"schema", "stamp", "entries", "keys", "incomplete"}
-                or value["schema"] != KEY_INDEX_SCHEMA
+                or type(value["schema"]) is not int
+                or value["schema"] not in (KEY_INDEX_LEGACY_SCHEMA, KEY_INDEX_SCHEMA)
+                or (for_listing and value["schema"] != KEY_INDEX_SCHEMA)
                 or type(value["incomplete"]) is not bool):
             raise Denied("Invalid publication key index")
+        legacy = value["schema"] == KEY_INDEX_LEGACY_SCHEMA
         entries, keys, stamp = value["entries"], value["keys"], value["stamp"]
         if (not isinstance(entries, list) or not isinstance(keys, list)
-                or len(entries) > policy.record_limit or len(keys) > policy.record_limit):
+                or (not for_listing and (len(entries) > policy.record_limit
+                                         or len(keys) > policy.record_limit))):
             raise Denied("Invalid publication key index")
         if stamp is not None and (not isinstance(stamp, list) or len(stamp) != 2
                                   or any(type(part) is not int for part in stamp)):
             raise Denied("Invalid publication key index")
         from .vcs import check_branch
+        fields = ({"publication_id", "kind", "sha256"} if legacy else
+                  {"publication_id", "kind", "sha256", "order", "branch",
+                   "code_digest", "published_sha"})
+        entry_ids = set()
         for entry in entries:
             if (not isinstance(entry, dict)
-                    or set(entry) != {"publication_id", "kind", "sha256"}
+                    or set(entry) != fields
                     or not isinstance(entry["publication_id"], str)
                     or not DIGEST.fullmatch(entry["publication_id"])
+                    or entry["publication_id"] in entry_ids
                     or entry["kind"] not in ("external", "receipt")
                     or not isinstance(entry["sha256"], str)
                     or not DIGEST.fullmatch(entry["sha256"])):
                 raise Denied("Invalid publication key index")
+            entry_ids.add(entry["publication_id"])
+            if not legacy:
+                order = entry["order"]
+                # A cursor must be able to name every stored order exactly.
+                if (type(order) is not int or order < 0 or order >= 10 ** 18
+                        or not isinstance(entry["code_digest"], str)
+                        or not DIGEST.fullmatch(entry["code_digest"])
+                        or not isinstance(entry["published_sha"], str)
+                        or not SHA.fullmatch(entry["published_sha"])):
+                    raise Denied("Invalid publication key index")
+                check_branch(entry["branch"])
         indexed_ids = set()
         for key in keys:
             if not isinstance(key, dict):
@@ -797,7 +858,7 @@ class Publication:
                     or not isinstance(key["code_digest"], str)
                     or not DIGEST.fullmatch(key["code_digest"])
                     or not isinstance(ids, list) or not ids
-                    or len(ids) > policy.record_limit):
+                    or (not for_listing and len(ids) > policy.record_limit)):
                 raise Denied("Invalid publication key index")
             check_branch(key["branch"])
             for publication_id in ids:
@@ -806,7 +867,7 @@ class Publication:
                         or publication_id in indexed_ids):
                     raise Denied("Invalid publication key index")
                 indexed_ids.add(publication_id)
-        if indexed_ids != {entry["publication_id"] for entry in entries}:
+        if indexed_ids != entry_ids:
             raise Denied("Invalid publication key index")
         return value
 
@@ -852,7 +913,7 @@ class Publication:
                 incomplete = True
                 continue
             entries.append({"publication_id": publication_id, "kind": kind,
-                            "sha256": digest(raw)})
+                            "sha256": digest(raw), **_index_metadata(receipt)})
             key = (receipt["branch"], receipt["code_digest"])
             keys.setdefault(key, []).append(publication_id)
         return {"schema": KEY_INDEX_SCHEMA, "stamp": _directory_stamp(store.root),
@@ -889,7 +950,7 @@ class Publication:
             index = cls._build_key_index(store, policy)
         publication_id = record["publication_id"]
         entry = {"publication_id": publication_id, "kind": kind,
-                 "sha256": digest(raw)}
+                 "sha256": digest(raw), **_index_metadata(record)}
         entries = [item for item in index["entries"]
                    if not (item["publication_id"] == publication_id and item["kind"] == kind)]
         entries.append(entry)
@@ -1007,6 +1068,61 @@ class Publication:
         return records, scan_stopped
 
     @classmethod
+    def _index_page(cls, project_root, *, limit, policy, code_digest, branch,
+                    published_sha, cursor_key):
+        """Build one page from the writer's complete receipt index, or None.
+
+        A narrow page (one whose size fits both configured bounds) validates
+        at most ``limit`` receipts; a wide page stays on the bounded directory
+        scan so the policy still bounds ordinary listings. The index is one
+        bounded fixed-path read, and its fresh, complete, structurally checked
+        schema-3 metadata supplies the inventory, order, filters and count.
+        Every page row is revalidated from its no-follow bounded receipt bytes
+        and checked against that metadata; any disagreement, unreadable
+        receipt or unusable index falls back to the bounded scan, which is
+        the only path a strict reader takes. Failure: ``None`` means "use the
+        scan", never "no receipt exists".
+        """
+        if limit > min(policy.name_processing_limit, policy.record_limit):
+            return None
+        try:
+            store = cls._receipt_store(project_root)
+            index = cls._read_key_index(store, policy, for_listing=True)
+        except (Denied, LimitExceeded, OSError):
+            return None
+        if (index is None or index["incomplete"]
+                or index["stamp"] != _directory_stamp(store.root)):
+            return None
+        matches = []
+        for entry in index["entries"]:
+            if ((code_digest is not None and entry["code_digest"] != code_digest)
+                    or (branch is not None and entry["branch"] != branch)
+                    or (published_sha is not None
+                        and entry["published_sha"] != published_sha)):
+                continue
+            matches.append(((entry["order"], entry["publication_id"]), entry))
+        total = len(matches)
+        matches.sort(key=lambda item: item[0], reverse=True)
+        if cursor_key is not None:
+            matches = [item for item in matches if item[0] < cursor_key]
+        page = []
+        for key, entry in matches[:limit]:
+            try:
+                record = cls.read_receipt(project_root, entry["publication_id"])
+            except (Denied, LimitExceeded, OSError):
+                return None
+            if (_receipt_order(record) != key
+                    or record["branch"] != entry["branch"]
+                    or record["code_digest"] != entry["code_digest"]
+                    or record["published_sha"] != entry["published_sha"]):
+                return None
+            page.append((key, _summary(record)))
+        more = len(matches) > len(page)
+        return {"publications": [summary for _, summary in page], "total": total,
+                "truncated": more, "scan_stopped": False,
+                "next_cursor": _listing_cursor_token(page[-1][0]) if more else None}
+
+    @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
                       branch: str | None = None, published_sha: str | None = None,
                       limit: int = 100, cursor: str | None = None, strict: bool = False,
@@ -1030,16 +1146,22 @@ class Publication:
         exact code digest, branch and published SHA matches.
         Bounds: at most 100 entries per page; cursors are opaque strings of at
         most 128 characters; publication_evidence policy bounds name processing
-        and candidate validation (defaults 10000/1000). All directory names
-        are materialized and sorted before these bounds apply; they do not
-        bound the initial enumeration or its memory.
+        and candidate validation (defaults 10000/1000). A page no larger than
+        both bounds reads the writer's bounded key index as a complete
+        inventory and validates only that page's receipts; wider pages and
+        strict readers use the bounded directory scan. On that scan all
+        directory names are materialized and sorted before these bounds apply;
+        they do not bound the initial enumeration or its memory.
         Trust: locally recorded evidence; an unreadable, oversized or
         invalid record is skipped rather than returned unvalidated, and it
-        never denies the valid records beside it. Failure: ``Denied`` on
-        invalid arguments or cursor; a missing publications directory lists
-        nothing. Internal ``strict`` consumers refuse any unreadable
-        candidate rather than treating skipped corrupt evidence as proof of
-        uniqueness.
+        never denies the valid records beside it. Index metadata is
+        structurally checked, pinned to the current directory stamp and
+        cross-checked against each revalidated page receipt; an unusable index
+        falls back to the scan rather than serving unvalidated rows. Failure:
+        ``Denied`` on invalid arguments or cursor; a missing publications
+        directory lists nothing. Internal ``strict`` consumers refuse any
+        unreadable candidate rather than treating skipped corrupt evidence as
+        proof of uniqueness.
         """
         policy = policy if policy is not None else PublicationEvidence()
         cursor_key = _listing_cursor_key(cursor)
@@ -1054,6 +1176,12 @@ class Publication:
         if branch is not None:
             from .vcs import check_branch
             check_branch(branch)
+        if not strict:
+            page = cls._index_page(
+                project_root, limit=limit, policy=policy, code_digest=code_digest,
+                branch=branch, published_sha=published_sha, cursor_key=cursor_key)
+            if page is not None:
+                return page
         names = cls._receipt_names(project_root)
         entries, scan_stopped = cls._scan_receipts(
             project_root, names, strict=strict, policy=policy)

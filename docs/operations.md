@@ -793,7 +793,13 @@ more matches follow this page), `scan_stopped` (whether a scan bound cut the
 search short, so `total` is a lower bound and a receipt may exist beyond it)
 and `next_cursor` (pass it as `--cursor` to fetch the following page; null on
 the last page). A record that cannot be read is skipped, never listed
-unvalidated.
+unvalidated. A page no larger than both `[publication_evidence]` budgets reads
+the writer-owned key index as a complete inventory, so continuations and exact
+filters reach every indexed receipt even when a directory scan would stop
+early; only that page's receipts are revalidated before being returned. A
+missing, stale, incomplete or mismatched index, a wider page or a strict reader
+uses the bounded scan, where `scan_stopped` still means the count is a lower
+bound.
 
 A role discovers the same receipts with the `vcs_read` op `publications`
 (`{"op":"publications"}`, optionally with `code_digest`, `branch`,

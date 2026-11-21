@@ -215,6 +215,50 @@ class ExternalPublicationTests(Fixture):
         self.assertFalse(page["truncated"])
         self.assertIsNone(page["next_cursor"])
 
+        # The writer's index is a complete inventory: bounds smaller than the
+        # five-receipt inventory do not hide a receipt from a narrow page.
+        directory = self.root / "evidence" / "publications"
+        names = sorted(path.name for path in directory.iterdir()
+                       if publication.RECEIPT_FILE.fullmatch(path.name))
+        prefix = {name.split(".")[0] for name in names[:3]}
+        self.assertEqual(len(prefix), 3)
+        narrow = PublicationEvidence(name_processing_limit=3, record_limit=3)
+        page = Publication.list_receipts(self.root, limit=1, policy=narrow)
+        self.assertEqual(page["total"], 5)
+        self.assertFalse(page["scan_stopped"])
+        self.assertEqual([row["publication_id"] for row in page["publications"]],
+                         [newest[0]])
+        narrow_seen = [newest[0]]
+        cursor = page["next_cursor"]
+        while cursor is not None:
+            page = Publication.list_receipts(self.root, limit=1, cursor=cursor,
+                                             policy=narrow)
+            self.assertEqual(page["total"], 5)
+            self.assertFalse(page["scan_stopped"])
+            self.assertEqual(len(page["publications"]), 1)
+            narrow_seen.extend(row["publication_id"] for row in page["publications"])
+            self.assertLessEqual(len(narrow_seen), len(newest))
+            cursor = page["next_cursor"]
+        self.assertEqual(narrow_seen, newest)  # the oldest is the last row
+        self.assertIsNone(cursor)
+
+        outside = next(record for record in records
+                       if record["publication_id"] not in prefix)
+        bounded = Publication.list_receipts(self.root, limit=5, policy=narrow)
+        self.assertNotIn(outside["publication_id"],
+                         [row["publication_id"] for row in bounded["publications"]])
+        self.assertTrue(bounded["scan_stopped"])
+        for filters, size in (
+                ({"code_digest": outside["code_digest"]}, 1),
+                ({"published_sha": outside["published_sha"]}, 1),
+                ({"branch": outside["branch"]}, 3)):
+            with self.subTest(filters=filters):
+                found = Publication.list_receipts(self.root, limit=size,
+                                                  policy=narrow, **filters)
+                self.assertIn(outside["publication_id"],
+                              [row["publication_id"] for row in found["publications"]])
+                self.assertFalse(found["scan_stopped"])
+
     def test_equal_instants_break_by_publication_id_descending(self):
         with patch("mizu.publication.now", return_value="2026-03-01T00:00:00+00:00"):
             ids = [self.record(published_sha="%040x" % index,
@@ -295,6 +339,50 @@ class ExternalPublicationTests(Fixture):
         complete = Publication.list_receipts(self.root)
         self.assertFalse(complete["scan_stopped"])
         self.assertEqual(complete["total"], 3)
+
+    def test_unusable_index_falls_back_to_the_bounded_scan(self):
+        with patch("mizu.publication.now", side_effect=[
+                "2026-04-01T00:00:00+00:00", "2026-04-02T00:00:00+00:00",
+                "2026-04-03T00:00:00+00:00"]):
+            records = [self.record(published_sha="%040x" % index,
+                                   code_digest="%064x" % index)
+                       for index in range(3)]
+        policy = PublicationEvidence(name_processing_limit=1, record_limit=1)
+        path = (self.root / "evidence" / publication.KEY_INDEX_DIR
+                / publication.KEY_INDEX_FILE)
+        original = path.read_bytes()
+        fresh = Publication.list_receipts(self.root, limit=1, policy=policy)
+        self.assertFalse(fresh["scan_stopped"])
+        self.assertEqual(fresh["total"], 3)
+        self.assertEqual([row["publication_id"] for row in fresh["publications"]],
+                         [records[-1]["publication_id"]])
+
+        value = json.loads(original)
+        stale = dict(value, stamp=[value["stamp"][0] + 1, value["stamp"][1]])
+        incomplete = dict(value, incomplete=True)
+        legacy = dict(value, schema=publication.KEY_INDEX_LEGACY_SCHEMA)
+        value["entries"][-1]["published_sha"] = "%040x" % 9
+        mismatched = value
+        variants = (b"{}", canonical(stale), canonical(incomplete),
+                    canonical(legacy), canonical(mismatched))
+        for bad in variants:
+            with self.subTest(index=bad[:40]):
+                path.write_bytes(bad)
+                with patch.object(Publication, "_build_key_index",
+                                  side_effect=AssertionError("index rebuilt")):
+                    page = Publication.list_receipts(self.root, limit=1, policy=policy)
+                # The bounded scan, not the unusable index, answers: its count
+                # is a lower bound and it is never mistaken for absence.
+                self.assertTrue(page["scan_stopped"])
+                self.assertLess(page["total"], 3)
+        path.unlink()
+        with patch.object(Publication, "_build_key_index",
+                          side_effect=AssertionError("index rebuilt")):
+            page = Publication.list_receipts(self.root, limit=1, policy=policy)
+        self.assertTrue(page["scan_stopped"])
+        path.write_bytes(original)
+        self.assertFalse(Publication.list_receipts(
+            self.root, limit=1, policy=policy)["scan_stopped"])
 
     def test_oversized_record_is_skipped_and_never_overwritten(self):
         record = self.record()
@@ -1292,7 +1380,10 @@ class ReceiptWriteCapacityTests(Fixture):
         self.assertFalse(value["incomplete"])
         self.assertEqual(value["entries"], [
             {"publication_id": receipt["publication_id"], "kind": "external",
-             "sha256": digest(raw)}])
+             "sha256": digest(raw),
+             "order": publication._receipt_order(receipt)[0],
+             "branch": receipt["branch"], "code_digest": receipt["code_digest"],
+             "published_sha": receipt["published_sha"]}])
         self.assertEqual(value["keys"], [
             {"branch": receipt["branch"], "code_digest": receipt["code_digest"],
              "publication_ids": [receipt["publication_id"]]}])

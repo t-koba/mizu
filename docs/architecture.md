@@ -893,8 +893,16 @@ SHA, with the match count across all pages, a `truncated` flag, a `next_cursor`
 to continue after the last row and a `scan_stopped` flag so a caller can tell an
 absent receipt from one the scan never reached. An unreadable,
 oversized or invalid record is skipped, never returned unvalidated, and it
-never denies the valid records beside it. The same validation path lets an
-exact-SHA CI wait pin a `publication_id` to either receipt shape.
+never denies the valid records beside it. A narrow page reads the writer-owned
+key index as a complete inventory instead: its schema-3 entries carry the
+ordering instant and exact filter fields of validated receipts, one bounded
+fixed-path read supplies the page order, filters and match count, and only that
+page's receipts are revalidated from bytes and checked against the metadata,
+so continuations and exact filters reach receipts beyond a stopped scan. A
+missing, stale, incomplete, legacy or mismatched index, a wider page or a
+strict reader uses the bounded directory scan and its `scan_stopped` semantics.
+The same validation path lets an exact-SHA CI wait pin a `publication_id` to
+either receipt shape.
 
 A product receipt may carry an optional lineage observation returned by the
 VCS adapter and bound by Mizu to the project-specific `project.toml` `[vcs.lineage_target]`
