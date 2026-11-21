@@ -14,6 +14,7 @@ import { typeSchema } from '../adapters/pi-durable/bridge-client.mjs';
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
@@ -1043,6 +1044,122 @@ test('launcher settles a model-admission failure from its process entrypoint', {
     assert.match(result.detail, /synthetic local admission refusal/);
   } finally {
     await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('launcher delivers a steer notification through the real reportUsage path', { timeout: LAUNCHER_TEST_TIMEOUT_MS }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-steer-launcher-'));
+  const operations = [];
+  const prompts = [];
+  let steerCalls = 0;
+  let providerCalls = 0;
+  const bridge = createServer(socket => {
+    let input = '';
+    let handled = false;
+    socket.on('data', chunk => {
+      input += chunk.toString('utf8');
+      const newline = input.indexOf('\n');
+      if (handled || newline < 0) return;
+      handled = true;
+      const request = JSON.parse(input.slice(0, newline));
+      operations.push(request.operation);
+      let result = { recorded: true };
+      if (request.operation === '_budget') result = { admitted: true };
+      if (request.operation === '_check_steer') {
+        steerCalls++;
+        result = { messages: steerCalls === 1 ? [{
+          id: 'owned-job',
+          message: 'MIZU CHECK RESULT (notification, not acceptance): job owned-job is completed (passed=true).',
+        }] : [] };
+      }
+      socket.end(JSON.stringify({ ok: true, result }) + '\n');
+    });
+  });
+  const provider = createHttpServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk.toString('utf8'); });
+    request.on('end', () => {
+      providerCalls++;
+      prompts.push(body);
+      const chunk = value => `data: ${JSON.stringify(value)}\n\n`;
+      let wire = '';
+      if (providerCalls === 1) {
+        wire += chunk({ id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'gpt-4o-mini',
+          choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_probe',
+            type: 'function', function: { name: 'probe', arguments: '{}' } }] }, finish_reason: null }] });
+        wire += chunk({ id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'gpt-4o-mini',
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } });
+      } else {
+        wire += chunk({ id: 'c2', object: 'chat.completion.chunk', created: 2, model: 'gpt-4o-mini',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'done' }, finish_reason: null }] });
+        wire += chunk({ id: 'c2', object: 'chat.completion.chunk', created: 2, model: 'gpt-4o-mini',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 15, completion_tokens: 3, total_tokens: 18 } });
+      }
+      wire += 'data: [DONE]\n\n';
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(wire);
+    });
+  });
+  try {
+    await Promise.all([
+      new Promise((resolve, reject) => { bridge.once('error', reject); bridge.listen(0, '127.0.0.1', resolve); }),
+      new Promise((resolve, reject) => { provider.once('error', reject); provider.listen(0, '127.0.0.1', resolve); }),
+    ]);
+    const bridgePort = bridge.address().port;
+    const providerPort = provider.address().port;
+    const bridgePath = join(directory, 'bridge.json');
+    const configPath = join(directory, 'effective.json');
+    writeFileSync(bridgePath, JSON.stringify({ transport: 'tcp', host: '127.0.0.1', port: bridgePort,
+      timeout_ms: 5000, token: 'offline-test', joined_operations: [] }));
+    writeFileSync(join(directory, 'models.json'), JSON.stringify({ providers: { openai: {
+      name: 'OpenAI', api: 'openai-completions', baseUrl: `http://127.0.0.1:${providerPort}/v1`,
+      models: [{ id: 'gpt-4o-mini', name: 'mini', cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }],
+    } } }));
+    writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
+      instructions: 'answer', store: join(directory, 'store.sqlite'), requestId: 'steer-launcher',
+      prompt: 'start', cwd: directory, authPath: join(directory, 'auth.json'),
+      modelsPath: join(directory, 'models.json'), tools: [
+        { name: 'probe', description: 'Probe', operation: 'probe',
+          inputSchema: { type: 'object', properties: {}, required: [] } },
+        { name: 'finish', description: 'Finish', operation: 'finish',
+          inputSchema: { type: 'object', properties: {}, required: [] } },
+      ] }));
+    const launcher = launcherPath();
+    const childEnv = { ...process.env, HOME: directory, USERPROFILE: directory, TMP: directory,
+      TEMP: directory, MIZU_BRIDGE_CONFIG: bridgePath, OPENAI_API_KEY: 'offline-test-key' };
+    const child = spawn(process.execPath, [launcher, configPath], {
+      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: LAUNCHER_CHILD_TIMEOUT_MS });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const { code, signal } = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (exitCode, exitSignal) => resolve({ code: exitCode, signal: exitSignal }));
+    });
+    assert.equal(code, 0, stderr);
+    assert.equal(signal, null);
+    const result = JSON.parse(stdout.trim());
+    assert.equal(result.durable_result, true);
+    assert.equal(result.status, 'done');
+    assert.equal(result.requests, 2);
+    // Both provider requests keep their normal admission/usage accounting.
+    assert.equal(result.observed.length, 2);
+    assert.equal(result.usage.input, 25);
+    // The glue reaches _check_steer from reportUsage, and the durable steer
+    // input is present in the next real model request, not just in a helper.
+    assert.ok(operations.includes('_check_steer'), operations.join(','));
+    assert.ok(prompts.some(body => body.includes('MIZU CHECK RESULT (notification, not acceptance): job owned-job is completed')),
+      'the running model never saw the check notification');
+  } finally {
+    await Promise.all([
+      new Promise(resolve => bridge.close(resolve)),
+      new Promise(resolve => provider.close(resolve)),
+    ]);
     await rm(directory, { recursive: true, force: true });
   }
 });
