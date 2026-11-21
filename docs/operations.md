@@ -443,125 +443,23 @@ mizu storage demo --apply                   # 未参照マニフェストと孤�
 
 `mizu storage` は履歴・run・成果物・提案が参照するスナップショットと、未参照マニフェストおよび孤立オブジェクトの件数・バイト数・ bounded sample を報告します。あわせて共有 web-cache（件数・バイト・`cache_seconds` に対する期限切れ）の容量、および durable なセッション証跡（`session.json` 件数・ファイル数・バイト数、削除対象外）の容量を報告します。既定（`--apply` なし）は何も削除・移動・書換えしないため、writer 実行中でも安全に再試行できます。`--apply` は pause したプロジェクトでのみ実行でき、未参照マニフェストと孤立オブジェクトだけを削除します（履歴世代・run・成果物・セッション・判断・提案は保持）。存在するが読めない・壊れた・1 MiB 超・形不正の参照、走査失敗、または `host_record_reference_scan_entries`（既定 5,000）の走査予算到達は `reference_records_skipped` に数え、既存の `snapshots.skipped`（マニフェスト）および `work_item_events_skipped` と同様に `--apply` を削除前に拒否します（予算ちょうどで EOF の場合も不完全とし、参照不在の証明にしない）。`reference_records_skipped` は一意のレコード/走査パス数です（active 履歴世代の重複計上なし）。プレビューは `reference_records_skipped_sample` に root からの相対パスを最大 100 件ソートして示し、`reference_records_skipped_truncated` で打切りを表します。`--apply` の拒否メッセージは先頭数件のパスを示すため、不完全な参照元を特定できます。`snapshots.skipped` も `skipped_sample`/`skipped_truncated` を、`work_item_events_skipped` も `work_item_events_skipped_sample`/`work_item_events_skipped_truncated` を持ち、reclaim プレビューでは `manifest_skipped_sample`/`manifest_skipped_truncated` と同名の work-item 項目として示します。各件数はパス集合から導出するため件数とサンプルは食い違わず、各拒否メッセージも先頭数件のパスを示します。JSON `null` レコード、不正な非 null スナップショット ID、履歴の名前・要素・ダイジェスト・公開先との終端不一致も不完全とします。公開ポインターと履歴の読取りにも 1 MiB 上限と symlink 非追従を適用し、読めた有効な ID はプレビューに残します。任意の run 記録や `artifacts/latest.json` が存在しないことは正常で数えませんが、成果物ディレクトリに `evidence.json` がない場合は不完全として数えます。削除内容は `maintenance/storage-*.json` に記録され、バックアップ対象となります。2 回目の実行で新規の孤立オブジェクトまで収束します。
 
-### Migrate flat shared records
+### Upgrading data from older deployments
 
-Promotion converts flat shared records on paused projects after creating and
-verifying a backup of each affected project. Staging alone does not convert
-anything. See [upgrade and rollback](#バージョン更新とロールバック) for backup
-locations and recovery. The explicit dry-run and `--apply` commands remain
-available for diagnosis and repair.
+The current product has no migration commands: there is no `migrate-records`
+or `migrate-work-items` subcommand, and no `--legacy` inventory or
+`reconcile-legacy` option. Role-to-role information lives in declared
+[queues](kernel.md#queues), and work items are immutable records under
+`work-items/`. Nothing converts old flat shared-record files or legacy
+resolution sidecars, and no runtime diagnostic tells an operator to run a
+migration command.
 
-The runtime no longer reads flat shared records. It refuses to start work
-units if a top-level `.json` entry remains in `shared-records/`, and tells the
-operator to run `mizu migrate-records <project> --apply`. It also refuses if
-it cannot check the directory or reaches 1,000 entries without confirming
-absence. An absent directory is normal.
-
-```bash
-mizu migrate-records demo          # read-only preview (default)
-mizu pause demo
-mizu migrate-records demo --apply  # requires a paused, quiescent project
-```
-
-This operator command inspects only top-level `shared-records/*.json` in the
-project's private data directory. It examines at most 1,000 directory entries
-(including non-JSON entries), never recurses, and reports `truncated: true`
-when it reaches the budget. It uses the store's byte bound and current kind
-and writer validators.
-
-The JSON report gives `entries_examined`, `candidates` and `converted` counts,
-`records` with project-relative flat and canonical paths and the SHA-256 of
-candidate bytes, plus `conflicts` and `errors`. `--apply` recomputes the preview
-under nonblocking maintenance locks. Each new canonical copy is published
-atomically without overwriting another file. An identical existing copy is
-reused; the flat file is removed only after the canonical digest is verified.
-Different bytes, malformed or oversized files, and failed verification leave
-the flat file in place. Moving a non-operator record also drops any disposable
-operator lookup entry that referred to its flat location; no receipts are changed.
-
-A report with conflicts, errors or truncation exits with status 1; other
-eligible records in the scan can still be converted. After interruption or a
-partial batch, rerun the command: an identical copy left by an interrupted move
-is safe to reuse, and a completed scan followed by a successful apply leaves no
-candidates. Resolve scan errors or truncation before resuming the project;
-a truncated scan that stops making progress does not prove all flat files are gone.
-
-### Reconcile and convert legacy work-item resolutions
-
-Promotion also converts existing `legacy.json` sidecars after backup. Reconcile
-unresolved decisions explicitly if the migration preview reports them; the
-installer does not decide their outcomes.
-
-```sh
-mizu pause demo
-mizu migrate-work-items demo   # bounded counts; dry run
-mizu work-items demo --legacy  # exact event IDs, disposition and reason previews
-mizu work-items reconcile-legacy demo "$event_id" --outcome open \
-  --expected-action accept --expected-rev 1 --title "Finish the retained work" \
-  --reason "The accepted change is still needed"
-mizu migrate-work-items demo --apply  # rename validated resolutions
-```
-
-Set `event_id` from the listing before reconciling. `--legacy` is a live page
-with no proposal bodies; `--limit` defaults to 25 (range 1–100). Pass
-`next_cursor` back as `--cursor` to continue. The listing scans history under
-the record lock and can recover recognized temporary files; use the migration
-preview for a bounded scan that never recovers or writes anything.
-
-Only the host operator can reconcile. Specify the exact 32-character lowercase
-hex event ID and a nonblank `--reason` of 1–4000 characters, stored verbatim.
-`--expected-action accept|modify` and `--expected-rev N` are optional exact
-checks. For `--outcome open`, supply a 1–200 character `--title`; for
-`--outcome drop`, omit it. Drop records the disposition without creating an
-item. Seeded decisions already have work to inspect, and explicit work-item
-intent cannot be overridden. The command does not rewrite decisions, schedule
-work, or accept an actor argument. It returns `{record, created: true}` after
-an exclusive commit; retry the same request after interruption to get the
-unchanged record with `created: false`. Conflicts are refused. Remove retired
-legacy inventory and reconciliation grants from private role configuration;
-there are no replacement model tools.
-
-Keep the project paused and do not restore or edit its data directory during
-these commands. The preview takes the work-item record lock if it exists,
-without waiting or creating it. If a writer creates an absent lock during the
-scan, the preview refuses the result. Both modes read authoritative files, not
-the ledger index, and never recover temporaries. `--apply` checks readiness
-read-only, then recomputes the complete plan under storage maintenance locks
-(which may initialize missing coordination locks). If the locked plan shows
-unresolved or corrupt records, or does not finish, nothing is renamed. A busy
-lock fails immediately; retry after active work has stopped.
-
-The JSON report gives `project`, `dry_run`, `scan_limit`, and counts for
-`resolved_open` (an open disposition even if the item later closed),
-`resolved_drop`, `explicit_no_work`, `unresolved`, and `ambiguous_or_corrupt`
-(invalid source events, item directories, or current legacy links). It does not
-include event bodies or paths. `--scan-limit` defaults to 10,000 entries per
-pass over `decision-history/` and `work-items/`, including non-record entries;
-the store's file and per-item bounds still apply. If `scan_complete` is false,
-the counts are partial. If `truncated` is true, raise the limit and retry.
-Reconcile unresolved events with the host command above; repair or restore
-corrupt or ambiguous sources before applying.
-
-Apply renames each eligible `legacy.json` to `decision-resolution.json` without
-replacing a file or changing the bytes. Ordinary readers (including `get` and
-the ready page) refuse an unconverted old name with an actionable
-`mizu migrate-work-items` message; only the host preview/apply reads it, and
-both names in one item directory or an unsafe link still fail closed. Host
-reconciliation writes new records directly to `decision-resolution.json`.
-The apply report includes `candidates` (legacy names in the plan),
-`already_current`, `renamed` (successful renames), and `converted` (renames
-verified by read-back and followed by directory sync where supported). Apply
-stops on the first per-item failure; `errors` identifies the stage and error
-class (and OS error number if available). `ok: false` exits with status 1; a
-failed verification or sync can leave `renamed` greater than `converted`.
-
-To resume a conversion after interruption, run preview again and then rerun
-apply. Each item still has one atomic name; host preflight accepts a mix of
-converted and unconverted items while ordinary readers keep refusing the
-unconverted ones. Apply counts valid current names as
-`already_current` and renames only those still using the old name. A successful
-retry with no remaining legacy names reports zero conversions.
-
+For an older deployment, take a verified backup first (see
+[upgrade and rollback](#バージョン更新とロールバック)) and restore the project
+under the current release. To carry a previously tracked item forward, give it
+an immutable seed in the `imported` shape using the procedure below; the origin
+is opaque provenance only. To unblock an item whose old wait kind the product
+no longer evaluates, use the reopen procedure below. Both are host-operator
+actions on a paused project; no model role can perform them.
 
 ### Re-seed work items that were seeded from decisions
 
@@ -737,8 +635,7 @@ rebuilds the index when every history validates. Writers wait for the audit.
   Runtime prompt projection and the open-page and by-ID modes of `work_items_read`
   keep their locked, recovering readers: `page_open` serves the open inventory and
   `explain` the by-ID history; the `closed=true` page uses
-  the unlocked, non-recovering `page_closed` reader. The separate host `--legacy`
-  inventory uses `page_legacy`.
+  the unlocked, non-recovering `page_closed` reader.
 
 #### Incremental current projections
 

@@ -963,81 +963,16 @@ multi-page snapshot. The prompt and tool are observations only: they add no
 transition, scheduling, reconciliation, or Tasks-retirement behavior. The page
 reader preserves existing store error classifications and fails closed on
 malformed/unsafe records.
-**Free-text Tasks in writer state are still needed until legacy reconciliation
-is complete.**
 
-Legacy disposition inventory and reconciliation belong to the operator CLI,
-not to a role or its progress signals. `mizu migrate-work-items PROJECT`
-reports bounded counts without event IDs, bodies, or paths. For exact event
-IDs, `mizu work-items PROJECT --legacy [--cursor TOKEN] [--limit N]` calls
-`page_legacy`. It lists unseeded accept/modify events, including open/drop
-resolutions and explicit `none` decisions. Rows carry the exact event ID,
-action, source origin/revision/timestamp (null if invalid), `openable`, and
-resolution metadata; decision and resolution reasons are 1024-byte previews.
-Proposal bodies are omitted. The 1–100 row, 8192-byte row, 1-MiB response and
-128-character cursor bounds apply. The exclusive event-ID cursor is opaque;
-pages are live, not a frozen snapshot. Each page scans committed history
-under `records.lock`, including beyond the cursor, and may recover recognized
-temporary writes. Unsafe records fail closed.
-
-`mizu work-items reconcile-legacy PROJECT EVENT_ID` resolves exactly one
-32-character lowercase hex event ID. The host binds the actor to `operator`.
-`--outcome open|drop` and a nonblank, verbatim `--reason` of 1–4000 characters
-are required. The action must be accept or modify; optional `--expected-action`
-and positive integer `--expected-rev` must match the source under the same
-lock. `open` requires a 1–200 character `--title`, valid source insight ID,
-positive exact integer revision, and timezone-aware timestamp. `drop` takes no
-title, creates no active item or seed, and can cover incomplete origin fields.
-Seeded events and explicit work-item intent are refused without changing the
-disposition.
-
-Under the shared records lock, reconciliation exclusively creates
-`work-items/wi_<event-id>/decision-resolution.json`. Ordinary readers refuse an
-unconverted `legacy.json` with an actionable `mizu migrate-work-items` message;
-only the explicit host migration/preflight activation reads the old name, and
-both names coexisting still fail closed as ambiguous. The immutable fields are `event_id`,
-`event_sha256` (SHA-256 of the **canonical JSON** source event), `action`,
-`revision` (valid source revision or null), `outcome`, `actor`, `reason`, and
-`created_at` (reconciliation timestamp). An open sidecar additionally contains
-`work_item`: the normal initial seed with ID `wi_<event-id>`, supplied title,
-origin `{insight_id, rev}`, status `open`, rev 1, holder null, and both timestamps
-from the original decision. No current or historical decision is rewritten.
-An exact retry returns `{record, created: false}`, preserving the original
-sidecar timestamp; the first write returns
-`created: true`. A conflicting reason/title/outcome/actor or stale expectation
-is denied.
-After interruption, re-read/retry the same event: uncommitted temporaries are
-never promoted, and post-link aliases are removed only with one matching
-committed sidecar/revision inode. Recovery scans have the same fixed per-item
-bound (256 revisions including the seed, plus one sidecar and bounded temporary
-space); unsafe links, paths, unexpected entries, corrupted sidecars, and source
-hash mismatches fail closed. Store Denied/LimitExceeded and local I/O/lock errors
-retain their classifications. Cancellation releases the lock; no automatic retry
-or scheduling is added.
-
-The host-only `mizu migrate-work-items` defaults to a bounded, read-only
-readiness scan. `--apply` repeats the complete scan with snapshot-GC exclusions
-and the same records lock as the reconciliation writer. Unresolved, corrupt,
-or incompletely scanned sources block conversion. For each validated legacy
-sidecar, apply uses the native exclusive rename, checks the new file's bytes
-and the absence of the old name, then syncs the item directory where supported.
-It never rewrites the seed, revisions, or decision records; drop-only coverage
-and explicit no-work decisions are unchanged. Renames are atomic per item, not
-across the batch. Apply stops on the first failure and reports the completed
-counts without record paths or contents. Host preflight can count valid current
-names and continue with old names in separate items; ordinary readers stay
-fail-closed until conversion completes.
-
-`page_open`, `get`, and CAS transitions resolve open legacy seeds through that
-converted, validated sidecar without changing decision history. Open resolutions replay
-normal revision history; drop resolutions count as covered but are never open
-items. Current legacy accept/modify records without a seed retain strict
-legacy-field validation and must match exactly one immutable history event for
-redecision projection; embedded seeds, when present, still require the full
-immutable seeded-event contract. Coverage is a locked
-history scan result, not a claim that deployed data has been reconciled. Keep
-free-text Tasks until an authorized per-event pass proves coverage. These APIs
-do not perform automatic migration, retire Tasks, or change scheduling.
+Legacy data from before the kernel migration is not converted by any command.
+Work items are immutable records with opaque origins; an operator can carry a
+previously tracked item forward by writing an `imported` seed directly (see
+[operations](operations.md#re-seed-work-items-that-were-seeded-from-decisions))
+and can reopen a blocked item whose old wait kind is no longer evaluated (see
+[operations](operations.md#reopen-a-blocked-item-whose-wait-kind-was-retired)).
+Role-to-role information lives in declared [queues](kernel.md#queues). No reader
+performs migration, reconciliation, or Tasks retirement, and no current tool
+advertises those operations.
 
 Editor messages are first atomically claimed into a private ingest directory;
 they are not parsed while still mutable in the Editor outbox. Malformed records
