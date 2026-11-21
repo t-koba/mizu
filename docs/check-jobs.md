@@ -169,6 +169,18 @@ without polling, follow the returned wait recipe and finish with
 `outcome=wait, wait_for_check=<id>`. That ends the unit, releases its model slot
 and lets completion wake the role.
 
+The managed Pi engine can also deliver an owned result into the unit that is
+already running: when a job reaches a terminal state after that unit's opening
+prompt was captured, the host sends one bounded `steer` notification at the
+next SDK turn boundary. It names only the job ID and status and points back to
+`action=result`; it carries no output and is not acceptance. Terminal results
+already in the opening prompt are not repeated, and each new result is injected
+at most once per unit. The same `check_job` capability and
+`roles.<name>.check_result_wake` policy gate this path. It consumes no wake
+marker, acknowledges no output and adds no model-visible polling or sleep; idle
+waking and `result` retrieval stay as before. The one-shot pi-durable launcher
+has no live input channel, so it keeps the dispatch-wake path only.
+
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
 The work unit ends and returns its model slot and workspace lock. The wait
 holds the role for as long as the wait the unit sealed with: the configured

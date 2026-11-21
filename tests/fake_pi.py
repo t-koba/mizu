@@ -61,6 +61,14 @@ for raw in sys.stdin.buffer:
               "data": {"disposition": "handled" if scenario == "handled" else "started"}})
         if scenario == "handled":
             continue
+        if scenario == "steer":
+            # Hold the agent open after a turn boundary until the host injects
+            # its check-result notification, like the SDK's queued steer.
+            bridge("_budget", {"sequence": 1})
+            bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
+            emit({"type": "agent_start"})
+            emit({"type": "tool_execution_end"})
+            continue
         bridge("_budget", {"sequence": 1})
         if scenario == "provider-error":
             emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "synthetic failure 429 Retry-After 60"}})
@@ -80,3 +88,11 @@ for raw in sys.stdin.buffer:
             emit({"type": "agent_settled", "data": {"aborted": True}})
         else:
             emit({"type": "agent_settled"})
+    elif command["type"] == "steer" and scenario == "steer":
+        # Record the host injection at the same turn boundary the SDK would
+        # deliver it, then settle without a finish tool call (driver-level test).
+        with (Path(effective["sessionDir"]).parent / "steers.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(command["message"] + "\n")
+        bridge("_request_done", {"sequence": 1})
+        emit({"type": "message_end", "message": {"role": "assistant", "content": "ok", "usage": {"input": 1, "output": 1}}})
+        emit({"type": "agent_settled"})

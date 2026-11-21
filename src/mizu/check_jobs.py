@@ -72,6 +72,10 @@ PURPOSE_MAX = 64
 MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS = 24
 #: Bound each public check-job summary projection.
 MAX_CHECK_JOB_PROJECTION_ROWS = 32
+#: Bound one in-unit steer batch, independent of the model-visible job page.
+MAX_CHECK_STEER_NOTIFICATIONS = 8
+#: Bound each host-owned steer notification, including its fixed framing.
+MAX_CHECK_STEER_MESSAGE_BYTES = 1024
 #: Keep each per-job command preview small and useful.
 MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS = 4
 #: Fixed short text excerpt for commands and prior-run identities.
@@ -1986,6 +1990,41 @@ def waiting(project, role):
 
 #: Terminal statuses eligible for result delivery or an explicit wait wake.
 TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'))
+
+
+def steer_pending(project, role, presented, *, discovery=None):
+    """Newly terminal owned results to present inside a running unit.
+
+    Schema: bounded job summaries. Bounds: at most
+    MAX_CHECK_STEER_NOTIFICATIONS per call; the caller's ``presented`` set
+    filters what this unit has already shown. Trust: only this role's
+    unacknowledged terminal jobs, under the same capability and automatic
+    wake policy that governs dispatch wakes. Failure: a role without the
+    capability or policy has nothing to present. This is a pure read: it
+    never acknowledges output, marks a wake delivered or changes scheduling.
+    """
+    settings = project.config.roles.get(role)
+    if settings is None or 'check_job' not in settings.capabilities or not settings.check_result_wake:
+        return []
+    if discovery is None:
+        from .acceptance import discover
+        discovery = discover(project)
+    already = set(presented)
+    jobs = [job for job in discovery[0].values()
+            if job.get('role') == role and job.get('id') not in already
+            and job.get('status') in TERMINAL_WAKE_STATUSES and not job.get('acknowledged')]
+    jobs.sort(key=lambda job: job.get('created_at', ''), reverse=True)
+    return [summary(job, project) for job in jobs[:MAX_CHECK_STEER_NOTIFICATIONS]]
+
+
+def steer_message(job):
+    """Bounded host-owned notification; never carries job output or text."""
+    message = ('MIZU CHECK RESULT (notification, not acceptance): job {id} is {status} '
+               '(passed={passed}). Read it with mizu_check_job action=result id={id} when useful.'
+               .format(id=str(job.get('id', ''))[:128],
+                       status=str(job.get('status', ''))[:64],
+                       passed=job.get('passed') is True))
+    return text_preview(message, MAX_CHECK_STEER_MESSAGE_BYTES)[0]
 
 
 def _automatic_wake_pending(project, job):

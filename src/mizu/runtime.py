@@ -1636,10 +1636,14 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                             "prompt_mode": prompt_mode, "session_key": session_key,
                             "rotation": (rotation or {}).get("reason", "")})
                 # A scheduling delivery is not acknowledgement of unread output.
+                # The same opening-prompt facts seed this unit's in-run steer
+                # presentation, so a result shown here is never steered again.
+                context.check_steer_seen = frozenset(
+                    j['id'] for j in decoded.get('check_jobs', [])
+                    if j.get('status') in check_jobs.TERMINAL_WAKE_STATUSES)
                 # Mark only terminal results actually present in this bounded prompt.
                 check_jobs.mark_wake_delivered(project, role_name,
-                    [j['id'] for j in decoded.get('check_jobs', [])
-                     if j.get('status') in check_jobs.TERMINAL_WAKE_STATUSES], run_id)
+                    list(context.check_steer_seen), run_id)
                 # Settle only the frozen CI observation actually offered, once
                 # before dispatch; prompt construction may have raced a cache update.
                 if ci_failures:

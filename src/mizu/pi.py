@@ -77,6 +77,49 @@ def authority_projection(sections: dict[str, str]) -> str:
         f"<{name}>\n{text}\n</{name}>" for name, text in sections.items())
 
 
+#: SDK events after which a queued steer can reach the next model turn.
+CHECK_STEER_BOUNDARIES = frozenset(('agent_start', 'turn_start', 'message_start',
+                                    'message_end', 'tool_execution_start',
+                                    'tool_execution_end', 'turn_end'))
+
+
+class CheckSteer:
+    """Present newly terminal check results inside one running Pi unit.
+
+    The SDK queues ``steer`` until the current turn finishes its tool calls,
+    before the next model request. Only the Pi channel offers this transport;
+    this class never sleeps, polls from the model side, marks a wake delivered
+    or acknowledges a result. The opening prompt's terminal IDs are seeded as
+    seen, and every steered ID is recorded as seen before its next event.
+    """
+
+    def __init__(self, context, channel, presented=()):
+        self.context, self.channel = context, channel
+        self.presented = set(presented)
+        self.active = False
+
+    def observe(self, event):
+        kind = event.get('type')
+        if not isinstance(kind, str):
+            return
+        if kind == 'agent_start':
+            self.active = True
+        elif kind in ('agent_end', 'agent_settled'):
+            # A steer queued after settlement could leak into a resumed
+            # session instead of this unit, so stop at the run boundary.
+            self.active = False
+        if not self.active or kind not in CHECK_STEER_BOUNDARIES:
+            return
+        from . import check_jobs
+        for job in check_jobs.steer_pending(self.context.project, self.context.role.name,
+                                            self.presented):
+            if job['id'] in self.presented:
+                continue
+            self.presented.add(job['id'])
+            self.channel.send({'id': 'steer-' + job['id'][:32], 'type': 'steer',
+                               'message': check_jobs.steer_message(job)})
+
+
 class PiDriver:
     requires_sandbox = True
 
@@ -119,6 +162,7 @@ class PiDriver:
             bound = startup_bound(self.config, 'pi')
             spawned = time.monotonic()
             channel = Channel(context, self.argv(context.role, context.run_dir, profile, context.goal_digest), env, cwd, "pi")
+            steer = CheckSteer(context, channel, getattr(context, 'check_steer_seen', ()))
             try:
                 # The runtime handshake uses this host's per-engine bound;
                 # the timer starts before child launch and ends at its first
@@ -147,6 +191,7 @@ class PiDriver:
                 channel.send({"id": "work", "type": "prompt", "message": prompt})
                 while True:
                     event = channel.receive()
+                    steer.observe(event)
                     kind = event.get("type")
                     if kind == "response" and event.get("id") == "work":
                         if not event.get("success") or event.get("data", {}).get("disposition") == "handled":

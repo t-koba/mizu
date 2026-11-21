@@ -1098,8 +1098,14 @@ authority do not change.
 Automatic wake candidates take priority in the existing bounded prompt job
 page (32 summaries, within the aggregate 65,536-byte check projection). Only
 included terminal summaries are marked: omitted results or jobs completing
-after prompt capture keep their independent wake. An unread result remains in
-ordinary job listings after its automatic attempt but cannot cause a scheduling
+after prompt capture keep their independent wake. On the managed Pi engine such
+a result is additionally steered once into the already-running unit at its next
+model turn boundary, using the same capability and policy gate. That in-unit
+delivery is presentation only: it writes no wake marker and is not a model
+receipt, so the independent wake and the marker written by a later dispatch stay
+unchanged. The one-shot pi-durable launcher has no live input channel and keeps
+the dispatch-only path. An unread result remains in ordinary job listings after
+its automatic attempt but cannot cause a scheduling
 spin. Existing `result` retrieval and successful-finish acknowledgement alone
 consume output; a wake marker never imports verification. Exact explicit waits
 retain their signature/deadline/ownership checks and existing acknowledgement
