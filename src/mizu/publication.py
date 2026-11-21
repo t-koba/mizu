@@ -25,15 +25,15 @@ whole-snapshot match is claimed for a filtered tree. Legacy records stay
 readable and are never rewritten; new external writes require schema 3 or 4.
 
 The writer-owned key index (``publication-keys/receipt-key-index.json``) also
-serves as the complete receipt inventory of a narrow listing. Schema-3 index
-entries carry the ordering instant and exact filter fields of a validated
+serves as the complete receipt inventory of a non-strict listing. Schema-3
+index entries carry the ordering instant and exact filter fields of a validated
 receipt, so one bounded fixed-path read can order, filter and count a page
 while only that page's receipts are revalidated from bytes and cross-checked
-against their metadata. An absent, stale, incomplete, legacy or mismatched
-index is never served: the listing falls back to the bounded directory scan
-and keeps reporting its scan bound. Wide listing requests (a page larger
-than either configured bound) and strict readers also use that scan, so the
-policy bounds keep their meaning for ordinary listings.
+against their metadata. A requested page is capped by both configured bounds:
+a wider request receives a shorter page and a real continuation cursor. An
+absent, stale, incomplete, legacy or mismatched index is never served: the
+listing falls back to the bounded directory scan and keeps reporting its scan
+bound, as do strict readers.
 """
 from __future__ import annotations
 
