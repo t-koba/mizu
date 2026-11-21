@@ -234,12 +234,15 @@ class WorkItems:
     def __init__(self, root: Path, snapshots, ledger, *, vcs=None, queues=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  effective_verification_projection=None, writer_roles_lookup=None,
-                 ci_wait_settings=None, ci_request_roles=None,
+                 event_roles_lookup=None, ci_wait_settings=None, ci_request_roles=None,
                  publication_evidence: PublicationEvidence | None = None,
                  completion_evidence: CompletionEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots = root, snapshots
         self.writer_roles_lookup = writer_roles_lookup
+        #: Configured role names whose pending-event index rows are maintained
+        #: on every terminal write; standalone stores have no event roles.
+        self.event_roles_lookup = event_roles_lookup
         self.ci_wait_settings = ci_wait_settings
         self.ci_request_roles = ci_request_roles
         self.vcs = vcs or {}
@@ -268,6 +271,10 @@ class WorkItems:
         if type(stale_seconds) is not int or not 1 <= stale_seconds <= 31536000:
             raise Denied("Work-item stale threshold must be an integer in [1, 31536000]")
 
+
+    def event_roles(self) -> tuple[str, ...]:
+        """Project roles known to the event index, read from live settings."""
+        return tuple(sorted(set(self.event_roles_lookup() if self.event_roles_lookup else ())))
 
     def _require_doing_capacity(self, actor: str) -> None:
         """Count the actor's doing items in the index; caller holds records.lock."""
@@ -1825,6 +1832,8 @@ class WorkItems:
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
+            from .work_item_events import index_terminal
+            index_terminal(self, record, terminal=False)
             self._wake_terminal()
             return record
 
@@ -2047,10 +2056,15 @@ class WorkItems:
                 self._require_doing_capacity(actor)
             if len(canonical(record)) > (MAX_EVENT_BYTES if resolution is not None else PREVIEW_BYTES):
                 raise LimitExceeded("Work-item event exceeds byte bound")
+            if status in ("done", "dropped"):
+                from .work_item_events import validate_terminal_payload
+                validate_terminal_payload(self, record)
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
             if status in ("done", "dropped"):
+                from .work_item_events import index_terminal
+                index_terminal(self, record)
                 self._wake_terminal()
             return record
 

@@ -172,10 +172,12 @@ class WorkItemDescriptionTests(Fixture):
         self.assertEqual((row["description_preview"], row["description_truncated"]), ("Brief scope", False))
         seed = self.store.create(idempotency_key="escaped", title="Work", actor="worker",
                                  description="x" + "\x01" * 3999)["record"]["work_item"]
-        self.store.transition(seed["id"], expected_rev=1, status="dropped", actor="worker", reason="\x00" * 2000)
         # Preview bounds do not replace canonical row/envelope byte bounds.
+        # The terminal payload is checked when it is indexed, before it can be
+        # delivered; no oversized row enters the pending index.
         with self.assertRaises(LimitExceeded):
-            self.store.page_closed_readonly()
-        with self.assertRaises(LimitExceeded):
-            events.pending(self.store, "reviewer", ("dropped",), sources="any")
+            self.store.transition(seed["id"], expected_rev=1, status="dropped",
+                                  actor="worker", reason="\x00" * 2000)
+        self.assertEqual(self.store.page_closed_readonly()["items"], [])
+        self.assertEqual(events.pending(self.store, "reviewer", ("dropped",), sources="any")["pending"], 0)
 

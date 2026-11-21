@@ -287,6 +287,8 @@ class WorkItemEventTests(Fixture):
         real_write = events.write_json
         writes = []
         def fail_second(path, value, **kwargs):
+            if "work-item-receipts" not in path.parts:
+                return real_write(path, value, **kwargs)
             writes.append(path)
             if len(writes) == 2:
                 raise OSError("receipt unavailable")
@@ -326,6 +328,8 @@ class WorkItemEventTests(Fixture):
         receipt = events._receipt_path(self.store, "reviewer", item)
 
         def simultaneous_write(path, value, **kwargs):
+            if path != receipt:
+                return real_write(path, value, **kwargs)
             # Both calls pass the absence check before publication. The loser
             # must validate the winner while its atomic_write is still active.
             barrier.wait(timeout=10)
@@ -356,14 +360,18 @@ class WorkItemEventTests(Fixture):
                 self.assertTrue(events._received(self.store, "reviewer", item))
             return real_sync(directory)
 
-        with patch.object(events, "now", side_effect=timestamps), patch.object(
+        # Receipt collision is independent of records.lock; suspend the new
+        # serialization here so both exclusive writes still overlap.
+        with patch.object(events, "record_lock", return_value=nullcontext()), \
+                patch.object(events, "now", side_effect=timestamps), patch.object(
                 events, "write_json", side_effect=simultaneous_write) as writes, patch.object(
                 fs, "sync_dir", side_effect=hold_publication):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 list(pool.map(acknowledge, range(2)))
-        self.assertEqual(sorted(call.args[1]["acknowledged_at"] for call in writes.call_args_list), timestamps)
-        self.assertEqual([call.args[0] for call in writes.call_args_list], [receipt, receipt])
-        self.assertTrue(all(call.kwargs == {"exclusive": True} for call in writes.call_args_list))
+        receipts = [call for call in writes.call_args_list if call.args[0] == receipt]
+        self.assertEqual(sorted(call.args[1]["acknowledged_at"] for call in receipts), timestamps)
+        self.assertEqual([call.args[0] for call in receipts], [receipt, receipt])
+        self.assertTrue(all(call.kwargs == {"exclusive": True} for call in receipts))
         original = receipt.read_bytes()
         self.assertIn(read_json(receipt)["acknowledged_at"], timestamps)
         events.acknowledge(self.store, "reviewer", selected)
@@ -389,8 +397,9 @@ class WorkItemEventTests(Fixture):
         events.acknowledge(self.store, "reviewer", selected)
         receipt = self.project.root / "work-item-receipts/reviewer" / f"{item['id']}.2.json"
         write_json(receipt, {"event": selected[0]["event"]})
+        # Receipts are checked when written, never on a read.
         with self.assertRaises(Denied):
-            self.page()
+            events.acknowledge(self.store, "reviewer", selected)
         with self.assertRaises(Denied):
             events.acknowledge(self.store, "reviewer", [{**selected[0], "id": "../outside"}])
 
@@ -614,6 +623,68 @@ class WorkItemEventTests(Fixture):
             self.assertEqual(self.page()["pending"], remaining)
         self.assertEqual(len(set(selected)), 3)
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
+
+    def test_missing_index_is_built_on_a_write_and_reads_fail_closed_until_then(self):
+        _, item = self.terminal()
+        rows = self.page()["events"]
+        events.acknowledge(self.store, "reviewer", rows)
+        self.assertEqual(self.page()["acknowledged"], 1)
+        for name in (events.INDEX_NAME, events.HEADS_NAME):
+            (self.project.root / name).unlink()
+        with self.assertRaisesRegex(Denied, "index missing"):
+            self.page()
+        # The next terminal write rebuilds from validated source and receipts.
+        _, fresh = self.terminal()
+        page = self.page()
+        self.assertEqual((page["pending"], page["acknowledged"]), (1, 1))
+        self.assertEqual([row["id"] for row in page["events"]], [fresh["id"]])
+        self.assertEqual(page["acknowledged_event_ids"], [rows[0]["event"]])
+
+    def test_pending_read_does_not_grow_with_acknowledged_history(self):
+        _, item = self.terminal()
+        row = self.page()["events"][0]
+        template = self.store.current(item["id"])
+
+        def scan(acked):
+            found = [(canonical(template).decode(), "reviewer", "dropped")]
+            for number in range(acked):
+                synthetic = {**template, "id": f"wi_{number:032x}",
+                             "updated_at": f"2030-01-01T00:{number // 60 % 60:02d}:{number % 60:02d}+00:00"}
+                found.append((canonical(synthetic).decode(), "reviewer", "dropped"))
+            def received(store, role, candidate):
+                return candidate["id"] != item["id"]
+            index, heads = events._compose_index(self.store, found, ("reviewer",), received)
+            events._write_index(self.store, index)
+            events._write_heads(self.store, heads)
+            reads = []
+            real_read = events.safe_read
+            def counting_read(root, name, maximum):
+                raw = real_read(root, name, maximum)
+                reads.append((name, len(raw)))
+                return raw
+            with patch.object(events, "safe_read", side_effect=counting_read), \
+                    patch.object(events, "_terminal_count", return_value=acked + 1), \
+                    patch.object(self.store, "current_items", side_effect=AssertionError("history read")), \
+                    patch.object(events, "_receipts", side_effect=AssertionError("receipt scan")):
+                page = events.pending(self.store, "reviewer", ("dropped",))
+            self.assertEqual([name for name, _ in reads], [events.INDEX_NAME])
+            return page, reads, len(events._read_index(self.store)["events"]), heads
+
+        small, small_reads, small_rows, small_heads = scan(2_000)
+        large, large_reads, large_rows, large_heads = scan(4_000)
+        self.assertEqual((small_rows, large_rows), (1, 1))
+        self.assertEqual(small_reads, large_reads)  # exact deterministic read work
+        self.assertEqual(len(small_heads["heads"]), 2_001)
+        self.assertEqual(len(large_heads["heads"]), 4_001)
+        self.assertEqual((small["pending"], len(small["events"])), (1, 1))
+        self.assertEqual((large["pending"], len(large["events"])), (1, 1))
+        self.assertEqual((small["acknowledged"], large["acknowledged"]), (2_000, 4_000))
+        self.assertEqual(len(large["acknowledged_event_ids"]), 10)
+        self.assertTrue(large["acknowledged_ids_truncated"])
+        self.assertEqual({k: v for k, v in small.items() if k not in
+                          ("acknowledged", "acknowledged_event_ids", "acknowledged_ids_truncated")},
+                         {k: v for k, v in large.items() if k not in
+                          ("acknowledged", "acknowledged_event_ids", "acknowledged_ids_truncated")})
 
     def test_subscription_and_limit_bounds_fail_closed(self):
         for actions in (("doing",), ("done", "done")):

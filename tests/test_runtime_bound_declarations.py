@@ -1110,6 +1110,9 @@ DECLARATIONS = {
         'ACKED_ID_SAMPLE': (
             '10', 'safety',
             'work-item events / bounded recent acknowledged-ID sample while retaining the exact total'),
+        'MAX_INDEX_BYTES': (
+            '16 * 1024 * 1024', 'safety',
+            'work-item events / cap the write-time pending index generation read by every page'),
     },
     'workspace_reads.py': {
         'MAX_READ_IDENTITIES': (

@@ -174,6 +174,11 @@ mizu cleanup demo
 - `work-items/`, `work-item-receipts/`, `shared-records/`,
   `shared-record-receipts/`, `delivery-settlements/`, `selection/`: 作業項目とその受領・
   共有記録、実行時の配送決済、選択状態 ★
+- `work-item-events-index.json`, `work-item-events-heads.json`: 終端イベントの未配信行と
+  役割ごとの受領カウンタ・最新10件サンプル、および現行の終端ヘッドの索引 ★。端末遷移と
+  受領書き込み時に records.lock の下で更新され、読み取りはこの索引だけを参照します。
+  旧データに索引が無い場合は、最初の端末書き込みまたは受領が validate 済みの履歴から
+  一度だけ再構築します。再構築までの読み取りは fail closed です。
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
 - `role-state/`: 各役割の現行研究状態の JSON レコード ★（role lock と `.new-*` 一時ファイルは除外。安全に読める不正 JSON は raw のまま保存し、復元後も `unavailable` として扱います）
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
@@ -617,8 +622,9 @@ rebuilds the index when every history validates. Writers wait for the audit.
   most-recent `acknowledged_event_ids`, plus truncation flags, `unknown_routing`,
   `routing_complete` and `coverage_complete`. It contains
   no event payload rows. `total` and `truncated` report role coverage; the
-  summary is at most 1 MiB. Counts scan validated seeds/chains and exact
-  receipts, not a timestamp watermark. Unknown routing is reported independently and excluded
+  summary is at most 1 MiB. Counts come from the write-time pending-event index
+  (validated terminal payloads and exact receipts, never a timestamp watermark);
+  reads do not replay chains or enumerate receipts. Unknown routing is reported independently and excluded
   in `own` mode (only explicit `any` opt-in receives it). A matching retained
   event with no per-role receipt is pending even if it predates enabling that
   subscription; receipts persist across unsubscribe/re-subscribe and backup /

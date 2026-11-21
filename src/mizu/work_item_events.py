@@ -1,8 +1,11 @@
 """Terminal work-item delivery to the roles that subscribe to it.
 
-The work-item store remains authoritative. Receipts are exact, source-scoped,
-per-role identities, not watermarks. Reads never recover, lock or write. A
-partial acknowledgement can only cause replay of the remaining identities.
+The work-item store remains authoritative. A write-time index holds the
+current pending rows and each role's exact acknowledgement counter plus its
+newest-ten-receipt sample; reads touch only that index, never terminal chains
+or receipt directories. Receipts are exact, source-scoped, per-role
+identities, not watermarks. A partial acknowledgement can only cause replay
+of the remaining identities.
 """
 from __future__ import annotations
 
@@ -13,11 +16,18 @@ import os
 from .completion_evidence import VERIFIED_SNAPSHOT, recorded_policy
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, identifier, mkdir, now, safe_read, write_json
+from .ledger import rows as _rows
+from .smoke_refs import record_lock
+from .work_item_seed import ITEM_ID
 from .work_items import (_ReverseKey, _directory, _timestamp, _timestamp_order,
                          MAX_CLOSED_ROW_BYTES, MAX_CLOSED_PAGE_BYTES)
 
 SOURCE = "work_item"
 ACKED_ID_SAMPLE = 10
+INDEX_NAME = "work-item-events-index.json"
+HEADS_NAME = "work-item-events-heads.json"
+INDEX_SCHEMA = 1
+MAX_INDEX_BYTES = 16 * 1024 * 1024
 
 
 def _identity(item):
@@ -52,6 +62,289 @@ def _receipts(store, role):
         return {entry.name for entry in entries}
 
 
+def _event_key(row):
+    """Oldest-first ordering key of an immutable terminal row."""
+    return [_timestamp_order(row.get("terminal_at", row.get("updated_at"))),
+            row["id"], row["rev"]]
+
+
+def _valid_key(key):
+    return (isinstance(key, list) and len(key) == 3 and type(key[0]) is int
+            and isinstance(key[1], str) and type(key[2]) is int)
+
+
+def _new_role():
+    return {"acknowledged": 0, "acked": [], "pending": []}
+
+
+def _new_index(roles):
+    return {"schema": INDEX_SCHEMA, "terminal_count": 0, "unknown": {"done": 0, "dropped": 0},
+            "events": {}, "roles": {role: _new_role() for role in roles}}
+
+
+def _sample(state, key, event_id):
+    """Keep the ten newest acknowledged identities, not receipt timestamps."""
+    candidate = [key, event_id]
+    kept = state["acked"]
+    if len(kept) < ACKED_ID_SAMPLE:
+        kept.append(candidate)
+    elif candidate > kept[0]:
+        kept[0] = candidate
+    kept.sort()
+
+
+def _validate_index(index):
+    if (not isinstance(index, dict)
+            or set(index) != {"schema", "terminal_count", "unknown", "events", "roles"}
+            or type(index["schema"]) is not int or index["schema"] != INDEX_SCHEMA
+            or type(index["terminal_count"]) is not int or index["terminal_count"] < 0
+            or not isinstance(index["events"], dict) or not isinstance(index["roles"], dict)):
+        raise Denied("Malformed work-item event index")
+    unknown = index["unknown"]
+    if (not isinstance(unknown, dict) or set(unknown) != {"done", "dropped"}
+            or any(type(value) is not int or value < 0 for value in unknown.values())):
+        raise Denied("Malformed work-item event index")
+    for event_id, entry in index["events"].items():
+        if (not isinstance(event_id, str) or not isinstance(entry, dict)
+                or set(entry) != {"key", "row"} or not _valid_key(entry["key"])):
+            raise Denied("Malformed work-item event index row")
+        row = entry["row"]
+        if (not isinstance(row, dict) or row.get("event") != event_id
+                or _identity(row) != event_id or row.get("source") != SOURCE
+                or row.get("type") not in ("done", "dropped")
+                or not _timestamp(row.get("terminal_at"))
+                or (row.get("creator") is not None and not isinstance(row["creator"], str))
+                or row.get("routing") != ("known" if row.get("creator") is not None else "unknown")
+                or len(canonical(row)) > MAX_CLOSED_ROW_BYTES):
+            raise Denied("Malformed work-item event index row")
+    for name, state in index["roles"].items():
+        identifier(name)
+        if (not isinstance(state, dict) or set(state) != {"acknowledged", "acked", "pending"}
+                or type(state["acknowledged"]) is not int or state["acknowledged"] < 0
+                or not isinstance(state["acked"], list) or not isinstance(state["pending"], list)
+                or len(state["acked"]) > ACKED_ID_SAMPLE):
+            raise Denied("Malformed work-item event index role")
+        seen = set()
+        for event_id in state["pending"]:
+            if (not isinstance(event_id, str) or event_id in seen
+                    or event_id not in index["events"]):
+                raise Denied("Malformed work-item event index pending row")
+            seen.add(event_id)
+        previous = None
+        for sample in state["acked"]:
+            if (not isinstance(sample, list) or len(sample) != 2
+                    or not _valid_key(sample[0]) or not isinstance(sample[1], str)
+                    or (previous is not None and sample <= previous)):
+                raise Denied("Malformed work-item event index acknowledgement sample")
+            previous = sample
+
+
+def _validate_heads(heads):
+    if (not isinstance(heads, dict) or set(heads) != {"schema", "heads"}
+            or type(heads["schema"]) is not int or heads["schema"] != INDEX_SCHEMA
+            or not isinstance(heads["heads"], dict)):
+        raise Denied("Malformed work-item event head index")
+    for item_id, event_id in heads["heads"].items():
+        if (not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None
+                or not isinstance(event_id, str) or event_id.split(":")[1:2] != [item_id]):
+            raise Denied("Malformed work-item event index head")
+
+
+def _read_state(store, name, validate, absent):
+    """One pinned generation of a JSON index, or its absent value."""
+    try:
+        (store.root / name).lstat()
+    except FileNotFoundError:
+        return absent
+    raw = safe_read(store.root, name, MAX_INDEX_BYTES)
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise Denied(f"Malformed {name}") from exc
+    validate(value)
+    return value
+
+
+def _write_state(store, name, value, validate):
+    validate(value)
+    raw = canonical(value)
+    if len(raw) > MAX_INDEX_BYTES:
+        raise LimitExceeded("Work-item event index exceeds byte bound")
+    write_json(store.root / name, value)
+
+
+def _read_index(store):
+    return _read_state(store, INDEX_NAME, _validate_index, None)
+
+
+def _write_index(store, index):
+    _write_state(store, INDEX_NAME, index, _validate_index)
+
+
+def _read_heads(store):
+    return _read_state(store, HEADS_NAME, _validate_heads, {"schema": INDEX_SCHEMA, "heads": {}})
+
+
+def _write_heads(store, heads):
+    _write_state(store, HEADS_NAME, heads, _validate_heads)
+
+
+def _terminal_count(store):
+    with store._ledger.read("items", locked=False) as db:
+        return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('done','dropped')")[0][0]
+
+
+def _index_roles(store, index=None, extra=()):
+    lookup = getattr(store, "event_roles", None)
+    names = set(extra)
+    if callable(lookup):
+        names.update(lookup())
+    if index is not None:
+        names.update(index["roles"])
+    for name in names:
+        identifier(name)
+    return tuple(sorted(names))
+
+
+def _receipt_roles(store):
+    directory = store.root / "work-item-receipts"
+    if not _directory(directory):
+        return ()
+    with os.scandir(directory) as entries:
+        names = tuple(sorted(entry.name for entry in entries
+                             if entry.is_dir(follow_symlinks=False)))
+    for name in names:
+        identifier(name)
+    return names
+
+
+def _compose_index(store, found, roles, received):
+    """Build compact state from validated terminal rows and exact receipts."""
+    index = _new_index(roles)
+    heads = {"schema": INDEX_SCHEMA, "heads": {}}
+    index["terminal_count"] = len(found)
+    for raw, creator, status in found:
+        item = json.loads(raw)
+        row = _payload(store, item, {item["id"]: creator})
+        event_id, key = row["event"], _event_key(row)
+        heads["heads"][item["id"]] = event_id
+        if creator is None:
+            index["unknown"][status] += 1
+        pending_for = []
+        for role in roles:
+            state = index["roles"][role]
+            if received(store, role, item):
+                state["acknowledged"] += 1
+                _sample(state, key, event_id)
+            else:
+                state["pending"].append(event_id)
+                pending_for.append(role)
+        if pending_for:
+            index["events"][event_id] = {"key": key, "row": row}
+    return index, heads
+
+
+def _rebuild_index(store, extra=()):
+    """Build the whole index once under the caller's record write lock.
+
+    Full chain validation belongs here, never on a read. A rebuild is also
+    used for a superseded terminal head or a newly seen role, where exact
+    acknowledgement samples cannot be derived from the compact state.
+    """
+    store._ledger.rebuild("items")
+    with store._ledger.read("items", locked=True) as db:
+        found = _rows(db, "SELECT item, creator, status FROM items "
+                      "WHERE status IN ('done','dropped') ORDER BY id")
+    roles = _index_roles(store, None, (*extra, *_receipt_roles(store)))
+    listings = {role: _receipts(store, role) for role in roles}
+    index, heads = _compose_index(
+        store, found, roles,
+        lambda store, role, item: _received(store, role, item, listings[role]))
+    _write_heads(store, heads)
+    _write_index(store, index)
+    return index
+
+
+def _ensure_index(store, extra=()):
+    """Load a current index, rebuilding only from a write path."""
+    index = _read_index(store)
+    try:
+        (store.root / HEADS_NAME).lstat()
+    except FileNotFoundError:
+        heads_missing = True
+    else:
+        heads_missing = False
+    if index is None or heads_missing or index["terminal_count"] != _terminal_count(store):
+        return _rebuild_index(store, extra)
+    roles = (set(_index_roles(store)) | set(extra)) - set(index["roles"])
+    if roles:
+        index["roles"].update({role: _new_role() for role in roles})
+    return index
+
+
+def _terminal_row(store, item):
+    """Validate the immutable payload of one terminal head before indexing."""
+    creation = store._creation_record(item["id"])
+    creator = creation.get("actor") if creation and creation.get("kind") == "direct" else None
+    return creator, _payload(store, item, {item["id"]: creator})
+
+
+def validate_terminal_payload(store, item):
+    """Write-time preflight so an unindexable head is never committed."""
+    _terminal_row(store, item)
+
+
+def index_terminal(store, item, *, terminal=True):
+    """Index one committed terminal head, or drop a superseded one.
+
+    Caller holds records.lock. Every payload is validated before it is
+    indexed, and a changed head triggers a full write-time rebuild so exact
+    acknowledgement samples never need recovery on a read.
+    """
+    index = _ensure_index(store)
+    heads = _read_heads(store)["heads"]
+    item_id = item["id"]
+    if not terminal:
+        if item_id in heads:
+            _rebuild_index(store)
+        return
+    event_id = _identity(item)
+    if event_id == heads.get(item_id):
+        return
+    if item_id in heads:
+        _rebuild_index(store)
+        return
+    creator, row = _terminal_row(store, item)
+    heads[item_id] = event_id
+    index["terminal_count"] += 1
+    if creator is None:
+        index["unknown"][item["status"]] += 1
+    index["events"][event_id] = {"key": _event_key(row), "row": row}
+    for state in index["roles"].values():
+        state["pending"].append(event_id)
+    _write_heads(store, {"schema": INDEX_SCHEMA, "heads": heads})
+    _write_index(store, index)
+
+
+def index_ack(store, role, item):
+    """Move one durable receipt out of a role's pending rows.
+
+    Caller holds records.lock. Idempotent receipts that are already indexed
+    are a no-op; a receipt written but not yet indexed is settled here.
+    """
+    index = _ensure_index(store, (role,))
+    state = index["roles"][role]
+    event_id = _identity(item)
+    if event_id not in state["pending"]:
+        return
+    state["pending"].remove(event_id)
+    if not any(event_id in other["pending"] for other in index["roles"].values()):
+        index["events"].pop(event_id, None)
+    state["acknowledged"] += 1
+    _sample(state, _event_key(item), event_id)
+    _write_index(store, index)
+
+
 def _received(store, role, item, listing=...):
     path = _receipt_path(store, role, item)
     if listing is not ...:
@@ -77,19 +370,18 @@ def _received(store, role, item, listing=...):
 
 
 def pending(store, role, actions, *, sources="own", limit=10):
-    """Bounded oldest-first pending page plus exact progress counts.
+    """Bounded oldest-first pending page plus exact progress counts from the index.
 
-    Validates immutable seeds and the *entire* current chain via WorkItems'
-    existing reader. ``own`` selects items the role created. Excludes exact
-    receipts before the heap limit; UTC microseconds/id/rev order survives
-    ties and rollback. At most 100 rows, 8192 bytes/row, 1 MiB/response.
-    Unsafe/malformed stores fail closed. No reads have recovery side effects.
+    ``own`` selects items the role created. UTC microseconds/id/rev order
+    survives ties and rollback. At most 100 rows, 8192 bytes/row, 1 MiB per
+    response. Malformed, missing or stale indexes fail closed; reads never
+    lock, write, replay chains or enumerate receipts.
     """
     return _pending_pages(store, [(role, actions, sources)], limit)[0]
 
 
 class _PendingPage:
-    """Bounded per-role heaps and counts for a shared validated traversal."""
+    """Bounded per-role heaps and counts over indexed pending rows."""
 
     def __init__(self, role, actions, sources, limit):
         identifier(role)
@@ -101,21 +393,7 @@ class _PendingPage:
         self.acknowledged_heap = []
         self.acknowledged = self.eligible = self.unknown = 0
 
-    def add(self, store, item, row, listing=...):
-        if row["creator"] is None:
-            self.unknown += 1
-        if self.sources == "own" and row["creator"] != self.role:
-            return
-        key = (_timestamp_order(item["updated_at"]), item["id"], item["rev"])
-        if _received(store, self.role, item, listing):
-            self.acknowledged += 1
-            candidate = (key, _identity(item))
-            # Only the most recent ten exact acknowledgements, not a receipt listing.
-            if len(self.acknowledged_heap) < ACKED_ID_SAMPLE:
-                heapq.heappush(self.acknowledged_heap, candidate)
-            elif key > self.acknowledged_heap[0][0]:
-                heapq.heapreplace(self.acknowledged_heap, candidate)
-            return
+    def add(self, row, key):
         self.eligible += 1
         candidate = (_ReverseKey(key), key, row)
         if len(self.selected) < self.limit:
@@ -138,18 +416,29 @@ class _PendingPage:
 
 
 def _pending_pages(store, subscriptions, limit):
-    pages = [_PendingPage(*subscription, limit) for subscription in subscriptions]
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Denied("Work-item event limit must be in [1, 100]")
-    if any(page.actions for page in pages):
-        creators = store.creators()
-        listings = {page.role: _receipts(store, page.role) for page in pages}
-        for item in store.current_items(statuses=("done", "dropped")):
-            matching = [page for page in pages if item["status"] in page.actions]
-            if matching:
-                row = _payload(store, item, creators)
-                for page in matching:
-                    page.add(store, item, row, listings[page.role])
+    pages = [_PendingPage(*subscription, limit) for subscription in subscriptions]
+    index = _read_index(store)
+    if index is None:
+        if _terminal_count(store):
+            raise Denied("Work-item event index missing; a write must rebuild it first")
+        return [page.result() for page in pages]
+    if index["terminal_count"] != _terminal_count(store):
+        raise Denied("Work-item event index stale; retry after a write rebuilds it")
+    for page in pages:
+        state = index["roles"].get(page.role, _new_role())
+        page.acknowledged = state["acknowledged"]
+        page.acknowledged_heap = [tuple(sample) for sample in state["acked"]]
+        page.unknown = sum(index["unknown"][action] for action in page.actions)
+        for event_id in state["pending"]:
+            entry = index["events"][event_id]
+            row = entry["row"]
+            if row["type"] not in page.actions:
+                continue
+            if page.sources == "own" and row["creator"] != page.role:
+                continue
+            page.add(row, tuple(entry["key"]))
     return [page.result() for page in pages]
 
 
@@ -202,43 +491,47 @@ def acknowledge(store, role, events):
     """Host-only, after durable completed result; idempotent exact receipts.
 
     Validate each frozen payload against its immutable terminal chain before
-    writing. One atomic file per identity avoids read/modify/write lost updates.
-    I/O failure leaves remaining events pending;
-    leftover atomic-write temporaries are not receipts and need no recovery.
+    writing. Receipt publication and the pending index share records.lock with
+    terminal transitions, so no read/modify/write race or recovery path exists.
+    I/O failure leaves remaining events pending; leftover atomic-write
+    temporaries are not receipts and need no recovery.
     """
     identifier(role)
     if not isinstance(events, list) or len(events) > 100:
         raise Denied("Invalid work-item acknowledgement batch")
-    changed = False
-    try:
-        for event in events:
-            item = _validate_payload(store, event)
-            if _received(store, role, item):
-                continue
-            path = _receipt_path(store, role, item)
-            mkdir(path.parent)
-            # These paths were screened by _received; no symlink-following reads.
-            # Mark before the atomic write: if it fails after the commit point,
-            # a harmless wake lets admission distinguish replay from pending.
-            receipt = {"role": role, "source": SOURCE, "event": _identity(item),
-                       "acknowledged_at": now()}
-            changed = True
-            try:
-                write_json(path, receipt, exclusive=True)
-            except (FileExistsError, Denied):
-                # Exclusive writes report differing timestamps as immutable
-                # conflicts. Only a fully validated existing receipt wins;
-                # malformed or unsafe data and missing receipts fail closed.
-                if not _received(store, role, item):
-                    raise
-    finally:
-        if changed:
-            # Reuse the watched work-items parent as a non-authoritative drain
-            # hint; do not depend on a role receipt directory existing at install.
-            try:
-                os.utime(store.root / "work-items", None, follow_symlinks=False)
-            except (OSError, NotImplementedError):
-                pass
+    with record_lock(store.root):
+        changed = False
+        try:
+            for event in events:
+                item = _validate_payload(store, event)
+                if _received(store, role, item):
+                    index_ack(store, role, item)
+                    continue
+                path = _receipt_path(store, role, item)
+                mkdir(path.parent)
+                # These paths were screened by _received; no symlink reads.
+                # Mark before the atomic write: if it fails after the commit
+                # point, a harmless wake distinguishes replay from pending.
+                receipt = {"role": role, "source": SOURCE, "event": _identity(item),
+                           "acknowledged_at": now()}
+                changed = True
+                try:
+                    write_json(path, receipt, exclusive=True)
+                except (FileExistsError, Denied):
+                    # Exclusive writes report differing timestamps as immutable
+                    # conflicts. Only a fully validated existing receipt wins;
+                    # malformed or unsafe data and missing receipts fail closed.
+                    if not _received(store, role, item):
+                        raise
+                index_ack(store, role, item)
+        finally:
+            if changed:
+                # Reuse the watched work-items parent as a non-authoritative
+                # drain hint; no role receipt directory is needed at install.
+                try:
+                    os.utime(store.root / "work-items", None, follow_symlinks=False)
+                except (OSError, NotImplementedError):
+                    pass
 
 
 def progress(store, roles, *, limit=100):

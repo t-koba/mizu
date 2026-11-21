@@ -698,7 +698,9 @@ retention are not implemented, so these citations remain durable.
 
 Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
 `work_item_events` (default disabled). The event adapter reuses these same seed
-and full-chain validators, not a separate glob projection. Per-role exact
+and full-chain validators at write time and records the validated payload in a
+bounded pending-event index; reads use that index and never replay terminal
+chains or enumerate receipts. Per-role exact
 terminal-identity receipts live outside the immutable work-item records and
 outside decision timestamp cursors. Each delivered terminal row has a
 role/payload-bound `ack_token`; only the tokens explicitly selected in

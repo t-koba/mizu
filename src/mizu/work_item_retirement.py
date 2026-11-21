@@ -91,8 +91,13 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
             raise LimitExceeded("Work-item retirement exceeds byte bound")
         from .smoke_refs import require_pairs
         require_pairs(store.root, current.get("smoke_refs", []))
-        project(current, record)  # Refuse an unreadable projection before committing.
+        projected = project(current, record)  # Refuse an unreadable projection before committing.
+        from .work_item_events import validate_terminal_payload
+        validate_terminal_payload(store, projected)
         with store.committing([item_id]):
             write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
+        from .work_item_events import index_terminal
+        index_terminal(store, projected)
         store._wake_terminal()
+        return projected
     return project(current, record)

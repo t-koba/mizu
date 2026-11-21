@@ -143,6 +143,7 @@ class Project:
                                     queues=config.queues,
                                     completion_evidence=config.completion_evidence,
                                     writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
+                                    event_roles_lookup=lambda: list(self.roles),
                                     ci_wait_settings=self.vcs_settings,
                                     ci_request_roles=lambda: wait_ci_request_roles(self.config, self.roles),
                                     record_kinds=config.record_kinds,
