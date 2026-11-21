@@ -1483,6 +1483,11 @@ CALL_KEYWORDS = frozenset({
 # (enclosing scope, callee, keyword or bounded-maximum arg, occurrence):
 #     (expression, class, rationale)
 CALLS = {
+    'proposal_waits.py': {
+        ('shared_store', 'KindPolicy', 'maximum', 0): (
+            '8192', 'mechanism',
+            'proposal waits / bounded immutable merge evidence record'),
+    },
     'classification.py': {
         ('_model_summary', 'bounded', 'maximum', 0): (
             'MAX_CLASSIFICATION_MODEL_SUMMARY_BYTES', 'safety',
@@ -1697,6 +1702,12 @@ PARAMETER_BOUND = re.compile(
 # (relative file, qualified class/function scope, parameter):
 #     (exact ast.unparse(default), classification, owner / rationale)
 PARAMETER_DEFAULTS = {
+    ('proposal_waits.py', 'delivery', 'limit'): (
+        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
+    ('proposal_waits.py', 'pending', 'limit'): (
+        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
+    ('proposal_waits.py', 'readiness_init', 'limit'): (
+        '10', 'policy', 'proposal waits / caller-selected readiness candidate batch'),
     ('budget.py', 'Budget.__init__', 'retention_days'): (
         '31', 'configured policy', 'budget / [limits] retention_days fallback'),
     ('check_jobs.py', 'logs', 'offset'): (
