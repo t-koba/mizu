@@ -1829,11 +1829,12 @@ class WorkItems:
             self._validate_transition(current, record)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")
+            from .work_item_events import index_terminal, terminal_marker
+            marker = terminal_marker(self)
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
-            from .work_item_events import index_terminal
-            index_terminal(self, record, terminal=False)
+            index_terminal(self, record, terminal=False, marker=marker)
             self._wake_terminal()
             return record
 
@@ -2058,15 +2059,17 @@ class WorkItems:
                 self._require_doing_capacity(actor)
             if len(canonical(record)) > (MAX_EVENT_BYTES if resolution is not None else PREVIEW_BYTES):
                 raise LimitExceeded("Work-item event exceeds byte bound")
+            marker = None
             if status in ("done", "dropped"):
-                from .work_item_events import validate_terminal_payload
+                from .work_item_events import terminal_marker, validate_terminal_payload
                 validate_terminal_payload(self, record)
+                marker = terminal_marker(self)
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
             if status in ("done", "dropped"):
                 from .work_item_events import index_terminal
-                index_terminal(self, record)
+                index_terminal(self, record, marker=marker)
                 self._wake_terminal()
             return record
 

@@ -126,6 +126,9 @@ class CompletionContractTests(Fixture):
         report = storage.audit(self.project)
         self.assertEqual(report["work_item_events_skipped"], 0)
         self.assertEqual(report["references"]["work_item_snapshots"], 0)
+        # Dropping the derived ledger changes its generation; the settings
+        # refresh re-pins the event index before the read.
+        self.project.refresh_settings()
         page = work_item_events.pending(self.project.work_items, "reviewer", ("done",), sources="any")
         self.assertEqual(page["events"][0]["id"], done["id"])
         self.assertEqual(page["events"][0]["completion_policy"], HOLDER_ATTESTATION)

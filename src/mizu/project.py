@@ -155,6 +155,8 @@ class Project:
                                     stale_seconds=config.limits.work_items_stale_seconds,
                                     history_temporaries=config.limits.history_temporaries)
         self.ledger.attach(CHECK_JOBS, CheckJobSource(self))
+        from .work_item_events import index_roles
+        index_roles(self.work_items)
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)
@@ -205,6 +207,11 @@ class Project:
         self.verify = verify
         self.recorded_batches = recorded_batches
         self.lineage_target = lineage_target
+        store = getattr(self, "work_items", None)
+        if store is not None:
+            # Newly subscribed roles must see pre-existing terminal events.
+            from .work_item_events import index_roles
+            index_roles(store)
 
     def vcs_settings(self, config: Config | None = None) -> dict:
         """Shared adapter policy with this project's trusted target, if configured."""

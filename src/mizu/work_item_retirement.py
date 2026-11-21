@@ -92,12 +92,13 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         from .smoke_refs import require_pairs
         require_pairs(store.root, current.get("smoke_refs", []))
         projected = project(current, record)  # Refuse an unreadable projection before committing.
-        from .work_item_events import validate_terminal_payload
+        from .work_item_events import terminal_marker, validate_terminal_payload
         validate_terminal_payload(store, projected)
+        marker = terminal_marker(store)
         with store.committing([item_id]):
             write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
         from .work_item_events import index_terminal
-        index_terminal(store, projected)
+        index_terminal(store, projected, marker=marker)
         store._wake_terminal()
         return projected
     return project(current, record)

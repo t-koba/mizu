@@ -3,9 +3,10 @@
 The work-item store remains authoritative. A write-time index holds the
 current pending rows and each role's exact acknowledgement counter plus its
 newest-ten-receipt sample; reads touch only that index, never terminal chains
-or receipt directories. Receipts are exact, source-scoped, per-role
-identities, not watermarks. A partial acknowledgement can only cause replay
-of the remaining identities.
+or receipt directories. A one-row ledger marker binds the index to the latest
+terminal head change without counting history. Receipts are exact,
+source-scoped, per-role identities, not watermarks. A partial acknowledgement
+can only cause replay of the remaining identities.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ SOURCE = "work_item"
 ACKED_ID_SAMPLE = 10
 INDEX_NAME = "work-item-events-index.json"
 HEADS_NAME = "work-item-events-heads.json"
-INDEX_SCHEMA = 1
+INDEX_SCHEMA = 2
 MAX_INDEX_BYTES = 16 * 1024 * 1024
 
 
@@ -77,9 +78,10 @@ def _new_role():
     return {"acknowledged": 0, "acked": [], "pending": []}
 
 
-def _new_index(roles):
-    return {"schema": INDEX_SCHEMA, "terminal_count": 0, "unknown": {"done": 0, "dropped": 0},
-            "events": {}, "roles": {role: _new_role() for role in roles}}
+def _new_index(roles, generation, terminal_seq):
+    return {"schema": INDEX_SCHEMA, "generation": generation, "terminal_seq": terminal_seq,
+            "unknown": {"done": 0, "dropped": 0}, "events": {},
+            "roles": {role: _new_role() for role in roles}}
 
 
 def _sample(state, key, event_id):
@@ -94,10 +96,13 @@ def _sample(state, key, event_id):
 
 
 def _validate_index(index):
+    generation = index.get("generation") if isinstance(index, dict) else None
     if (not isinstance(index, dict)
-            or set(index) != {"schema", "terminal_count", "unknown", "events", "roles"}
+            or set(index) != {"schema", "generation", "terminal_seq", "unknown", "events", "roles"}
             or type(index["schema"]) is not int or index["schema"] != INDEX_SCHEMA
-            or type(index["terminal_count"]) is not int or index["terminal_count"] < 0
+            or not isinstance(generation, str) or len(generation) != 64
+            or any(char not in "0123456789abcdef" for char in generation)
+            or type(index["terminal_seq"]) is not int or index["terminal_seq"] < 0
             or not isinstance(index["events"], dict) or not isinstance(index["roles"], dict)):
         raise Denied("Malformed work-item event index")
     unknown = index["unknown"]
@@ -189,9 +194,19 @@ def _write_heads(store, heads):
     _write_state(store, HEADS_NAME, heads, _validate_heads)
 
 
-def _terminal_count(store):
+def _freshness(store):
+    """Ledger generation and terminal head changes in one constant-cost row."""
     with store._ledger.read("items", locked=False) as db:
-        return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('done','dropped')")[0][0]
+        state = _rows(db, "SELECT c.token_key, t.seq FROM item_changes AS c, "
+                          "terminal_changes AS t WHERE c.singleton=1 AND t.singleton=1")
+    if (len(state) != 1 or not isinstance(state[0][0], bytes)
+            or len(state[0][0]) != 32 or type(state[0][1]) is not int
+            or state[0][1] < 0):
+        raise Denied("Work-item terminal event marker unreadable")
+    return state[0][0].hex(), state[0][1]
+
+#: Write-boundary evidence: the marker before this item's record is committed.
+terminal_marker = _freshness
 
 
 def _index_roles(store, index=None, extra=()):
@@ -220,9 +235,8 @@ def _receipt_roles(store):
 
 def _compose_index(store, found, roles, received):
     """Build compact state from validated terminal rows and exact receipts."""
-    index = _new_index(roles)
+    index = _new_index(roles, *_freshness(store))
     heads = {"schema": INDEX_SCHEMA, "heads": {}}
-    index["terminal_count"] = len(found)
     for raw, creator, status in found:
         item = json.loads(raw)
         row = _payload(store, item, {item["id"]: creator})
@@ -266,21 +280,50 @@ def _rebuild_index(store, extra=()):
     return index
 
 
+def _load_index(store, marker):
+    """Load an index pinned to a known marker, or None when it must be rebuilt."""
+    try:
+        index = _read_index(store)
+        (store.root / HEADS_NAME).lstat()
+    except (Denied, FileNotFoundError):
+        return None
+    if index is None or (index["generation"], index["terminal_seq"]) != marker:
+        return None
+    return index
+
+
 def _ensure_index(store, extra=()):
     """Load a current index, rebuilding only from a write path."""
-    index = _read_index(store)
-    try:
-        (store.root / HEADS_NAME).lstat()
-    except FileNotFoundError:
-        heads_missing = True
-    else:
-        heads_missing = False
-    if index is None or heads_missing or index["terminal_count"] != _terminal_count(store):
+    index = _load_index(store, _freshness(store))
+    if index is None:
         return _rebuild_index(store, extra)
-    roles = (set(_index_roles(store)) | set(extra)) - set(index["roles"])
-    if roles:
-        index["roles"].update({role: _new_role() for role in roles})
+    if (set(_index_roles(store)) | set(extra)) - set(index["roles"]):
+        # A new subscriber needs validated history and exact receipts, not an
+        # empty role state that would hide events until a later write.
+        return _rebuild_index(store, extra)
     return index
+
+
+def index_roles(store):
+    """Recover the index and seed configured roles at a write boundary.
+
+    Project start and settings refresh hold the record lock here. A missing,
+    stale or role-incomplete index is rebuilt from validated terminal rows and
+    exact receipts; reads between an interrupted write and this boundary keep
+    failing closed.
+    """
+    with record_lock(store.root):
+        try:
+            index = _read_index(store)
+        except Denied:
+            index = None
+        marker = _freshness(store)
+        current = index is not None and (index["generation"], index["terminal_seq"]) == marker
+        if current and set(_index_roles(store)) <= set(index["roles"]):
+            return
+        if not marker[1]:
+            return  # No terminal history exists to seed.
+        _rebuild_index(store)
 
 
 def _terminal_row(store, item):
@@ -295,15 +338,30 @@ def validate_terminal_payload(store, item):
     _terminal_row(store, item)
 
 
-def index_terminal(store, item, *, terminal=True):
+def index_terminal(store, item, *, terminal=True, marker=None):
     """Index one committed terminal head, or drop a superseded one.
 
-    Caller holds records.lock. Every payload is validated before it is
-    indexed, and a changed head triggers a full write-time rebuild so exact
+    Caller holds records.lock. ``marker`` is the freshness evidence read before
+    the record commit; the index must still match it, so an earlier interrupted
+    write cannot be mistaken for this one. Every payload is validated before it
+    is indexed, and a changed head triggers a full write-time rebuild so exact
     acknowledgement samples never need recovery on a read.
     """
-    index = _ensure_index(store)
-    heads = _read_heads(store)["heads"]
+    index = None if marker is None else _load_index(store, marker)
+    try:
+        current = _freshness(store)
+    except Denied:
+        current = None
+    if (index is None or current is None or current[0] != marker[0]
+            or current[1] not in (marker[1], marker[1] + 1)
+            or set(_index_roles(store)) - set(index["roles"])):
+        # The in-flight head is already in the ledger, so the rebuild covers it.
+        index = _rebuild_index(store)
+    try:
+        heads = _read_heads(store)["heads"]
+    except Denied:
+        index = _rebuild_index(store)
+        heads = _read_heads(store)["heads"]
     item_id = item["id"]
     if not terminal:
         if item_id in heads:
@@ -317,7 +375,8 @@ def index_terminal(store, item, *, terminal=True):
         return
     creator, row = _terminal_row(store, item)
     heads[item_id] = event_id
-    index["terminal_count"] += 1
+    if current is not None:
+        index["generation"], index["terminal_seq"] = current
     if creator is None:
         index["unknown"][item["status"]] += 1
     index["events"][event_id] = {"key": _event_key(row), "row": row}
@@ -422,10 +481,10 @@ def _pending_pages(store, subscriptions, limit):
     pages = [_PendingPage(*subscription, limit) for subscription in subscriptions]
     index = _read_index(store)
     if index is None:
-        if _terminal_count(store):
+        if _freshness(store)[1]:
             raise Denied("Work-item event index missing; a write must rebuild it first")
         return [page.result() for page in pages]
-    if index["terminal_count"] != _terminal_count(store):
+    if (index["generation"], index["terminal_seq"]) != _freshness(store):
         raise Denied("Work-item event index stale; retry after a write rebuilds it")
     for page in pages:
         state = index["roles"].get(page.role, _new_role())

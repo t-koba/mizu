@@ -1,5 +1,6 @@
 """Terminal delivery protocol: real stores and fake model dispatch, no RPC/network."""
 import concurrent.futures
+import contextlib
 import dataclasses
 import json
 import os
@@ -393,6 +394,9 @@ class WorkItemEventTests(Fixture):
         with self.assertRaises(Denied):
             self.page()
         gap.rename(path)
+        # Direct history edits now change the ledger generation; a write
+        # boundary re-pins the index before the restored history is read.
+        self.project.refresh_settings()
         selected = self.page()["events"]
         events.acknowledge(self.store, "reviewer", selected)
         receipt = self.project.root / "work-item-receipts/reviewer" / f"{item['id']}.2.json"
@@ -640,6 +644,78 @@ class WorkItemEventTests(Fixture):
         self.assertEqual([row["id"] for row in page["events"]], [fresh["id"]])
         self.assertEqual(page["acknowledged_event_ids"], [rows[0]["event"]])
 
+    def test_advanced_marker_fails_closed_until_a_write_rebuilds(self):
+        import sqlite3
+        self.terminal()
+        self.assertEqual(self.page()["pending"], 1)
+        # Simulate a ledger commit whose index append was interrupted: only
+        # the one-row marker moved, so the compact index is stale.
+        with contextlib.closing(sqlite3.connect(self.project.root / "ledger.sqlite3")) as db, db:
+            db.execute("UPDATE terminal_changes SET seq=seq+1 WHERE singleton=1")
+        with self.assertRaisesRegex(Denied, "stale"):
+            self.page()
+        self.terminal()
+        self.assertEqual(self.page()["pending"], 2)
+
+    def test_terminal_closures_append_without_rescanning_terminal_history(self):
+        original = events._compose_index
+        scanned = []
+
+        def counting(store, found, roles, received):
+            scanned.append(len(found))
+            return original(store, found, roles, received)
+
+        for closure in range(5):
+            with patch.object(events, "_compose_index", side_effect=counting):
+                self.terminal()
+            page = self.page()
+            self.assertEqual(page["pending"], closure + 1)
+            index = events._read_index(self.store)
+            self.assertEqual((index["generation"], index["terminal_seq"]),
+                             events.terminal_marker(self.store))
+        # The first close rebuilds once with its own row; the next four
+        # closures append without scanning terminal history again.
+        self.assertEqual(scanned, [1])
+
+    def test_new_role_sees_existing_events_on_refresh_and_fresh_project(self):
+        import dataclasses as dc
+        from mizu.project import Project, initialize
+        roles = dict(self.config.roles)
+        roles["maintainer"] = dc.replace(roles["maintainer"], work_item_events=("dropped",),
+                                         work_item_sources="any")
+        config = dc.replace(self.config, roles=roles)
+        source = self.root / "source"
+
+        # A fresh project whose settings already name the new role, but whose
+        # earlier events were written while the role was not subscribed.
+        fresh = initialize(config, "fresh", source, self.goal,
+                           ["worker", "searcher", "reviewer", "reporter", "consult"],
+                           ["python3 -m unittest"])
+        for number in range(2):
+            seed = fresh.work_items.create(idempotency_key=f"pre-role-{number}",
+                                           title="Before subscription", actor="reviewer")["record"]["work_item"]
+            fresh.work_items.transition(seed["id"], expected_rev=1, status="dropped",
+                                        actor="worker", reason="Retired")
+        path = fresh.root / "project.toml"
+        path.write_text(path.read_text().replace(
+            '"consult"]', '"consult", "maintainer"]'))
+        restarted = Project(config, "fresh")
+        page = events.pending(restarted.work_items, "maintainer", ("dropped",), sources="any")
+        self.assertEqual((page["pending"], len(page["events"])), (2, 2))
+
+        # The same seeding happens when a running project reloads settings.
+        for _ in range(2):
+            self.terminal()
+        self.assertEqual(self.page("maintainer", sources="any")["pending"], 0)
+        path = self.project.root / "project.toml"
+        path.write_text(path.read_text().replace(
+            '"consult"]', '"consult", "maintainer"]'))
+        self.project.config = config
+        self.project.refresh_settings()
+        page = events.pending(self.store, "maintainer", ("dropped",), sources="any")
+        self.assertEqual((page["pending"], len(page["events"])), (2, 2))
+        self.assertEqual(self.page()["pending"], 2)  # the original subscriber is unchanged
+
     def test_pending_read_does_not_grow_with_acknowledged_history(self):
         _, item = self.terminal()
         row = self.page()["events"][0]
@@ -663,7 +739,6 @@ class WorkItemEventTests(Fixture):
                 reads.append((name, len(raw)))
                 return raw
             with patch.object(events, "safe_read", side_effect=counting_read), \
-                    patch.object(events, "_terminal_count", return_value=acked + 1), \
                     patch.object(self.store, "current_items", side_effect=AssertionError("history read")), \
                     patch.object(events, "_receipts", side_effect=AssertionError("receipt scan")):
                 page = events.pending(self.store, "reviewer", ("dropped",))

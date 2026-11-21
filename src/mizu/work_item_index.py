@@ -28,6 +28,10 @@ CREATE TABLE item_changes(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     token_key BLOB NOT NULL, seq INTEGER NOT NULL CHECK(typeof(seq)='integer' AND seq>=0));
 INSERT INTO item_changes VALUES (1, randomblob(32), 0);
+CREATE TABLE terminal_changes(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    seq INTEGER NOT NULL CHECK(typeof(seq)='integer' AND seq>=0));
+INSERT INTO terminal_changes VALUES (1, 0);
 """
 
 
@@ -45,6 +49,12 @@ class _Items(Domain):
                 f"SELECT {', '.join(COLUMNS)} FROM items WHERE id=?", (value[0],)).fetchone()
             if previous != tuple(value):
                 db.execute("UPDATE item_changes SET seq=seq+1")
+                terminal = ("done", "dropped")
+                if ((previous is not None and previous[2] in terminal)
+                        or value[2] in terminal):
+                    # Any terminal head change, including a dropped-to-done
+                    # correction, advances the one-row freshness marker.
+                    db.execute("UPDATE terminal_changes SET seq=seq+1")
                 db.execute(_INSERT, value)
         else:
             raise Denied("Invalid work-item index entry")
@@ -104,4 +114,4 @@ class _Items(Domain):
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-ITEMS = _Items("items", 4, _TABLES)
+ITEMS = _Items("items", 5, _TABLES)

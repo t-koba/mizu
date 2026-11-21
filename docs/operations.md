@@ -624,7 +624,12 @@ rebuilds the index when every history validates. Writers wait for the audit.
   no event payload rows. `total` and `truncated` report role coverage; the
   summary is at most 1 MiB. Counts come from the write-time pending-event index
   (validated terminal payloads and exact receipts, never a timestamp watermark);
-  reads do not replay chains or enumerate receipts. Unknown routing is reported independently and excluded
+  reads do not replay chains or enumerate receipts. A writer-maintained one-row
+  terminal-change marker, pinned to the work-item ledger generation, validates
+  the index on every read; a stale or malformed marker fails closed without
+  counting history. Roles added to a project are indexed at project start or a
+  settings refresh, so their pre-existing unacknowledged events are pending
+  without waiting for another terminal write. Unknown routing is reported independently and excluded
   in `own` mode (only explicit `any` opt-in receives it). A matching retained
   event with no per-role receipt is pending even if it predates enabling that
   subscription; receipts persist across unsubscribe/re-subscribe and backup /
