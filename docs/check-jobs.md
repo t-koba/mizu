@@ -169,17 +169,21 @@ without polling, follow the returned wait recipe and finish with
 `outcome=wait, wait_for_check=<id>`. That ends the unit, releases its model slot
 and lets completion wake the role.
 
-The managed Pi engine can also deliver an owned result into the unit that is
-already running: when a job reaches a terminal state after that unit's opening
-prompt was captured, the host sends one bounded `steer` notification at the
-next SDK turn boundary. It names only the job ID and status and points back to
-`action=result`; it carries no output and is not acceptance. Terminal results
-already in the opening prompt are not repeated, and each new result is injected
-at most once per unit. The same `check_job` capability and
-`roles.<name>.check_result_wake` policy gate this path. It consumes no wake
-marker, acknowledges no output and adds no model-visible polling or sleep; idle
-waking and `result` retrieval stay as before. The one-shot pi-durable launcher
-has no live input channel, so it keeps the dispatch-wake path only.
+Both managed engines, Pi and pi-durable, can deliver an owned result into the
+unit that is already running: when a job reaches a terminal state after that
+unit's opening prompt was captured, the host sends one bounded `steer`
+notification at the next model turn boundary. It names only the job ID and
+status and points back to `action=result`; it carries no output and is not
+acceptance. Terminal results already in the opening prompt are not repeated,
+and each new result is injected at most once per unit. The same `check_job`
+capability and `roles.<name>.check_result_wake` policy gate this path. Neither
+engine polls, sleeps, acknowledges output or needs a wake to keep the unit
+running; output stays behind `action=result`. Managed Pi presents the
+notification through its SDK steer channel and leaves the independent dispatch
+wake untouched. Managed pi-durable submits it as a durable steer input at a
+provider turn boundary and records that delivery as satisfying the automatic
+wake, so no redundant dispatch attempt follows it. Idle waking and `result`
+retrieval stay as before.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
 The work unit ends and returns its model slot and workspace lock. The wait

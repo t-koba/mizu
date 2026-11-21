@@ -7,6 +7,7 @@ import unittest
 
 from support import Fixture, ROOT, ScriptDriver
 from mizu import check_jobs
+from mizu.errors import Denied
 from mizu.pi import CheckSteer, PiDriver
 from mizu.runtime import Engine
 
@@ -170,6 +171,76 @@ class PiSteerTransportTests(SteerFixture):
         self.assertLessEqual(len(delivered[0].encode('utf-8')), check_jobs.MAX_CHECK_STEER_MESSAGE_BYTES)
         self.assertFalse((check_jobs.root(self.project) / job['id'] / 'wake.json').exists())
         self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+
+
+
+class CheckSteerBridgeTests(SteerFixture):
+    """Host-owned _check_steer for the managed pi-durable lane."""
+
+    def test_bridge_returns_only_owned_unacknowledged_terminal_results(self):
+        job = self.job()
+        other = self.job('printf reviewer', role='reviewer')
+        queued = self.job('printf pending', run=False)
+        context = self.context()
+        response = context.handle('_check_steer', {})
+        self.assertEqual([row['id'] for row in response['messages']], [job['id']])
+        message = response['messages'][0]
+        self.assertEqual(set(message), {'id', 'message'})
+        self.assertEqual(message['id'], job['id'])
+        self.assertNotIn('printf ok', message['message'])
+        self.assertLessEqual(len(message['message'].encode('utf-8')),
+                             check_jobs.MAX_CHECK_STEER_MESSAGE_BYTES)
+        # The same capability and policy gate as dispatch wakes still applies.
+        self.set_role('worker', capabilities=tuple(c for c in self.config.roles['worker'].capabilities
+                                                    if c != 'check_job'))
+        self.assertEqual(self.context().handle('_check_steer', {}), {'messages': []})
+        self.set_role('worker', capabilities=(*self.config.roles['worker'].capabilities, 'check_job'),
+                      check_result_wake=False)
+        self.assertEqual(self.context().handle('_check_steer', {}), {'messages': []})
+        self.set_role('worker', check_result_wake=True)
+        check_jobs.acknowledge(self.project, 'worker', {job['id']})
+        self.assertEqual(self.context().handle('_check_steer', {}), {'messages': []})
+        self.assertTrue(check_jobs.read(self.project, queued['id'])['status'] in ('queued', 'running'))
+        self.assertTrue(check_jobs.read(self.project, other['id'])['status'] in check_jobs.TERMINAL_WAKE_STATUSES)
+
+    def test_bridge_response_is_bounded_by_the_named_notification_bound(self):
+        for index in range(check_jobs.MAX_CHECK_STEER_NOTIFICATIONS + 2):
+            self.job(f'printf bound-{index}')
+        context = self.context()
+        response = context.handle('_check_steer', {})
+        self.assertEqual(len(response['messages']), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
+        ids = [row['id'] for row in response['messages']]
+        self.assertEqual(len(set(ids)), len(ids))
+
+    def test_bridge_marks_wake_delivered_once_without_acknowledging_output(self):
+        job = self.job()
+        context = self.context()
+        # The job completed after this unit's opening prompt was captured.
+        context.check_steer_seen = frozenset()
+        wake = check_jobs.root(self.project) / job['id'] / 'wake.json'
+        self.assertFalse(wake.exists())
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        first = context.handle('_check_steer', {})
+        self.assertEqual([row['id'] for row in first['messages']], [job['id']])
+        self.assertTrue(wake.exists())
+        self.assertEqual(json.loads(wake.read_text())['run'], context.run_dir.name)
+        self.assertIn(job['id'], context.check_steer_seen)
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+        self.assertEqual(context.handle('_check_steer', {}), {'messages': []})
+        # Presentation consumed only the dispatch wake: result retrieval and
+        # explicit acknowledgement still own the unread output.
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        result = check_jobs.result(context, job['id'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+
+    def test_bridge_refuses_malformed_arguments(self):
+        job = self.job()
+        context = self.context()
+        for args in ({'id': job['id']}, {'messages': []}, {'sequence': 1}):
+            with self.assertRaises(Denied):
+                context.handle('_check_steer', args)
+        self.assertFalse((check_jobs.root(self.project) / job['id'] / 'wake.json').exists())
 
 
 if __name__ == '__main__':

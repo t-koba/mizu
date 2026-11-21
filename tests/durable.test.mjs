@@ -17,7 +17,9 @@ import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, assertProviderAuth, boundStatusFor, buildBridgeTools, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
+import { agentChanges, assertProviderAuth, boundStatusFor, buildBridgeTools, deliverCheckSteer,
+  MAX_STEER_ID_CHARS, MAX_STEER_MESSAGE_BYTES, MAX_STEER_NOTIFICATIONS, meterModels,
+  resolveConfiguredModel, settlementFields, STEER_REQUEST_ID_CHARS, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { ModelRuntime as PiModelRuntime }
   from '../adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
@@ -1116,4 +1118,89 @@ test('durable provider completion pairs admission without usage and on rejection
   await assert.rejects(fake.classify(), /provider/);
   assert.deepEqual(done.map(([seq])=>seq), admitted);
   assert.deepEqual(done.map(([, failed])=>failed), [false, true]);
+});
+
+test('submitWithCurrentAgent passes the live root to onRoot before any read or submit', { timeout: 1000 }, async () => {
+  const fake = setupHarness(currentAgent);
+  const handed = [];
+  const result = await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context,
+    root => {
+      handed.push(root);
+      assert.deepEqual(fake.calls, ['root']); // root exists, nothing else has run
+    });
+  assert.deepEqual(handed, [fake.root]);
+  assert.equal(result.root, fake.root);
+  assert.deepEqual(fake.calls, ['root', 'read', 'usage', 'resume', 'submit']);
+  assert.deepEqual(fake.inputs, [currentInput]);
+});
+
+function steerResponder(messages) {
+  const calls = [];
+  const submissions = [];
+  const bridge = { transport: 'test' };
+  const root = {
+    async submit(input, ctx) {
+      assert.equal(ctx, context);
+      submissions.push(input);
+      return { id: 'steer-submission' };
+    },
+  };
+  const call = async (config, operation, args) => {
+    calls.push([config, operation, args]);
+    assert.equal(config, bridge);
+    assert.equal(operation, '_check_steer');
+    assert.deepEqual(args, {});
+    return { messages };
+  };
+  return { bridge, root, calls, submissions, call };
+}
+
+test('check steer submits bounded inputs with a deterministic steer requestId and dedupes by id', async () => {
+  const firstId = 'a'.repeat(64);
+  const secondId = 'b'.repeat(48);
+  const messages = Array.from({ length: MAX_STEER_NOTIFICATIONS }, (_, index) => ({
+    id: index === 0 ? firstId : `${secondId}-${index}`,
+    message: `MIZU CHECK RESULT job ${index}`,
+  }));
+  const fixture = steerResponder(messages);
+  const seen = new Set();
+  const first = await deliverCheckSteer(fixture.bridge, fixture.root, context, seen, { request: fixture.call });
+  assert.equal(first.length, MAX_STEER_NOTIFICATIONS);
+  assert.equal(fixture.submissions.length, MAX_STEER_NOTIFICATIONS);
+  assert.deepEqual(fixture.submissions[0], { type: 'input', content: messages[0].message,
+    requestId: 'steer-' + firstId.slice(0, STEER_REQUEST_ID_CHARS), whenBusy: 'steer' });
+  assert.deepEqual(fixture.calls[0], [fixture.bridge, '_check_steer', {}]);
+  assert.deepEqual(fixture.submissions.map(input => input.requestId),
+    messages.map(entry => 'steer-' + entry.id.slice(0, STEER_REQUEST_ID_CHARS)));
+  assert.equal(fixture.submissions.every(input => input.whenBusy === 'steer'), true);
+  // A later turn boundary never resubmits an id this unit already presented.
+  const later = steerResponder([messages[0], messages[1], { id: 'c'.repeat(40), message: 'new' }]);
+  const second = await deliverCheckSteer(later.bridge, later.root, context, seen, { request: later.call });
+  assert.deepEqual(second.map(input => input.requestId), ['steer-' + 'c'.repeat(40).slice(0, STEER_REQUEST_ID_CHARS)]);
+  assert.equal(later.submissions.length, 1);
+});
+
+test('check steer refuses malformed or oversized responses before submitting anything', async () => {
+  const oversized = Array.from({ length: MAX_STEER_NOTIFICATIONS + 1 }, (_, index) => ({
+    id: `id-${index}`, message: 'notification',
+  }));
+  for (const response of [
+    null,
+    {},
+    { messages: {} },
+    { messages: oversized },
+    { messages: [{ id: 7, message: 'notification' }] },
+    { messages: [{ id: 'a'.repeat(MAX_STEER_ID_CHARS + 1), message: 'notification' }] },
+    { messages: [{ id: 'valid', message: 'm'.repeat(MAX_STEER_MESSAGE_BYTES + 1) }] },
+  ]) {
+    const fixture = steerResponder(null);
+    const call = async () => response;
+    await assert.rejects(
+      deliverCheckSteer(fixture.bridge, fixture.root, context, new Set(), { request: call }),
+      /Malformed check steer/);
+    assert.deepEqual(fixture.submissions, []);
+  }
+  const empty = steerResponder([]);
+  assert.deepEqual(await deliverCheckSteer(empty.bridge, empty.root, context, new Set(), { request: empty.call }), []);
+  assert.deepEqual(empty.submissions, []);
 });

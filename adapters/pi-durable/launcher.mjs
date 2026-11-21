@@ -40,6 +40,14 @@ import { request, typeSchema } from './bridge-client.mjs';
 
 const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'ModelRuntime'];
 const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
+// Mirrors the host's MAX_CHECK_STEER_* bounds. The launcher revalidates the
+// bridge response before turning any notification into a durable input, so a
+// malformed or oversized reply can never reach the model as an unchecked
+// submission. These are protocol mirrors, not new policy.
+export const MAX_STEER_NOTIFICATIONS = 8;
+export const MAX_STEER_ID_CHARS = 128;
+export const MAX_STEER_MESSAGE_BYTES = 1024;
+export const STEER_REQUEST_ID_CHARS = 32;
 
 /**
  * Resolve the pinned model from Pi's own sources.
@@ -327,8 +335,11 @@ export function usageDelta(before, after, key) {
 }
 
 /** Validate the current agent before unpausing recovery in the same session. */
-export async function submitWithCurrentAgent(harness, agent, input, context) {
+export async function submitWithCurrentAgent(harness, agent, input, context, onRoot = null) {
   const root = await harness.root(context, { agent });
+  // Host-owned observation hook: the caller gets the live root immediately,
+  // before any agent read, resume or submit. Four-argument callers are unchanged.
+  if (typeof onRoot === 'function') await onRoot(root);
   const resolved = await root.agent(context);
   // Session continuity: model, tools, instructions, and cwd ride the live
   // conversation. A reopened session keeps its stored agent until told
@@ -354,6 +365,40 @@ export async function submitWithCurrentAgent(harness, agent, input, context) {
   harness.resume(); // continue work a dead process left unfinished
   const submission = await root.submit(input, context);
   return { root, submission, usageBefore };
+}
+
+/** Present host-owned check notifications into the running durable session.
+ *
+ * `seen` is run-local: each id is submitted at most once in this unit. The
+ * host's _check_steer already marked the automatic wake delivered; this helper
+ * only presents the bounded notification and never acknowledges job output.
+ * Malformed or oversized responses are refused before any submission.
+ */
+export async function deliverCheckSteer(bridge, root, context, seen = new Set(), { request: call = request } = {}) {
+  const response = await call(bridge, '_check_steer', {});
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || !Array.isArray(response.messages) || response.messages.length > MAX_STEER_NOTIFICATIONS) {
+    throw new Error('Malformed check steer response');
+  }
+  const notifications = response.messages.map(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+        || typeof entry.id !== 'string' || !entry.id || entry.id.length > MAX_STEER_ID_CHARS
+        || typeof entry.message !== 'string' || !entry.message
+        || Buffer.byteLength(entry.message, 'utf8') > MAX_STEER_MESSAGE_BYTES) {
+      throw new Error('Malformed check steer notification');
+    }
+    return { id: entry.id, message: entry.message };
+  });
+  const submitted = [];
+  for (const { id, message } of notifications) {
+    if (seen.has(id)) continue;
+    const input = { type: 'input', content: message,
+      requestId: 'steer-' + id.slice(0, STEER_REQUEST_ID_CHARS), whenBusy: 'steer' };
+    await root.submit(input, context);
+    seen.add(id);
+    submitted.push(input);
+  }
+  return submitted;
 }
 
 async function runOnce(cfg) {
@@ -428,7 +473,20 @@ async function runOnce(cfg) {
   let boundTripped = false;
   let drainTripped = false;
   let submission = null;
+  let activeRoot = null;
+  const steerSeen = new Set();
   const observations = [];
+  // Steer lands at a model turn boundary. The host already recorded wake
+  // delivery, so a delivery failure only loses this notification: never fail
+  // the model unit or disturb the usage/admission accounting around it.
+  async function steerTurnBoundary() {
+    if (!activeRoot) return;
+    try {
+      await deliverCheckSteer(bridge, activeRoot, context, steerSeen);
+    } catch (error) {
+      process.stderr.write(`pi-durable: check steer delivery failed: ${error?.message ?? error}\n`);
+    }
+  }
   async function admit() {
     const admittedSequence = ++sequence;
     try {
@@ -454,11 +512,13 @@ async function runOnce(cfg) {
     return admittedSequence;
   }
   async function reportUsage(usage, shape) {
-    if (!usage) return;
-    observations.push({ provider: shape?.provider ?? cfg.provider, model: shape?.model ?? cfg.model,
-      thinkingLevel: shape?.thinkingLevel ?? cfg.thinkingLevel ?? null });
-    await request(bridge, '_model_usage', { sequence: ++sequence, usage,
-      model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
+    if (usage) {
+      observations.push({ provider: shape?.provider ?? cfg.provider, model: shape?.model ?? cfg.model,
+        thinkingLevel: shape?.thinkingLevel ?? cfg.thinkingLevel ?? null });
+      await request(bridge, '_model_usage', { sequence: ++sequence, usage,
+        model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
+    }
+    await steerTurnBoundary();
   }
   meterModels(models, { admit, report: reportUsage,
     done: (sequence, failed = false) => request(bridge, '_request_done', { sequence, failed }) });
@@ -503,7 +563,8 @@ async function runOnce(cfg) {
       tools, instructions: cfg.instructions, cwd: cfg.cwd };
     if (cfg.thinkingLevel) agent.thinkingLevel = cfg.thinkingLevel;
     const { root, submission: currentSubmission, usageBefore } = await submitWithCurrentAgent(harness, agent,
-      { type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
+      { type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context,
+      root => { activeRoot = root; });
     submission = currentSubmission;
     const settled = await submission.wait(context);
     if (boundTripped) {

@@ -526,6 +526,23 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                      "model": self.runtime_models.get((attempt, seq))}
                     for (attempt, seq), value in self.runtime_usage.items()]})
                 return {"recorded": True}
+            if operation == "_check_steer":
+                # Host-owned bridge operation for the managed pi-durable lane.
+                # It is not a model capability and never exposes job output:
+                # only the bounded, host-written notification reaches the
+                # running unit. Delivery marks the automatic wake satisfied for
+                # this run, so no redundant dispatch attempt follows it; the
+                # unread result still needs action=result and acknowledgement.
+                if arguments != {}:
+                    raise Denied("Unsupported check steer request")
+                seen = getattr(self, 'check_steer_seen', ())
+                jobs = check_jobs.steer_pending(self.project, self.role.name, seen)
+                messages = [{'id': job['id'], 'message': check_jobs.steer_message(job)}
+                            for job in jobs[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS]]
+                ids = [message['id'] for message in messages]
+                check_jobs.mark_wake_delivered(self.project, self.role.name, ids, self.run_dir.name)
+                self.check_steer_seen = frozenset(set(seen) | set(ids))
+                return {'messages': messages}
             if operation == "_engine_tool":
                 if self.bound_hit is not None:
                     raise Denied(self._bound_message())
