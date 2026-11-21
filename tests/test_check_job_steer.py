@@ -152,6 +152,36 @@ class SteerTests(SteerFixture):
             self.assertEqual(discover.call_args.kwargs['ids'], [second['id']])
             self.assertEqual(len(channel.sent), 2)
 
+    def test_large_completion_interval_delivers_every_change_in_bounded_batches(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 8
+        jobs = [self.job(f'printf large-{index}') for index in range(count)]
+        expected = {job['id'] for job in jobs}
+        cursor = check_jobs.CheckSteerCursor()
+        presented, delivered = set(), []
+        pages = []
+        real_read = check_jobs._steer_changes
+
+        def bounded_read(*args):
+            page = real_read(*args)
+            pages.append(len(page))
+            return page
+
+        with patch.object(check_jobs, '_steer_changes', bounded_read):
+            for _ in range(count + 2):
+                batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+                if not batch:
+                    break
+                self.assertLessEqual(len(batch), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
+                for item in batch:
+                    self.assertNotIn(item['id'], presented)
+                    presented.add(item['id'])
+                    delivered.append(item['id'])
+        self.assertEqual(set(delivered), expected)
+        self.assertEqual(len(delivered), count)
+        self.assertTrue(pages)
+        self.assertLessEqual(max(pages), check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)
+        self.assertEqual(sum(pages), count)
+
     def test_completion_change_index_covers_overlay_and_rebuild(self):
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project.config = self.config

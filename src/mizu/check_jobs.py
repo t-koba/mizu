@@ -2000,27 +2000,33 @@ TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'canc
 
 @dataclasses.dataclass
 class CheckSteerCursor:
-    """One running unit's bounded position in the completion-change index."""
+    """One unit's low-water index position and pending newest-first job IDs.
+
+    ``seq`` advances only when a bounded page is read into ``candidates``;
+    undelivered IDs drain before the next page is read, so a large interval
+    cannot starve its oldest completions or grow the buffer past one page.
+    """
     seq: int = 0
     candidates: list = dataclasses.field(default_factory=list)
 
 
 def _steer_changes(project, role, cursor):
-    """Read one bounded page of this role's new terminal completions."""
+    """Read the oldest bounded page of new completions, newest-first."""
     with project.ledger.read('check_jobs', locked=False) as db:
         rows = db.execute(
             'SELECT seq, job_id FROM check_completion_changes WHERE role=? AND seq>? '
-            'ORDER BY seq DESC LIMIT ?',
+            'ORDER BY seq ASC LIMIT ?',
             (role, cursor.seq, MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
     if rows:
-        cursor.seq = max(cursor.seq, *(row[0] for row in rows))
-    return [row[1] for row in rows if isinstance(row[1], str)]
+        cursor.seq = max(row[0] for row in rows)
+    return [row[1] for row in reversed(rows) if isinstance(row[1], str)]
 
 
 def _steer_incremental(project, role, already, cursor):
     """Present only completion changes since this unit's last boundary."""
-    combined = list(dict.fromkeys([*_steer_changes(project, role, cursor), *cursor.candidates]))
-    batch, carry = combined[:MAX_CHECK_STEER_CHANGE_ROWS], combined[MAX_CHECK_STEER_CHANGE_ROWS:]
+    if not cursor.candidates:
+        cursor.candidates = _steer_changes(project, role, cursor)
+    batch = cursor.candidates[:MAX_CHECK_STEER_CHANGE_ROWS]
     if not batch:
         return []
     from .acceptance import discover
@@ -2035,7 +2041,7 @@ def _steer_incremental(project, role, already, cursor):
             selected.append(summary(job, project))
         else:
             remaining.append(job_id)
-    cursor.candidates = (remaining + carry)[:MAX_CHECK_STEER_CHANGE_ROWS]
+    cursor.candidates = remaining
     return selected
 
 
