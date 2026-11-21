@@ -321,8 +321,8 @@ its focused host tests. Linux/3.13 adds the installer staging gate and a
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one
-syntax check per JavaScript file, and one per shell wrapper -- ten children
-on Windows, seventeen in a POSIX matrix cell, twenty in the durable job.
+syntax check per JavaScript file, and one per shell wrapper -- twelve children
+on Windows, nineteen in a POSIX matrix cell, twenty-three in the durable job.
 The count test pins this account, and the gate's `later_phase_child_count`
 derives it from the checked file set. A budget per child would make the
 gate's own path grow with the number of checked files, so the phase carries
