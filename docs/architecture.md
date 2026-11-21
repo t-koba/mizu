@@ -34,13 +34,14 @@ inputs. The trusted host adapter never executes model-provided host commands.
 |---|---|---|
 | `config.py` | Strict typed TOML, grants, limits, profile resolution | Project priorities |
 | `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
-| `runtime.py` | Admission, locks, capability dispatch, publication | Which algorithm is best |
+| `runtime.py` | Slot/admission primitives, `Context` and `Engine` composition, capability dispatch, publication and the VCS polling daemon; runtime re-exports extracted helpers | Which algorithm is best |
 | `unit_finish.py` | Unit finish validation, acknowledgement selection, writer-parking evidence and progress records; runtime re-exports its helpers | Which work is ready, which events were delivered, or which finish outcome is desirable |
 | `engine_admission.py` | Fresh Engine authority, budget and disk guards plus FIFO dispatch lock admission | Which role should run, request priority, or configured limit values |
 | `engine_delegation.py` | Caller-authoritative child-role and delegation-request resolution and reservation, plus the capability gate, mixed back into `Engine`; runtime re-exports the gate names | Which role to delegate to, request authority details, or retry/scheduling policy |
 | `context_driver.py` | Context exec-session, driver-checkpoint seal lifecycle, and cancellation/wake state, mixed back into `Context` | Whether work is ready, which events arrived, or any dispatch/scheduling policy |
 | `context_lifecycle.py` | Context wall/request deadlines, wrap-up bounds, drain refusal and activity/CI accounting, mixed back into `Context`; runtime re-exports `WRAP_UP_OPS` | When a bound is reached, which wrap-up outcome is desirable, or activity/scheduling policy |
 | `engine_execution.py` | Driver resolution, one-turn dispatch, safe-point checkpoint sealing and bounded execution, mixed back into `Engine` | Which profile or model runs, when to yield, or dispatch scheduling policy |
+| `engine_run.py` | Whole-run `Engine` orchestration: maintenance and probe service, slot admission, prompt projection, the sealed model turn and durable result/health records, mixed back into `Engine`; runtime re-exports its helpers | Which role runs, request priority, or configured limit values |
 | `unit_prompts.py` | Full unit prompt, resumed-session delta, and bounded display projections for ready work, decisions, research, CI, and the writer work order | Session selection/rotation/recovery, admission, scheduling, or lifecycle policy |
 | `workspace_reads.py` | Role-scoped workspace file listing, paged reads, and snapshot diff projections, including virtual upstream refs | Role grants, workspace write policy, or publication semantics |
 | `evidence_records.py` | Exact role-bound retained-evidence reads and durable per-invocation/mutation evidence records | Adapter retries, reconciliation, or evidence truth |
