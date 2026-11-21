@@ -140,6 +140,7 @@ class Project:
         #: Current-state index shared by the project's record stores.
         self.ledger = Ledger(self.root)
         self.work_items = WorkItems(self.root, self.snapshots, self.ledger, vcs=config.vcs,
+                                    queues=config.queues,
                                     completion_evidence=config.completion_evidence,
                                     writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
                                     ci_wait_settings=self.vcs_settings,

@@ -127,12 +127,14 @@ SCOPE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 4000,
 
 #: Work-item wait arguments; store-side normalization validates each kind.
 WORK_ITEM_WAIT_SCHEMA = obj({
-    "kind": {"type": "string", "enum": ["deadline", "code_change", "object_resolved", "ci", "publication_ci"]},
+    "kind": {"type": "string", "enum": ["deadline", "code_change", "object_resolved", "ci",
+                                                 "publication_ci", "proposal_merged"]},
     "smoke_refs": SMOKE_REFS_SCHEMA, "at": text(64),
     "subject": obj({"type": {"type": "string", "enum": ["work_item"]}, "id": text(256)},
                    ("type", "id")),
     "publication_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
     "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
+    "proposal_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "checks": dict(array({"type": "string", "minLength": 1, "maxLength": 256}, 64),
                    minItems=1, uniqueItems=True)}, ("kind",))
 
@@ -408,8 +410,13 @@ DEFINITIONS = {
                               "changing status. Project work_item_wait_resolution policy can reopen "
                               "due object/code-change waits or publication waits superseded by an "
                               "exact retained descendant publication, keeping the holder and "
-                              "recording proof. Reopening does not infer a CI result. Acknowledge "
-                              "handled wait tokens in finish.ack_events; omitted tokens replay.",
+                              "recording proof. Reopening does not infer a CI result.\n\n"
+                              "Use a work-item-only wait {kind:proposal_merged, publication_id, proposal_id} "
+                              "with automatic VCS proposal polling and a complete host-recorded "
+                              "observation matching the publication head. The wait pins both repo/ref/SHA "
+                              "endpoints and wakes the holder only for an exact merge seen in a complete "
+                              "enumeration. Acknowledging the delivered token never changes item status. "
+                              "Handled wait tokens go in finish.ack_events; omitted tokens replay.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},

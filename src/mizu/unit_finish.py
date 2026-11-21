@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from . import check_jobs, ci_waits, reviews, work_item_events
+from . import check_jobs, ci_waits, proposal_waits, reviews, work_item_events
 from .config import role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
 from .fs import DIGEST, canonical, digest, now, write_json
@@ -255,7 +255,8 @@ class ContextFinishMixin:
         tokens = args.get("ack_events", [])
         terminal = {event["ack_token"]: event for event in self.work_item_events}
         ci_tokens = {entry.ack_token for entry in self.ci_wait_manifest}
-        delivered = terminal.keys() | ci_tokens
+        proposal_tokens = {entry.ack_token for entry in self.proposal_wait_manifest}
+        delivered = terminal.keys() | ci_tokens | proposal_tokens
         if (not isinstance(tokens, list) or len(tokens) > 512
                 or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
                 or len(set(tokens)) != len(tokens)
@@ -264,6 +265,9 @@ class ContextFinishMixin:
         selected_ci = [token for token in tokens if token in ci_tokens]
         if selected_ci:
             ci_waits.validate_selection(self, selected_ci)
+        selected_proposal = [token for token in tokens if token in proposal_tokens]
+        if selected_proposal:
+            proposal_waits.validate_selection(self, selected_proposal)
         for token in tokens:
             if token in terminal:
                 work_item_events.acknowledgement_payload(

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from .errors import Denied
 from . import vcs as _vcs
-from .fs import now as now_iso
+from .fs import now as now_iso, lock, read_json, write_json
+from .ci_observation import POLL_STATE_FILE
 from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                               vcs_poll_proposals_enabled,
                               vcs_poll_status_timeout)
@@ -30,8 +31,10 @@ def poll_proposals(config, project, state: dict, *, now: float,
 
     Schema: state stores ``last_proposal_poll`` and an opaque
     ``proposal_cursor`` across ticks, plus host-only ``proposal_refs`` (open
-    proposal id -> referenced short branch names, at most 256 IDs), which
-    the caller persists in the shared poll cache for branch retirement. Each observed row is
+    proposal id -> referenced short branch names, at most 256 IDs) and
+    ``proposal_complete_messages`` (id -> fact-derived queue message id of the
+    latest complete enumeration, at most 256 IDs), which the caller persists in
+    the shared poll cache. Each observed row is
     appended to ``vcs.observation_queue`` when its facts changed
     (``vcs.record_proposal_state``). A cursor-free complete enumeration
     replaces ``proposal_refs`` wholesale; a cursor page only updates its
@@ -42,7 +45,9 @@ def poll_proposals(config, project, state: dict, *, now: float,
     on all failures, while the cursor advances only after the entire page is
     recorded successfully. Evidence: one bounded ``proposal_poll`` event.
     Failure: adapter, malformed-page, or recording errors are visible as
-    ``ok=False``; a failed page preserves its input cursor for retry.
+    ``ok=False``; a failed page preserves its input cursor for retry. A
+    complete enumeration publishes its message-id inventory before any row
+    write so a failed row cannot leave stale facts registration-eligible.
     """
     if not vcs_poll_proposals_enabled(config):
         return None
@@ -86,12 +91,27 @@ def poll_proposals(config, project, state: dict, *, now: float,
         # cursor. Do not combine moving pages into a fictional atomic view.
         enumeration_complete = cursor is None and next_cursor is None and complete is not False
         observed = len(rows)
+        if enumeration_complete:
+            complete_messages = {row["id"]: _vcs.proposal_message_id(
+                row, enumeration_complete=True) for row in rows}
+            # Publish the inventory before row writes, under the same lock as
+            # wait registration. A failed row cannot leave its older id eligible.
+            with lock(project.root / "locks" / "records.lock"):
+                shared = read_json(project.root / POLL_STATE_FILE, {})
+                if not isinstance(shared, dict):
+                    raise Denied("Invalid VCS poll state")
+                write_json(project.root / POLL_STATE_FILE,
+                           {**shared, "proposal_complete_messages": complete_messages})
+                state["proposal_complete_messages"] = complete_messages
         for row in rows:
             receipt = _vcs.record_proposal_state(
                 project, row, enumeration_complete=enumeration_complete)
             recorded += 1
             if receipt.get("changed") is True:
                 changed += 1
+        if enumeration_complete:
+            from .proposal_waits import observe
+            observe(project, rows)
         refs = {} if enumeration_complete else dict(state.get("proposal_refs") or {})
         for row in rows:
             names = _vcs.proposal_refs(row)

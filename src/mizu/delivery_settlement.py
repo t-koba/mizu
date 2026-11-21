@@ -16,8 +16,8 @@ from .fs import ATOMIC_WRITE_TEMP_PREFIX, MAX_FRAME, atomic_write, canonical, di
 from .shared_records import MANIFEST_ROWS, Delivery, SharedRecords
 
 DIRECTORY = 'delivery-settlements'
-#: Delivery families settled per run; CI waits are the one family left.
-FAMILIES = ('ci',)
+#: Delivery families settled per run: receipt-pinned CI and proposal waits.
+FAMILIES = ('ci', 'proposal')
 _RUN = re.compile(r'[0-9a-f]{32}\Z')
 _FIELDS = {'schema', 'run', 'role', 'manifests', 'selected', 'effects', 'closed', 'finalized'}
 _STATES = {'unresolved', 'succeeded', 'not-selected', 'check-join', 'bounded'}
@@ -36,15 +36,16 @@ def _validate(row, run):
         raise Denied('Invalid delivery settlement binding')
     identifier(row['role'])
     for field in ('manifests', 'effects'):
-        if type(row[field]) is not dict or set(row[field]) != set(FAMILIES):
+        families = set(row[field]) if type(row[field]) is dict else set()
+        if not {'ci'} <= families or not families <= set(FAMILIES):
             raise Denied('Invalid delivery settlement families')
     selected = row['selected']
-    if selected is not None and (type(selected) is not dict or set(selected) != set(FAMILIES)):
+    if selected is not None and (type(selected) is not dict
+                                 or set(selected) != set(row['manifests'])):
         raise Denied('Invalid delivery settlement selection')
     if selected is None and row['finalized']:
         raise Denied('Delivery finalized without selections')
-    for family in FAMILIES:
-        entries = row['manifests'][family]
+    for family, entries in row['manifests'].items():
         if type(entries) is not list or len(entries) > MANIFEST_ROWS:
             raise Denied('Invalid delivery settlement manifest')
         try:
@@ -111,6 +112,8 @@ def _write(root, row, *, exclusive=False):
 
 def register(context):
     manifests = {'ci': context.ci_wait_manifest}
+    if context.proposal_wait_manifest:
+        manifests['proposal'] = context.proposal_wait_manifest
     if not any(manifests.values()):
         return
     for entries in manifests.values():
@@ -145,8 +148,7 @@ def begin(context, finished):
         raise Denied('Delivery settlement already selected or closed')
     tokens = set(finished.get('ack_events', []))
     row['selected'] = {}
-    for family in FAMILIES:
-        effects = row['effects'][family]
+    for family, effects in row['effects'].items():
         row['selected'][family] = sorted(tokens & effects.keys())
         for token in effects:
             if token not in tokens:
@@ -166,7 +168,7 @@ def succeeded(context, family):
     In particular no receipt probing or source-current bypass is used on replay.
     """
     row = _owned(context)
-    if row is None:
+    if row is None or family not in row['effects']:
         return
     if row['selected'] is None or row['closed']:
         raise Denied('No open delivery settlement selection')

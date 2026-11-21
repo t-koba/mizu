@@ -10,7 +10,7 @@ import dataclasses
 import time
 from typing import TYPE_CHECKING
 
-from . import check_jobs, ci_waits, queue_facts, reviews, work_item_events
+from . import check_jobs, ci_waits, proposal_waits, queue_facts, reviews, work_item_events
 from . import scheduling as _scheduling
 from .ci_observation import wake_ci_failures
 from .ci_wake import _ci_due_for, _ci_wake_enabled
@@ -92,7 +92,7 @@ def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
         return False
 
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
-    """Whether a CI wait has a deliverable terminal event for the role.
+    """Whether a CI or exact proposal wait has a deliverable event for the role.
 
     Holds ``records.lock`` once and feeds every blocked item from the
     current-state index to the route-owned read-only accumulator; CI evidence
@@ -100,10 +100,13 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     abort. No recovery, writes, syncs or delivery/ack observation.
     """
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
+    proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "records.lock"):
         for item in store.current_items(statuses=("blocked",)):
             ci_waits.readiness_feed(ci_state, store, item)
-        return bool(ci_waits.readiness_events(ci_state))
+            proposal_waits.readiness_feed(proposal_state, store, item)
+        return bool(ci_waits.readiness_events(ci_state)
+                    or proposal_waits.readiness_events(proposal_state))
 
 def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
                      completed_wait_probes=None) -> bool:

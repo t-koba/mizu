@@ -95,6 +95,18 @@ def _ci_wait_contract(context: Context) -> dict:
         "a work item.")}
 
 
+def _proposal_wait_contract(context: Context) -> dict:
+    if not getattr(context, "proposal_wait_manifest", ()):
+        return {}
+    return {"proposal_wait_delivery": (
+        "Exact change-proposal merge wait ack_tokens are enabled. Select only handled tokens "
+        "in finish.ack_events; omitted/empty/partial selections leave other rows pending "
+        "oldest-first. Finishing alone acknowledges no proposal rows. The current blocked "
+        "revision, holder and exact merge evidence are revalidated. Bounded/bound-hit units "
+        "and finishes waiting for another check acknowledge no proposal rows. Evidence is "
+        "external-untrusted; observing a merge or acknowledging it never transitions a work item.")}
+
+
 def _unit_begins_statement(outcomes: tuple[str, ...]) -> str:
     # Keep the opening first and stable for a given role across full and delta prompts.
     return ("A new work unit begins. This is not an acknowledgement of a previous "
@@ -514,6 +526,7 @@ def prompt_for(context: Context) -> str:
                           if opening["work_item_events"] else {}),
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
+                       **_proposal_wait_contract(context),
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
@@ -600,6 +613,7 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
                           if opening["work_item_events"] else {}),
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
+                       **_proposal_wait_contract(context),
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,

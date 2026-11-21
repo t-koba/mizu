@@ -231,7 +231,7 @@ def _present(path: Path) -> bool:
 
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, ledger, *, vcs=None, effective_verification=None,
+    def __init__(self, root: Path, snapshots, ledger, *, vcs=None, queues=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  effective_verification_projection=None, writer_roles_lookup=None,
                  ci_wait_settings=None, ci_request_roles=None,
@@ -243,6 +243,7 @@ class WorkItems:
         self.ci_wait_settings = ci_wait_settings
         self.ci_request_roles = ci_request_roles
         self.vcs = vcs or {}
+        self.queues = queues or {}
         #: Declared publisher record kinds (publication results of CI waits).
         self.record_kinds = record_kinds or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
@@ -565,6 +566,12 @@ class WorkItems:
         if not isinstance(value, dict):
             raise Denied("Blocked work items require a structured wait")
         kind = value.get("kind")
+        if kind == "proposal_merged":
+            from .proposal_waits import normalize
+            refs = validate_refs(value.get("smoke_refs", []))
+            raw = {k: v for k, v in value.items() if k != "smoke_refs"}
+            result = normalize(self, raw, stored=True)
+            return {**result, "smoke_refs": refs} if "smoke_refs" in value else result
         if kind in ("ci", "publication_ci"):
             refs = validate_refs(value.get("smoke_refs", []))
             raw = {k: v for k, v in value.items() if k != "smoke_refs"}
@@ -1919,6 +1926,14 @@ class WorkItems:
                     else:
                         from .ci_waits import normalize
                         registered = normalize(self.root, raw_wait)
+                    if "smoke_refs" in wait:
+                        registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
+                elif isinstance(wait, dict) and wait.get("kind") == "proposal_merged":
+                    if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
+                        raise Denied("Proposal waits require automatic VCS polling and an adapter")
+                    from .proposal_waits import normalize
+                    registered = normalize(self, {k: v for k, v in wait.items()
+                                                  if k != "smoke_refs"})
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
                 elif isinstance(wait, dict) and wait.get("kind") == "object_resolved":

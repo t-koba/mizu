@@ -53,6 +53,7 @@ FIXED_KEYS = frozenset({
     "unit", "unit_tool_surface", "goal_digest", "admission", "grant_transition",
     "published_snapshot", "recent_snapshots", "snapshot_delta", "workspace", "workspace_mode",
     "work_item_events", "wait_events", "ci_wait_delivery",
+    "proposal_wait_delivery",
     "capture_limit", "review_authority", "publication_state", "ci_branch", "external_check_wake",
     "run", "now", "timezone"})
 

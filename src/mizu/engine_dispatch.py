@@ -9,7 +9,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from . import check_jobs, ci_waits, lock_diagnostics, queue_facts, work_item_events
+from . import (check_jobs, ci_waits, lock_diagnostics, proposal_waits,
+               queue_facts, work_item_events)
 from . import scheduling as _scheduling
 from .ci_wake import _ci_due_for, _ci_due_for_with_facts
 from .config import role_work_item_events_limit
@@ -65,7 +66,9 @@ class EngineDispatchMixin:
         terminal_events = terminal_page["events"]
         wait_limit = project.config.limits.wait_events_limit
         ci_events, ci_manifest = ci_waits.delivery(work_items, role_name, limit=wait_limit)
-        wait_events = ci_events
+        proposal_events, proposal_manifest = proposal_waits.delivery(
+            work_items, role_name, limit=wait_limit)
+        wait_events = [*ci_events, *proposal_events]
         has_wait = bool(wait_events or check_jobs.wake_ready(project, role_name))
         # Event-triggered dispatch (platform file triggers) admits only on a
         # due message in a queue that wakes the role, a terminal work-item
@@ -181,7 +184,8 @@ class EngineDispatchMixin:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'next_task': next_task, 'ci_manifest': ci_manifest, 'queues': queues, 'snapshot': snapshot, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, '_resolved_wait': resolved_wait,
+        return {'next_task': next_task, 'ci_manifest': ci_manifest,
+                'proposal_manifest': proposal_manifest, 'queues': queues, 'snapshot': snapshot, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, '_resolved_wait': resolved_wait,
                 'external_check_wake_facts': external_check_wake_facts,
                 '_pending_wait_resolution': pending_resolution,
                 '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch}

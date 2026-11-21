@@ -509,13 +509,27 @@ status for the presence of a wait, or a malformed timestamp is refused. The
 opaque origin keeps the old reference for provenance only; it creates no
 decision, insight, or dependency subscription.
 
+### Observe an exact change-proposal merge wait
+
+With proposal polling and a host-writable `vcs.observation_queue` configured, a
+holder may block on `{kind: proposal_merged, publication_id, proposal_id}`.
+Registration requires the exact publication receipt and the newest complete
+proposal observation whose head matches the receipt branch and published SHA;
+it pins both repo/ref/SHA endpoints. A partial page or a changed endpoint never
+registers or releases the wait. Only a complete enumeration that observes the
+same proposal in state `merged` records the immutable, external-untrusted
+shared evidence for that blocked revision. The holder receives an `ack_token`
+in `wait_events`; an explicit `finish.ack_events` selection consumes it after a
+successful unit. Observing the merge and acknowledging it never change the work
+item's status or holder.
+
 ### Reopen a blocked item whose wait kind was retired
 
 The product evaluates only `deadline`, `code_change`, `ci`,
-`publication_ci`, and `object_resolved` waits on work items. A blocked item
-whose stored wait names a removed kind (`insight_decided`, `dependency`,
-`record_closed`, `proposal_merged`, or `object_resolved` on an insight or
-record) stays inert: the product never resolves it on its own. Such an item
+`publication_ci`, `object_resolved`, and `proposal_merged` waits on work items.
+A blocked item whose stored wait names a removed kind (`insight_decided`,
+`dependency`, `record_closed`, or `object_resolved` on an insight or record)
+stays inert: the product never resolves it on its own. Such an item
 is not stuck. With the project paused, the host operator moves it to `open`
 with a reason:
 

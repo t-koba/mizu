@@ -8,12 +8,13 @@ from .smoke_refs import validate_refs
 from .fs import DIGEST, canonical, digest, now
 
 #: Locally observable conditions, reevaluated from recorded state. Receipt
-#: routes (``ci``, ``publication_ci``) and work-item subjects
-#: (``object_resolved``) have their own normalizers.
+#: routes (``ci``, ``publication_ci``, ``proposal_merged``) and work-item
+#: subjects (``object_resolved``) have their own normalizers.
 WAIT_KINDS = ("deadline", "code_change")
 #: Every kind the product evaluates. A stored wait of any other kind stays as
 #: written: it is inert, never resolves on its own and replays unchecked.
-EVALUATED_KINDS = frozenset({*WAIT_KINDS, "ci", "publication_ci", "object_resolved"})
+EVALUATED_KINDS = frozenset({*WAIT_KINDS, "ci", "publication_ci",
+                             "object_resolved", "proposal_merged"})
 
 
 def evaluated(wait) -> bool:
@@ -178,6 +179,18 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
             event = envelope["payload"]
             outcome = event["conclusion"] if event["kind"] == "ci" else event["outcome"]["outcome"]
             return {**result("terminal", "receipt_route_terminal"), "outcome": outcome,
+                    "evidence": {"record_digest": computed or digest(canonical(envelope))}}
+        if kind == "proposal_merged":
+            if item is None:
+                return result("receipt_bound", "proposal_receipt_route")
+            if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
+                raise Denied("Terminal readiness requires the current held waiter")
+            from . import proposal_waits
+            observed = proposal_waits.evidence(store, item)
+            if observed is None:
+                return result("pending", "proposal_evidence_absent")
+            envelope, computed = observed
+            return {**result("terminal", "receipt_route_terminal"), "outcome": envelope["payload"]["state"],
                     "evidence": {"record_digest": computed or digest(canonical(envelope))}}
         if kind == "object_resolved":
             from .object_waits import work_item_state

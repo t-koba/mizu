@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
-from . import delegation_gates, lineage, delivery_settlement, editor
+from . import delegation_gates, lineage, delivery_settlement, editor, proposal_waits
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
@@ -428,6 +428,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
         self.ci_wait_manifest = ()
+        self.proposal_wait_manifest = ()
         #: Queue facts stated in this unit's opening (queue_facts.opening).
         self.queues: list = []
         self.work_item_events: list = []
@@ -1603,6 +1604,7 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.ci_wait_manifest = dispatch_state["ci_manifest"]
+                context.proposal_wait_manifest = dispatch_state["proposal_manifest"]
                 role_cursor = _role_cursor(project, role_name) if role.workspace != "write" else snapshot
                 context.progress_input = (
                     _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
@@ -2025,6 +2027,9 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
                     ci_waits.complete(context, finished)
                     delivery_settlement.succeeded(context, "ci")
+                with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
+                    proposal_waits.complete(context, finished)
+                    delivery_settlement.succeeded(context, "proposal")
                 if check_wait is not None:
                     check_jobs.set_wait(project, role_name, check_wait["id"], check_wait["wait_until"], continuation={
                         "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
@@ -2479,6 +2484,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "last_proposal_poll": state.get("last_proposal_poll"),
                             "proposal_cursor": state.get("proposal_cursor"),
                             "proposal_refs": state.get("proposal_refs", {}),
+                            "proposal_complete_messages": state.get("proposal_complete_messages", {}),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
                             "ci_changes_cursor": state.get("ci_changes_cursor"),

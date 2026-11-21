@@ -1426,6 +1426,18 @@ def proposal_refs(row: dict) -> list | None:
                    if endpoint.get("deleted") is not True})
 
 
+def _proposal_message_id(proposal_id: str, title: str, body: str) -> str:
+    from .fs import canonical, digest
+    return digest(canonical({"proposal": proposal_id, "title": title, "body": body}))[:32]
+
+
+def proposal_message_id(proposal: dict, *, enumeration_complete: bool = False) -> str:
+    """Fact-derived queue message id one complete enumeration would record."""
+    row = parse_proposals({"proposals": [proposal]})[0]
+    title, body = proposal_facts(row, enumeration_complete=enumeration_complete)
+    return _proposal_message_id(row["id"], title, body)
+
+
 def record_proposal_state(project, proposal: dict, *, enumeration_complete: bool = False) -> dict:
     """Append one external proposal observation to the configured queue.
 
@@ -1440,7 +1452,7 @@ def record_proposal_state(project, proposal: dict, *, enumeration_complete: bool
     """
     row = parse_proposals({"proposals": [proposal]})[0]
     title, body = proposal_facts(row, enumeration_complete=enumeration_complete)
-    message_id = digest(canonical({"proposal": row["id"], "title": title, "body": body}))[:32]
+    message_id = _proposal_message_id(row["id"], title, body)
     store = project.kernel_queues
     queue = project.config.vcs["observation_queue"]
     try:

@@ -1982,7 +1982,7 @@ refresh and the best-effort daemon periodic fetch.
 | `ci_cache_max_checks_per_branch` | `16` | Retained rows per branch (integer 1–1024, bounded by the local VCS status-parser cap); effective branch capacity times this value must not exceed 2048 |
 | `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
 | `change_stream_enabled` | `false` | Opt in to adapter-wide `changes` pages for receipt-wait CI observation; unsupported or invalid pages use bounded full status reads; branch-head notification polling is unchanged |
-| `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
+| `poll_proposals_enabled` | `false` | Enables external-proposal observations and exact `proposal_merged` work-item waits in the configured host-writable `observation_queue`; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
 | `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
 | `poll_max_branches` | `4` | Actual CI branches polled per daemon tick (1–64), separate from work-item CI waits |
 | `poll_max_ci_wait_targets` | `16` | Unique receipt-resolved `(branch, SHA)` work-item CI wait targets per due tick (1–64) |
@@ -2141,12 +2141,16 @@ a cursor completes the enumeration. Adapter, invalid-page, recording, and
 poll-state persistence failures emit a bounded `proposal_poll` event with
 `ok: false`, advance the proposal timestamp where state storage permits, and
 keep the prior cursor so a page can be retried.
-Successful rows go through `record_proposal_state` (stable IDs, no-op on
-identical facts, revise on changed facts). A complete enumeration or a
-non-paginated response with no cursor clears the cursor; missing proposal rows
-never revise or close a recorded proposal. Proposal observation performs no
-automatic close, merge, or branch retirement; existing grants, human GO,
-provider atomic checks and writer boundaries remain unchanged. CI polling
+Successful rows go through `record_proposal_state` (message IDs derived from
+the exact facts, no-op on identical facts, a new message on changed facts). A
+complete enumeration publishes the bounded proposal-id to message-id inventory
+before any row write and clears the cursor; a partial page never changes it.
+That inventory is the only registration source for an exact `proposal_merged`
+work-item wait, and a complete enumeration matching the pinned endpoints is the
+only source of its merge evidence. Missing proposal rows never revise or close
+a recorded proposal. Proposal observation performs no automatic close, merge,
+or branch retirement; existing grants, human GO, provider atomic checks and
+writer boundaries remain unchanged. CI polling
 continues independently whenever `poll_enabled` is true, regardless of the
 proposal flag. Failures become visible `upstream_fetch` / `ci_poll` events
 (`ok: false`) and never publish a snapshot (injected refs stay
