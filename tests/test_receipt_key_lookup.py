@@ -94,6 +94,34 @@ class ReceiptKeyLookupTests(Fixture):
         return patch.object(Publication, "_build_key_index",
                             side_effect=counted), rebuilds
 
+    def test_write_onto_a_legacy_index_rebuilds_it_before_appending(self):
+        old = self.record()
+        legacy = self.index()
+        self.assertEqual(legacy["schema"], publication.KEY_INDEX_SCHEMA)
+        legacy["schema"] = publication.KEY_INDEX_LEGACY_SCHEMA
+        for entry in legacy["entries"]:
+            for field in ("order", "branch", "code_digest", "published_sha"):
+                entry.pop(field)
+        self.index_path.write_bytes(canonical(legacy))
+        # The legacy index is still valid for keyed resolution on its own.
+        self.assertEqual(self.lookup(), old["publication_id"])
+
+        newer = self.record(code_digest=OTHER_DIGEST)
+        rebuilt = self.index()
+        self.assertEqual(rebuilt["schema"], publication.KEY_INDEX_SCHEMA)
+        fields = {"publication_id", "kind", "sha256", "order", "branch",
+                  "code_digest", "published_sha"}
+        self.assertEqual(len(rebuilt["entries"]), 2)
+        self.assertTrue(all(set(entry) == fields for entry in rebuilt["entries"]))
+        # Both the pre-existing and the new key still resolve.
+        self.assertEqual(self.lookup(), old["publication_id"])
+        self.assertEqual(self.lookup(code_digest=OTHER_DIGEST),
+                         newer["publication_id"])
+        # Listing also runs from the rebuilt index, not the scan fallback.
+        page = Publication.list_receipts(self.root, limit=1)
+        self.assertFalse(page["scan_stopped"])
+        self.assertEqual(page["total"], 2)
+
     def test_sequential_writer_calls_only_rebuild_once(self):
         # Product intent and dispatch files precede the first build; the
         # later receipt they authorize is the writer's own file.

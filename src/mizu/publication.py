@@ -933,9 +933,10 @@ class Publication:
         writes only the current index view with a refreshed stamp and commits
         no receipt. ``before_stamp`` is the directory stamp observed before
         the writer's own receipt write (or, for a replay, around its read). A
-        changed stamp, a receipt-like name the index does not imply, or an
-        incomplete/corrupt index forces a bounded rebuild from current
-        directory names; only an unchanged view is ever appended to. An
+        changed stamp, a receipt-like name the index does not imply, a legacy
+        schema or an incomplete/corrupt index forces a bounded rebuild from
+        current directory names; only a current, unchanged view is ever
+        appended to, so a schema-3 entry never mixes with legacy entries. An
         append never clears incompleteness -- only a fresh rebuild can.
         """
         try:
@@ -945,6 +946,7 @@ class Publication:
             # rebuilt one instead of blocking every later receipt write.
             index = None
         if (index is None or index["incomplete"]
+                or index["schema"] != KEY_INDEX_SCHEMA
                 or index["stamp"] != before_stamp
                 or _receipt_names_differ(store, policy, index)):
             index = cls._build_key_index(store, policy)
