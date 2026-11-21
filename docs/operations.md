@@ -595,8 +595,6 @@ rebuilds the index when every history validates. Writers wait for the audit.
   malformed receipts, unsafe origins or excess bytes, rather than omitting
   matching roles. Rows including the map are at most 8192 canonical bytes and
   the response at most 1 MiB.
-  Drop-only legacy resolutions have no seed and appear only in the host
-  disposition inventory, not here.
 - `event_delivery` reports up to 100 roles subscribed to `work_item_events`
   (non-subscribers are omitted), in name order. Each has `role`, `subscribed`
   terminal types, `sources` (effective `work_item_sources`),
@@ -840,43 +838,26 @@ mizu smoke --live
 
 Use the candidate release's installer. With the configured projects stopped,
 promotion verifies the staged manifest and dependency locks before switching
-`current`. Staging does not touch project data. Conversion of stored project
-data is a separate operator procedure (see the migration sections above), not
-part of promotion; an unreadable or incomplete verification blocks promotion.
+`current` and the `mizu` launcher. An unreadable or incomplete verification
+blocks promotion. The promotion result reports only `status`, `release` and a
+`note`: promotion switches code only. It does not touch project data, run a
+data conversion, or change budgets and side effects; services stay stopped
+until you start and arm them explicitly.
 
-If a conversion is needed, pause the affected project and leave services
-stopped. The installer creates one project archive per affected project, then
-runs the full `mizu restore` validation path on that exact archive in
-disposable staging: member and size limits, extraction, snapshot and object
-integrity (including retained history), settings and goal, staged control and
-outbox state, publication, and smoke-reference checks. No project is published
-and live records are untouched by this preflight. This is stronger than the
-structural member check reported by `mizu backup --verify`. The installer
-writes the archives and sibling JSON receipts under
-`<data_dir>/migration-backups/<attempt>/` before running either conversion.
-The promotion result's `migrations` array gives the archive path, SHA-256,
-receipt path, status, and conversion counts for each project. It is empty if
-no conversion was needed. These archives contain private code and evidence;
-protect them as you would other project backups.
+Promotion never migrates stored data. If you want a checkpoint before
+upgrading, take one yourself with the [backup and restore](#バックアップと復元)
+procedure: pause the affected projects and run `mizu backup PROJECT FILE
+--verify` for each, then keep the archives outside the tree for the rollback
+window. These archives contain private code and evidence; protect them as you
+would other project backups. A backup is your own precaution, not a step the
+installer performs.
 
-A failed backup, receipt write, or restore preflight prevents conversion. The
-preflight does not make promotion crash-atomic: if apply fails, `current` is
-not switched but some records may already have been converted. Keep the
-projects stopped, inspect the named command and receipt, and repair or restore
-before resuming. A receipt left in `applying` after interruption is not proof
-of completion. A retry uses a fresh archive if further conversion is needed;
-it does not replace earlier archives.
-
-Activation removes the replaced managed release. Keep its source bundle and
-the pre-conversion archives through the rollback window. To roll back, stop
-the newer release and use `mizu restore NAME --archive FILE` to restore into a
-new, unarmed project (or move the existing project aside first to reuse its
-name); restore never overwrites it. Use the archive from **before the first
-conversion** for that project, not a snapshot of a partial retry. Stage and
-promote the earlier release with its installer, then review the restored
-project before arming it.
-See [backup and restore](#バックアップと復元) for archive coverage and restore
-limits. Remove archive and receipt together when no longer needed for rollback.
+Activation removes the replaced managed release; keep its source bundle
+through the rollback window. To roll back code, stage and promote the earlier
+release with its installer. To roll back data, restore a checkpoint taken
+before the upgrade into a new, unarmed project as described in the backup and
+restore section; restore never overwrites an existing project. Review the
+restored project before arming it.
 
 既存のポリシーファイル（`policies/*.md`）は自動更新されないため、新バージョンのテンプレートとの差分を手動で確認して反映してください。
 
