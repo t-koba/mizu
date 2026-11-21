@@ -20,17 +20,18 @@ class ContextVcsReadToolsMixin:
     def _op_vcs_read_publications(self, args: dict) -> dict:
         # Local listing of the project's recorded publication receipts.
         # No provider is contacted: this reads the project's own durable
-        # evidence, so no adapter call is made. Only the op and the exact
-        # code_digest/branch filters are accepted.
-        if set(args) - {"op", "code_digest", "branch", "published_sha"}:
-            raise Denied("publication listing takes only code_digest, branch and published_sha filters")
-        # The page reports the match count, whether the page dropped matches
-        # and whether a scan bound stopped the search, so an absent receipt is
-        # never confused with an omitted one.
+        # evidence, so no adapter call is made. Only the op, the exact
+        # code_digest/branch/published_sha filters and a page cursor are accepted.
+        allowed = {"op", "code_digest", "branch", "published_sha", "cursor"}
+        if set(args) - allowed:
+            raise Denied("publication listing takes only code_digest, branch, published_sha and cursor filters")
+        # The page reports the match count, whether more matches follow it and
+        # whether a scan bound stopped the search, so an absent receipt is
+        # never confused with an omitted one. Follow next_cursor to page.
         listing = Publication.list_receipts(
             self.project.root, code_digest=args.get("code_digest"),
             branch=args.get("branch"), published_sha=args.get("published_sha"), limit=100,
-            policy=self.config.publication_evidence)
+            cursor=args.get("cursor"), policy=self.config.publication_evidence)
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "publications", "branch": args.get("branch"),
                   "trust": "recorded-local-untrusted", "evidence_id": evidence_id,

@@ -44,6 +44,9 @@ from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
 
 SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 RECORD_BYTES = 8192
+#: Opaque cursor format of the newest-first receipt listing.
+MAX_LISTING_CURSOR_CHARS = 128
+_PUBLICATION_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 #: Bounded process-local reuse of fully validated receipts. Each key carries
 #: the SHA-256 of the exact bounded bytes that were parsed and validated, so
 #: replaced or corrupt evidence cannot be served from an earlier result.
@@ -225,6 +228,52 @@ def _timestamp(value) -> bool:
         return dt.datetime.fromisoformat(value).tzinfo is not None
     except ValueError:
         return False
+
+
+def _timestamp_order(value: str) -> int:
+    """Convert a timezone-aware receipt timestamp to exact UTC microseconds."""
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("naive timestamp")
+        delta = parsed - dt.datetime(1, 1, 1, tzinfo=dt.timezone.utc)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise Denied("Invalid publication receipt timestamp") from exc
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000) + delta.microseconds
+
+
+def _listing_cursor_key(cursor: str | None):
+    """Decode and validate a ``pub1|micros|publication_id`` page cursor."""
+    if cursor is None:
+        return None
+    if not isinstance(cursor, str) or len(cursor) > MAX_LISTING_CURSOR_CHARS:
+        raise Denied("Invalid publication listing cursor")
+    parts = cursor.split("|")
+    if (len(parts) != 3 or parts[0] != "pub1"
+            or _PUBLICATION_CURSOR_TIME.fullmatch(parts[1]) is None
+            or DIGEST.fullmatch(parts[2]) is None):
+        raise Denied("Invalid publication listing cursor")
+    return int(parts[1]), parts[2]
+
+
+def _listing_cursor_token(key: tuple[int, str]) -> str:
+    """Encode one ordering key as an opaque continuation cursor."""
+    micros, publication_id = key
+    token = f"pub1|{micros}|{publication_id}"
+    if len(token) > MAX_LISTING_CURSOR_CHARS:
+        raise LimitExceeded("Publication listing cursor exceeds character bound")
+    return token
+
+
+def _receipt_order(record: dict) -> tuple[int, str]:
+    """Ordering key of one validated receipt, newest first.
+
+    Older product receipts predate ``recorded_at`` and sort before every
+    stamped receipt, with the publication ID breaking equal instants.
+    """
+    stamp = record.get("recorded_at")
+    return (_timestamp_order(stamp) if stamp is not None else 0,
+            record["publication_id"])
 
 
 def _external_record(record, publication_id: str) -> dict:
@@ -922,13 +971,14 @@ class Publication:
 
     @classmethod
     def _scan_receipts(cls, project_root, names, *, strict: bool,
-                       policy: PublicationEvidence) -> tuple[list[dict], bool]:
-        """Validate one bounded directory scan into summaries plus completeness.
+                       policy: PublicationEvidence) -> tuple[list[tuple[tuple[int, str], dict]], bool]:
+        """Validate one bounded directory scan into ordering keys plus summaries.
 
         The name-processing and record bounds, duplicate-ID refusal, strict
         validation and ``scan_stopped`` meaning are the ones ``list_receipts``
         publishes. Every candidate is validated before filtering so corrupt
-        evidence cannot be mistaken for absence or uniqueness.
+        evidence cannot be mistaken for absence or uniqueness. The ordering
+        key stays beside its summary so the public row keeps its schema.
         """
         scan_stopped = len(names) > policy.name_processing_limit
         records = []
@@ -947,7 +997,8 @@ class Publication:
                 scan_stopped = True
                 break
             try:
-                records.append(_summary(cls.read_receipt(project_root, publication_id)))
+                record = cls.read_receipt(project_root, publication_id)
+                records.append((_receipt_order(record), _summary(record)))
             except (Denied, LimitExceeded, OSError):
                 if strict:
                     raise
@@ -958,32 +1009,40 @@ class Publication:
     @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
                       branch: str | None = None, published_sha: str | None = None,
-                      limit: int = 100, strict: bool = False,
+                      limit: int = 100, cursor: str | None = None, strict: bool = False,
                       policy: PublicationEvidence | None = None) -> dict:
-        """List the recorded publication receipts of one project.
+        """List the recorded publication receipts of one project, newest first.
 
         Schema: one bounded page, ``{"publications": [...], "total": int,
-        "truncated": bool, "scan_stopped": bool}``. A summary carries the
-        publication ID, operation, branch, published SHA, code digest, approval
-        and the optional source commit and run reference. ``total`` counts the
-        matching receipts the scan found and ``truncated`` says whether the
-        page dropped matches. ``scan_stopped`` says that a scan bound cut the
-        search short, so ``total`` is a lower bound and a matching receipt may
-        exist beyond it: an empty page with ``scan_stopped`` means "not found
-        within the scanned set", never "no receipt exists". Filters: exact
-        code digest, branch and published SHA matches.
-        Bounds: at most 100 entries per page; publication_evidence policy
-        bounds name processing and candidate validation (defaults 10000/1000).
-        All directory names are materialized and sorted before these bounds
-        apply; they do not bound the initial enumeration or its memory.
+        "truncated": bool, "scan_stopped": bool, "next_cursor": str | None}``.
+        A summary carries the publication ID, operation, branch, published SHA,
+        code digest, approval and the optional source commit and run reference.
+        Receipts sort by ``recorded_at`` descending and publication ID
+        descending for equal instants; unstamped legacy product receipts sort
+        last. ``next_cursor`` continues strictly after the last returned row;
+        it is null on the final page. ``total`` counts every matching receipt
+        across all pages (a lower bound when ``scan_stopped``), and
+        ``truncated`` says whether matching rows follow this page. A cursor
+        does not change ``total``. ``scan_stopped`` says that a scan bound cut
+        the search short, so ``total`` is a lower bound and a matching receipt
+        may exist beyond it: an empty page with ``scan_stopped`` means "not
+        found within the scanned set", never "no receipt exists". Filters:
+        exact code digest, branch and published SHA matches.
+        Bounds: at most 100 entries per page; cursors are opaque strings of at
+        most 128 characters; publication_evidence policy bounds name processing
+        and candidate validation (defaults 10000/1000). All directory names
+        are materialized and sorted before these bounds apply; they do not
+        bound the initial enumeration or its memory.
         Trust: locally recorded evidence; an unreadable, oversized or
         invalid record is skipped rather than returned unvalidated, and it
         never denies the valid records beside it. Failure: ``Denied`` on
-        invalid arguments; a missing publications directory lists nothing.
-        Internal ``strict`` consumers refuse any unreadable candidate rather
-        than treating skipped corrupt evidence as proof of uniqueness.
+        invalid arguments or cursor; a missing publications directory lists
+        nothing. Internal ``strict`` consumers refuse any unreadable
+        candidate rather than treating skipped corrupt evidence as proof of
+        uniqueness.
         """
         policy = policy if policy is not None else PublicationEvidence()
+        cursor_key = _listing_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Invalid publication listing limit")
         if code_digest is not None and (not isinstance(code_digest, str)
@@ -996,16 +1055,21 @@ class Publication:
             from .vcs import check_branch
             check_branch(branch)
         names = cls._receipt_names(project_root)
-        records, scan_stopped = cls._scan_receipts(
+        entries, scan_stopped = cls._scan_receipts(
             project_root, names, strict=strict, policy=policy)
-        matches = [record for record in records
-                   if (code_digest is None or record["code_digest"] == code_digest)
-                   and (branch is None or record["branch"] == branch)
-                   and (published_sha is None or record["published_sha"] == published_sha)]
-        matches.sort(key=lambda item: item["publication_id"])
+        matches = [entry for entry in entries
+                   if (code_digest is None or entry[1]["code_digest"] == code_digest)
+                   and (branch is None or entry[1]["branch"] == branch)
+                   and (published_sha is None or entry[1]["published_sha"] == published_sha)]
+        total = len(matches)
+        matches.sort(key=lambda entry: entry[0], reverse=True)
+        if cursor_key is not None:
+            matches = [entry for entry in matches if entry[0] < cursor_key]
         page = matches[:limit]
-        return {"publications": page, "total": len(matches),
-                "truncated": len(matches) > len(page), "scan_stopped": scan_stopped}
+        more = len(matches) > len(page)
+        return {"publications": [summary for _, summary in page], "total": total,
+                "truncated": more, "scan_stopped": scan_stopped,
+                "next_cursor": _listing_cursor_token(page[-1][0]) if more else None}
 
     @classmethod
     def key_observation(cls, project_root: Path, *,

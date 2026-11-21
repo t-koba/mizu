@@ -60,7 +60,7 @@ class ContextVcsReadToolsTests(unittest.TestCase):
     def test_unknown_filters_are_refused_with_unchanged_messages(self):
         cases = (
             ("_op_vcs_read_publications", {"limit": 1},
-             "publication listing takes only code_digest, branch and published_sha filters"),
+             "publication listing takes only code_digest, branch, published_sha and cursor filters"),
             ("_op_vcs_read_ci_requests", {"code_digest": "b" * 64},
              "CI request listing takes no filters"),
             ("_op_vcs_read_ci_costs", {"branch": "main"},
@@ -90,7 +90,7 @@ class ContextVcsReadToolsTests(unittest.TestCase):
             result = Context._op_vcs_read_publications(context, args)
         publication.list_receipts.assert_called_once_with(
             context.project.root, code_digest=args["code_digest"], branch="main",
-            published_sha=args["published_sha"], limit=100,
+            published_sha=args["published_sha"], limit=100, cursor=None,
             policy=context.config.publication_evidence)
         context._new_invocation_evidence.assert_called_once_with("vcs-read")
         expected = {"op": "publications", "branch": "main",
@@ -98,6 +98,18 @@ class ContextVcsReadToolsTests(unittest.TestCase):
                     "evidence": EVIDENCE, "result": listing}
         write.assert_called_once_with(context.run_dir / EVIDENCE, expected)
         self.assertEqual(result, {**expected, **listing})
+
+    def test_publications_accepts_and_forwards_a_page_cursor(self):
+        context = _context()
+        cursor = "pub1|1735689600000000|" + "a" * 64
+        args = {"op": "publications", "cursor": cursor}
+        with patch(f"{OWNER}.Publication") as publication, \
+                patch(f"{OWNER}.write_json"):
+            publication.list_receipts.return_value = {"publications": [], "next_cursor": None}
+            Context._op_vcs_read_publications(context, args)
+        publication.list_receipts.assert_called_once_with(
+            context.project.root, code_digest=None, branch=None, published_sha=None,
+            limit=100, cursor=cursor, policy=context.config.publication_evidence)
 
     def test_ci_requests_lists_local_days_and_writes_evidence(self):
         context = _context()

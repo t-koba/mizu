@@ -110,8 +110,11 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(Publication.list_receipts(self.root)["publications"], [])
 
     def test_list_receipts_filters_by_digest_and_branch_and_skips_invalid_records(self):
-        first = self.record()
-        second = self.record(published_sha=OTHER_SHA, code_digest=OTHER_DIGEST, branch="other")
+        # Control recorded_at so the newest-first order is unambiguous.
+        with patch("mizu.publication.now", side_effect=[
+                "2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"]):
+            first = self.record()
+            second = self.record(published_sha=OTHER_SHA, code_digest=OTHER_DIGEST, branch="other")
         # A schema-1 receipt of the product's own publish path is listed too.
         product = Publication(self.root, "e" * 40, "f" * 64, "product", "push",
                               projection=public_source_identity({}))
@@ -122,7 +125,8 @@ class ExternalPublicationTests(Fixture):
         broken = self.root / "evidence" / "publications" / ("0" * 64 + ".external.json")
         broken.write_text("{}", encoding="utf-8")
         listing = Publication.list_receipts(self.root)
-        self.assertEqual(set(listing), {"publications", "total", "truncated", "scan_stopped"})
+        self.assertEqual(set(listing), {"publications", "total", "truncated", "scan_stopped",
+                                        "next_cursor"})
         self.assertFalse(listing["truncated"])
         self.assertFalse(listing["scan_stopped"])
         listed = listing["publications"]
@@ -131,7 +135,7 @@ class ExternalPublicationTests(Fixture):
         self.assertIn(second["publication_id"], ids)
         self.assertIn(product.id, ids)
         self.assertNotIn("0" * 64, ids)
-        self.assertEqual(ids, sorted(ids))
+        self.assertEqual(ids, [second["publication_id"], first["publication_id"], product.id])
         row = next(row for row in listed if row["publication_id"] == first["publication_id"])
         self.assertEqual(set(row), {"publication_id", "op", "branch", "published_sha",
                                     "code_digest", "approval", "source_commit", "run",
@@ -158,6 +162,76 @@ class ExternalPublicationTests(Fixture):
                     {"published_sha": "not-a-sha"}, {"limit": 0}, {"limit": 101}):
             with self.subTest(bad=bad), self.assertRaises(Denied):
                 Publication.list_receipts(self.root, **bad)
+
+    def test_listing_pages_through_every_receipt_newest_first(self):
+        stamps = [f"2026-02-{index + 1:02d}T00:00:00+00:00" for index in range(5)]
+        records = []
+        with patch("mizu.publication.now", side_effect=stamps):
+            for index in range(5):
+                records.append(self.record(
+                    branch=BRANCH if index < 3 else "other",
+                    published_sha="%040x" % (index + 1),
+                    code_digest="%064x" % (index + 1),
+                    approval="approval-%d" % index))
+        newest = [record["publication_id"] for record in reversed(records)]
+        keys = {"publications", "total", "truncated", "scan_stopped", "next_cursor"}
+        seen = []
+        cursor = None
+        pages = [([newest[0], newest[1]], True), ([newest[2], newest[3]], True),
+                 ([newest[4]], False)]
+        for expected, more in pages:
+            page = Publication.list_receipts(self.root, limit=2, cursor=cursor)
+            self.assertEqual(set(page), keys)
+            self.assertEqual(page["total"], 5)
+            self.assertFalse(page["scan_stopped"])
+            self.assertEqual(page["truncated"], more)
+            ids = [row["publication_id"] for row in page["publications"]]
+            self.assertEqual(ids, expected)
+            seen.extend(ids)
+            cursor = page["next_cursor"]
+            if more:
+                self.assertRegex(cursor, r"\Apub1\|[0-9]+\|[0-9a-f]{64}\Z")
+        self.assertIsNone(cursor)
+        self.assertEqual(seen, newest)
+        self.assertEqual(len(set(seen)), len(newest))
+
+        # Filters keep their own full match count across pages.
+        branch_seen = []
+        cursor = None
+        for expected, more in (([newest[2], newest[3]], True), ([newest[4]], False)):
+            page = Publication.list_receipts(self.root, limit=2, cursor=cursor, branch=BRANCH)
+            self.assertEqual(page["total"], 3)
+            self.assertEqual(page["truncated"], more)
+            self.assertEqual([row["publication_id"] for row in page["publications"]], expected)
+            branch_seen.extend(row["publication_id"] for row in page["publications"])
+            cursor = page["next_cursor"]
+        self.assertIsNone(cursor)
+        self.assertEqual(branch_seen, [newest[2], newest[3], newest[4]])
+        digest_id = records[0]["publication_id"]
+        page = Publication.list_receipts(self.root, cursor=cursor,
+                                         code_digest=records[0]["code_digest"])
+        self.assertEqual(page["total"], 1)
+        self.assertEqual([row["publication_id"] for row in page["publications"]], [digest_id])
+        self.assertFalse(page["truncated"])
+        self.assertIsNone(page["next_cursor"])
+
+    def test_equal_instants_break_by_publication_id_descending(self):
+        with patch("mizu.publication.now", return_value="2026-03-01T00:00:00+00:00"):
+            ids = [self.record(published_sha="%040x" % index,
+                               code_digest="%064x" % index)["publication_id"]
+                   for index in range(1, 4)]
+        self.assertEqual(
+            [row["publication_id"] for row in Publication.list_receipts(self.root)["publications"]],
+            sorted(ids, reverse=True))
+
+    def test_invalid_listing_cursor_is_refused(self):
+        publication_id = self.record()["publication_id"]
+        self.assertIsNone(Publication.list_receipts(self.root)["next_cursor"])
+        for bad in (f"pub1|not-a-time|{publication_id}", "pub1|1|short",
+                    f"wi1|1|{publication_id}", "x" * 129,
+                    f"pub1|1|{publication_id}|extra", f"pub1|1|{'A' * 64}", 12):
+            with self.subTest(cursor=bad), self.assertRaises(Denied):
+                Publication.list_receipts(self.root, cursor=bad)
 
     def test_list_receipts_reports_a_truncated_page(self):
         for index in range(3):
@@ -307,7 +381,8 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(record["source_commit"], "e" * 40)
         listed = execute(parser().parse_args(
             ["--config", str(self.file), "publication", "list", "sample"]))
-        self.assertEqual(set(listed), {"publications", "total", "truncated", "scan_stopped"})
+        self.assertEqual(set(listed), {"publications", "total", "truncated", "scan_stopped",
+                                       "next_cursor"})
         self.assertEqual([row["publication_id"] for row in listed["publications"]],
                          [record["publication_id"]])
         by_sha = execute(parser().parse_args(

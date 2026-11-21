@@ -153,6 +153,7 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
+    listing.add_argument("--cursor", default=None, help="Opaque page continuation from a previous call")
     p = sub.add_parser("work-items", help="Inspect work items or open one blocked item as the operator",
                        usage="mizu work-items PROJECT [inventory options]\n"
                              "       mizu work-items open PROJECT ID --expected-rev N --reason TEXT")
@@ -415,18 +416,23 @@ def _cmd_publication_list(config, project, args):
     """List the recorded publication receipts of one project.
 
     Schema: one bounded page, ``{"publications": [...], "total": int,
-    "truncated": bool, "scan_stopped": bool}``, with publication ID,
-    operation, branch, published SHA, code digest, approval and the optional
-    source commit and run reference. ``total`` is a lower bound when
+    "truncated": bool, "scan_stopped": bool, "next_cursor": str | None}``,
+    with publication ID, operation, branch, published SHA, code digest,
+    approval and the optional source commit and run reference. Receipts are
+    newest first; pass the returned ``next_cursor`` as ``--cursor`` to reach
+    the remaining pages, and ``next_cursor`` is null on the final page.
+    ``total`` counts all matches across pages and is a lower bound when
     ``scan_stopped`` is true, so an empty page never claims that no receipt
-    exists. Filters are exact matches on code digest, branch or published SHA.
-    Failure: ``Denied`` on invalid filters; unreadable records are skipped,
+    exists. ``truncated`` says whether more matches follow this page. Filters
+    are exact matches on code digest, branch or published SHA. Failure:
+    ``Denied`` on invalid filters or cursor; unreadable records are skipped,
     never listed unvalidated.
     """
     from .publication import Publication
     return Publication.list_receipts(
         project.root, code_digest=args.code_digest, branch=args.branch,
-        published_sha=args.published_sha, policy=config.publication_evidence)
+        published_sha=args.published_sha, cursor=args.cursor,
+        policy=config.publication_evidence)
 
 
 def _cmd_work_items(config, project, args):

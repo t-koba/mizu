@@ -1104,17 +1104,23 @@ List the recorded receipts of a project (read-only):
 mizu publication list demo
 mizu publication list demo --branch mizu --code-digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 mizu publication list demo --published-sha 0123456789abcdef0123456789abcdef01234567
+mizu publication list demo --cursor pub1|63871286400000000|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-The listing returns one bounded page: `publications` (at most 100 summaries),
-`total` (the matching receipts the scan found), `truncated` (whether the page
-dropped matches) and `scan_stopped` (whether a scan bound cut the search short,
-so `total` is a lower bound and a receipt may exist beyond it). A record that
-cannot be read is skipped, never listed unvalidated.
+Receipts come back newest first by recorded time, with the publication ID as
+the tiebreak. The listing returns one bounded page: `publications` (at most 100
+summaries), `total` (all matching receipts across pages), `truncated` (whether
+more matches follow this page), `scan_stopped` (whether a scan bound cut the
+search short, so `total` is a lower bound and a receipt may exist beyond it)
+and `next_cursor` (pass it as `--cursor` to fetch the following page; null on
+the last page). A record that cannot be read is skipped, never listed
+unvalidated.
 
 A role discovers the same receipts with the `vcs_read` op `publications`
-(`{"op":"publications"}`, optionally with `code_digest`, `branch` or
-`published_sha`); it reads local durable evidence and contacts no provider.
+(`{"op":"publications"}`, optionally with `code_digest`, `branch`,
+`published_sha` or `cursor`); it reads local durable evidence and contacts no
+provider. Follow `next_cursor` with the `cursor` argument to page through all
+receipts, newest first.
 Use the returned `publication_id` as the `publication_id` of a `{kind:"ci",
 publication_id, checks}` work-item wait.
 

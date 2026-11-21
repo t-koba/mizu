@@ -526,6 +526,8 @@ DECLARATIONS = {
         'REFERENCE_CHARS': (
             '256', 'format',
             'publication receipt / operator approval and run reference text limit'),
+        'MAX_LISTING_CURSOR_CHARS': (
+            '128', 'mechanism', 'publication / opaque listing cursor format bound'),
     },
     'run_health.py': {
         'MAX_RATE_FILE_BYTES': ('64 * 1024', 'safety', 'run health / bounded untrusted result-record read'),
