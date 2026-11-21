@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 
@@ -43,9 +44,13 @@ if scenario == "exit":
 if scenario == "bad-json":
     print("not JSON", flush=True)
     raise SystemExit(0)
+command_path = os.environ.get("MIZU_FAKE_PI_LIVE_COMMANDS")
 bridge("_hello", {})
 for raw in sys.stdin.buffer:
     command = json.loads(raw)
+    if command_path:
+        with Path(command_path).open("a", encoding="utf-8") as stream:
+            stream.write(command["type"] + "\n")
     if command["type"] == "get_state":
         if scenario == "silent-state":
             # The child never answers its first state request.
@@ -57,6 +62,10 @@ for raw in sys.stdin.buffer:
         emit({"type": "response", "id": command["id"], "success": True,
               "data": {"sessionFile": str(Path(effective["sessionDir"]) / "fake.jsonl"), "model": {"provider": effective["provider"], "id": "wrong" if scenario == "wrong-model" else effective["model"]}}})
     elif command["type"] == "prompt":
+        if scenario == "live-steer":
+            prompt_path = os.environ.get("MIZU_FAKE_PI_LIVE_PROMPT")
+            if prompt_path:
+                Path(prompt_path).write_text(command["message"], encoding="utf-8")
         emit({"type": "response", "id": command["id"], "success": True,
               "data": {"disposition": "handled" if scenario == "handled" else "started"}})
         if scenario == "handled":
@@ -67,6 +76,22 @@ for raw in sys.stdin.buffer:
             bridge("_budget", {"sequence": 1})
             bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
             emit({"type": "agent_start"})
+            emit({"type": "tool_execution_end"})
+            continue
+        if scenario == "live-steer":
+            # Capture the real opening prompt while its check is still live,
+            # then wait for the test to finish that check before the next SDK
+            # boundary. This is a fake-RPC timing seam, not SDK evidence.
+            bridge("_budget", {"sequence": 1})
+            bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
+            emit({"type": "agent_start"})
+            continue_path = os.environ.get("MIZU_FAKE_PI_LIVE_CONTINUE")
+            deadline = time.monotonic() + 10
+            while not (continue_path and Path(continue_path).exists()) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not continue_path or not Path(continue_path).exists():
+                emit({"type": "agent_settled", "aborted": True})
+                continue
             emit({"type": "tool_execution_end"})
             continue
         bridge("_budget", {"sequence": 1})
@@ -88,11 +113,23 @@ for raw in sys.stdin.buffer:
             emit({"type": "agent_settled", "data": {"aborted": True}})
         else:
             emit({"type": "agent_settled"})
-    elif command["type"] == "steer" and scenario == "steer":
+    elif command["type"] == "steer" and scenario in ("steer", "live-steer"):
         # Record the host injection at the same turn boundary the SDK would
         # deliver it, then settle without a finish tool call (driver-level test).
         with (Path(effective["sessionDir"]).parent / "steers.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(command["message"] + "\n")
+        if scenario == "live-steer":
+            content = "LIVE " + command["message"]
+            turn_path = os.environ.get("MIZU_FAKE_PI_LIVE_TURN")
+            if turn_path:
+                with Path(turn_path).open("a", encoding="utf-8") as stream:
+                    stream.write(content + "\n")
+            emit({"type": "message_end", "message": {
+                "role": "assistant", "content": content,
+                "usage": {"input": 1, "output": 1}}})
         bridge("_request_done", {"sequence": 1})
+        if scenario == "live-steer":
+            emit({"type": "agent_settled"})
+            continue
         emit({"type": "message_end", "message": {"role": "assistant", "content": "ok", "usage": {"input": 1, "output": 1}}})
         emit({"type": "agent_settled"})

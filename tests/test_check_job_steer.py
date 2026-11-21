@@ -3,14 +3,16 @@ import dataclasses
 import json
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from support import Fixture, ROOT, ScriptDriver
-from mizu import acceptance, check_jobs
+from mizu import acceptance, check_jobs, pi as pi_module
 from mizu.errors import Denied
 from mizu.pi import CheckSteer, PiDriver
 from mizu.runtime import Engine
+from mizu.unit_prompts import prompt_for
 
 
 
@@ -191,24 +193,88 @@ class SteerTests(SteerFixture):
 
 
 class PiSteerTransportTests(SteerFixture):
-    def test_pi_channel_delivers_a_bounded_steer_into_the_same_run(self):
-        job = self.job()
+    """Bounded fake-RPC timing seam; this is not actual Pi SDK timing evidence.
+
+    The separate real-project measurement item owns SDK timing claims. Here the
+    test peer holds the same adapter run open at a turn boundary until a real
+    check completes, so the delivery path is proved across a live completion
+    boundary without pretending the peer is a model.
+    """
+
+    def test_completion_during_the_opening_prompt_reaches_the_next_turn(self):
+        job = self.job(run=False)
         context = self.context()
-        # The job completed after this unit's opening prompt was captured.
-        context.check_steer_seen = frozenset()
+        prompt = prompt_for(context)  # The same opening projection the runtime sends.
+        decoded = json.loads(prompt)
+        terminal = frozenset(row['id'] for row in decoded.get('check_jobs', [])
+                             if row.get('status') in check_jobs.TERMINAL_WAKE_STATUSES)
+        self.assertNotIn(job['id'], terminal)
+        opening_rows = [row for row in decoded.get('check_jobs', []) if row.get('id') == job['id']]
+        self.assertEqual(len(opening_rows), 1)
+        self.assertIn(opening_rows[0]['status'], ('queued', 'running'))
+        context.check_steer_seen = terminal
         profile = context.role.profile
         raw = {**self.config.profiles[profile], 'engine': 'pi', 'provider': 'custom',
                'options': {}, 'session': 'ephemeral'}
         engines = {**self.config.engines, 'pi': {**self.config.engines['pi'],
-            'command': (sys.executable, str(ROOT / 'tests/fake_pi.py'), '--fake-scenario', 'steer')}}
+            'command': (sys.executable, str(ROOT / 'tests/fake_pi.py'), '--fake-scenario', 'live-steer')}}
         config = dataclasses.replace(self.config,
                                      profiles={**self.config.profiles, profile: raw}, engines=engines)
         context.config = config
-        PiDriver(config).execute(context, 'synthetic prompt')
+        prompt_path = self.root / 'live-opening-prompt.json'
+        continue_path = self.root / 'live-continue'
+        commands_path = self.root / 'live-commands.jsonl'
+        turn_path = self.root / 'live-next-turn.jsonl'
+        env = {'MIZU_FAKE_PI_LIVE_PROMPT': str(prompt_path),
+               'MIZU_FAKE_PI_LIVE_CONTINUE': str(continue_path),
+               'MIZU_FAKE_PI_LIVE_COMMANDS': str(commands_path),
+               'MIZU_FAKE_PI_LIVE_TURN': str(turn_path)}
+        real_environment = pi_module.environment
+
+        def child_environment(*, extra=None):
+            return {**real_environment(extra=extra), **env}
+
+        errors = []
+        done = threading.Event()
+
+        def drive():
+            try:
+                PiDriver(config).execute(context, prompt)
+            except BaseException as exc:  # Re-raised on the test thread below.
+                errors.append(exc)
+            finally:
+                done.set()
+
+        with patch.object(pi_module, 'environment', child_environment):
+            worker = threading.Thread(target=drive, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 10
+            while not prompt_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(prompt_path.exists(), 'The adapter never captured the opening prompt')
+            self.assertEqual(prompt_path.read_text(encoding='utf-8'), prompt)
+            self.assertIn(job['id'], prompt)  # Present, but still nonterminal.
+            self.assertIn(check_jobs.read(self.project, job['id'])['status'], ('queued', 'running'))
+            # The real check finishes while this adapter run is still active.
+            self.assertEqual(check_jobs.run_one(self.project, threading.Event(),
+                                                sandbox_factory=FakeSandbox)['status'], 'completed')
+            continue_path.write_text('go', encoding='utf-8')
+            self.assertTrue(done.wait(15), 'The adapter run did not settle after the steer')
+        worker.join(timeout=5)
+        if errors:
+            raise errors[0]
+        self.assertFalse(worker.is_alive())
         delivered = (context.run_dir / 'steers.jsonl').read_text(encoding='utf-8').splitlines()
         self.assertEqual(len(delivered), 1)
         self.assertIn(job['id'], delivered[0])
         self.assertLessEqual(len(delivered[0].encode('utf-8')), check_jobs.MAX_CHECK_STEER_MESSAGE_BYTES)
+        turn = turn_path.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(turn), 1)
+        self.assertIn(job['id'], turn[0])  # The next model turn saw the result.
+        commands = commands_path.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(commands.count('prompt'), 1)  # No result polling or redispatch.
+        self.assertEqual(commands.count('steer'), 1)
+        self.assertEqual(context.check_steer_seen, terminal)
         self.assertFalse((check_jobs.root(self.project) / job['id'] / 'wake.json').exists())
         self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
 
