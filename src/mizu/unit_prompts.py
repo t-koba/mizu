@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs, prompt_sections, reviews
+from .ci_head_state import ci_head_state_facts
 from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact, ci_summary_facts
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
@@ -535,6 +536,8 @@ def prompt_for(context: Context) -> str:
                        "ci_branch": ci_branch,
                        "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
                                       if "ci" in prompt_sections.included(context.role) else []),
+                       "ci_head_state": (ci_head_state_facts(context.project, context.config)
+                                         if "vcs_request" in caps else []),
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        "work_order": _work_order_projection(context),
@@ -559,6 +562,9 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
     workspace markers, capability-gated acceptance commands, and a
     capability-gated ``previous_report`` preview for roles holding
     ``report``. Fixed ``ci_branch`` configuration is gated by ``vcs_read``.
+    Fixed ``ci_head_state`` carries one bounded head-state fact per configured
+    CI branch for roles holding ``vcs_request``, and an empty array otherwise;
+    it is not a wake or request rule and is independent of the ``ci`` section.
     The opt-in ``ci`` section contains only aggregate summaries for all
     observed subjects, never per-check rows.
     The independent bounded ``ready_work`` projection follows
@@ -625,6 +631,8 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
                        "ci_branch": ci_branch,
                        "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
                                       if "ci" in prompt_sections.included(context.role) else []),
+                       "ci_head_state": (ci_head_state_facts(context.project, context.config)
+                                         if "vcs_request" in caps else []),
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        "work_order": _work_order_projection(context),

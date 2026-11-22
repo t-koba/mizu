@@ -4,9 +4,9 @@ Schema: every key of the unit-opening JSON object belongs to exactly one named
 section (the table ``SECTIONS``) or is a fixed key that every role receives
 (``FIXED_KEYS``: the unit statement, tool surface, snapshot pins, and every
 key that delivers something pending to the role: work-item events, CI waits,
-and the fixed ci_branch configuration and external_check_wake facts and
-capability-gated details route). The ci
-section carries only aggregate summaries and is strictly opt-in via include.
+and the fixed ci_branch configuration, external_check_wake facts,
+capability-gated details route and capability-gated ci_head_state facts.
+The ci section carries only aggregate summaries and is strictly opt-in via include.
 Default membership is one uniform rule: a section is offered when the role holds a
 capability that reads or acts on it. Sections whose projection is already
 empty without that capability keep their (empty) keys, so a role's prompt only
@@ -55,6 +55,7 @@ FIXED_KEYS = frozenset({
     "work_item_events", "wait_events", "ci_wait_delivery",
     "proposal_wait_delivery",
     "capture_limit", "review_authority", "publication_state", "ci_branch", "external_check_wake",
+    "ci_head_state",
     "run", "now", "timezone"})
 
 #: Row-fingerprint groups kept for session cursors, by the section that shows them.

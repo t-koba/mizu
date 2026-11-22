@@ -45,6 +45,7 @@ class PromptSectionTests(Fixture):
         self.assertNotIn("task", prompt_sections.FIXED_KEYS)
         self.assertIn("external_check_wake", prompt_sections.FIXED_KEYS)
         self.assertIn("ci_branch", prompt_sections.FIXED_KEYS)
+        self.assertIn("ci_head_state", prompt_sections.FIXED_KEYS)
         self.assertEqual(prompt_sections.SECTIONS["ci"].keys, ("ci_summary",))
         self.assertEqual(prompt_sections.SECTIONS["ci"].capabilities, frozenset())
         self.assertFalse(prompt_sections.SECTIONS["ci"].kept_without_capability)

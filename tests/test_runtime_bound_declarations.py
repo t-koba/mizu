@@ -1536,6 +1536,11 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
+    'ci_head_state.py': {
+        ('_request_rows', "CiRequests(project.root, getattr(config, 'ci_requests', None)).daily", 'limit', 0): (
+            '100', 'mechanism',
+            'CI head state / bounded CI-request evidence scan for one prompt projection'),
+    },
     'process.py': {
         ('_stop_io', 'thread.join', 'timeout', 0): (
             'max(0.0, deadline - time.monotonic())', 'safety',
