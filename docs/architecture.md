@@ -34,7 +34,8 @@ inputs. The trusted host adapter never executes model-provided host commands.
 |---|---|---|
 | `config.py` | Strict typed TOML, grants, limits, profile resolution | Project priorities |
 | `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
-| `runtime.py` | Slot/admission primitives, `Context` and `Engine` composition, capability dispatch and publication; runtime re-exports extracted helpers | Which algorithm is best |
+| `runtime.py` | Slot/admission primitives, `Context` and `Engine` composition, delegation/deadline/seal/checkpoint gates, capability validation, tool accounting and dispatch; runtime re-exports extracted helpers | Which algorithm is best |
+| `context_protocol.py` | Host-owned `Context` bridge operations (request/usage/steer handshakes, engine-tool identities and request admission), their narrow state inputs, and deferred-fault classification; runtime composes the inputs and re-exports the fault helpers | Which operation is a model capability, or which faults count toward the brake |
 | `daemon_runtime.py` | Per-project VCS poll coordination (`poll_project_vcs`) and the resident daemon loop; re-exported via `runtime.py` | Which algorithm is best |
 | `unit_finish.py` | Unit finish validation, acknowledgement selection, writer-parking evidence and progress records; runtime re-exports its helpers | Which work is ready, which events were delivered, or which finish outcome is desirable |
 | `engine_admission.py` | Fresh Engine authority, budget and disk guards plus FIFO dispatch lock admission | Which role should run, request priority, or configured limit values |
@@ -50,6 +51,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `run_health.py` | Role-health failure/streak bookkeeping and capture-cause persistence; runtime re-exports its helpers | Terminal outcome classification, recovery/rotation, or successful-run lifecycle decisions |
 | `ci_observation.py` | Read-only cached-CI failure projection and wake-branch normalization (bounded, never raises) | Polling, wake policy, admission, dispatch, session lifecycle |
 | `ci_wake.py` | Per-role CI wake record/due helpers and wake-version/default constants (bounded, never raises) | Polling, admission, dispatch, session lifecycle |
+| `publication.py` | Immutable snapshot publication commit point and its source-commit evidence; runtime re-exports `source_commit` | Which snapshot is published, or why publication was refused |
 | `vcs_poll_policy.py` | Pure VCS poll bounds, timeout caps, cadence, settings capping, and due calculations | Poll orchestration, adapter calls, cache/wake state, admission, dispatch, session lifecycle |
 | `vcs_proposal_poll.py` | One-page opted-in VCS proposal polling, cursor validation, and proposal recording | Shared poll-state persistence, coordinator error conversion, admission, dispatch, session lifecycle |
 | `vcs_upstream_poll.py` | Upstream ref fetch/injection and due periodic fetch events, with capped adapter settings | Sync grant checks, shared poll-state persistence, daemon orchestration, admission, dispatch, session lifecycle |

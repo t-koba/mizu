@@ -157,7 +157,7 @@ class DrainYieldTests(Fixture):
         from pathlib import Path
         root = Path(__file__).resolve().parents[1]
         launcher = (root / "adapters" / "pi-durable" / "launcher.mjs").read_text(encoding="utf-8")
-        host = (root / "src" / "mizu" / "runtime.py").read_text(encoding="utf-8")
+        host = (root / "src" / "mizu" / "context_protocol.py").read_text(encoding="utf-8")
         message = "Drain bound refused the provider request"
         self.assertIn(message, host)
         # The classification site is the function that names the bound, so the
@@ -178,7 +178,7 @@ class DrainYieldTests(Fixture):
         root = Path(__file__).resolve().parents[1]
         launcher = (root / "adapters" / "pi-durable" / "launcher.mjs").read_text(encoding="utf-8")
         message = "Per-run provider request budget exhausted"
-        hosts = [root / "src" / "mizu" / "runtime.py", root / "src" / "mizu" / "drivers.py",
+        hosts = [root / "src" / "mizu" / "context_protocol.py", root / "src" / "mizu" / "drivers.py",
                  root / "src" / "mizu" / "pi_durable.py"]
         pattern = r"['\"]([^'\"]*Per-run provider request budget[^'\"]*)['\"]"
         for path in hosts:

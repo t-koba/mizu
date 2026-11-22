@@ -102,7 +102,8 @@ class EngineRunMixin:
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         # Runtime still owns these bindings; resolve them at call time so
         # existing ``mizu.runtime`` patch seams keep intercepting this run.
-        from .runtime import (Context, cleanup, container_runtime, is_deferred,
+        from .context_protocol import is_deferred
+        from .runtime import (Context, cleanup, container_runtime,
                               now, publish, read_json, session_prompt, write_json)
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")

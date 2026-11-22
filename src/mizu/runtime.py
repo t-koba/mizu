@@ -47,6 +47,7 @@ from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
+from . import context_protocol
 from .context_host_tools import ContextHostToolsMixin
 from .context_kernel_tools import ContextKernelToolsMixin
 from .context_evidence import ContextEvidenceMixin
@@ -92,6 +93,9 @@ from . import vcs as _vcs
 # source_commit keeps its established runtime re-export seam.
 from .publication import source_commit
 from .web import Web
+# Deferred-fault classification belongs to the protocol owner; runtime keeps
+# the established re-export seam for existing callers and tests.
+from .context_protocol import INFRA_WAIT, is_deferred, is_infra_wait
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 # Ready-work observation keeps its established runtime import seam.
 from .work_readiness import (_has_ready_work, _ready_work_changed,
@@ -135,22 +139,6 @@ def slot(config: Config):
         yield
 
 
-#: Infrastructure waits defer (Busy locks/slots, InfraExceeded daily-budget
-#: and disk-reserve guards) rather than counting toward the consecutive-failure
-#: brake. All other faults still count, including plain LimitExceeded bound
-#: faults (logical-request deadlines, per-record transport/RPC bounds, per-run
-#: tool/request bounds, file-count/snapshot bounds). A whole-unit wall or
-#: deadline wrap-up ended without a seal is a bounded, non-failure result.
-#: A durable authority change mid-run is likewise a bounded, non-failure
-#: result (bound "authority"): the next turn's resume refusal ends the unit
-#: without further turns, publication, or health accounting.
-#: Event-stream retention
-#: past the operator budget truncates retained evidence explicitly instead
-#: of failing the run. The error record is still written and
-#: the exception still raised, so nothing is hidden; the daemon surfaces it
-#: as a run_deferred event.
-INFRA_WAIT = (Busy, InfraExceeded)
-
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
@@ -192,40 +180,6 @@ def _is_observational_operation(operation: str, arguments: dict, result=None) ->
     return replay_argument is not None and replay_argument in arguments
 
 
-def is_infra_wait(exc: BaseException) -> bool:
-    """True when a failure is an infrastructure wait that defers, not a fault.
-
-    Schema: exception instance. Bounds: type check only. Trust: local
-    classification, never model input. Failure: never raises.
-    """
-    return isinstance(exc, INFRA_WAIT)
-
-
-def is_deferred(exc: BaseException, context=None) -> bool:
-    """True when a failure defers rather than counting toward the brake.
-
-    Schema: exception plus the run Context (or None). Bounds: type check plus
-    one host-side flag. Trust: local classification, never model input.
-    Failure: never raises.
-
-    The Pi transport converts an in-run host-side daily-budget refusal
-    (InfraExceeded from ``_budget``) into ``{"ok": false}`` on the bridge,
-    so the adapter collapses and the host driver surfaces ``ProtocolError``
-    or ``ModelFailure``. ``Context.admission_wait`` records that refusal by
-    type (set only for InfraExceeded, never by message text), so a
-    ProtocolError/ModelFailure arriving after such a refusal is the same
-    infrastructure wait, not a new model fault.
-    """
-    if isinstance(exc, INFRA_WAIT):
-        return True
-    try:
-        if context is not None and getattr(context, "admission_wait", False):
-            return isinstance(exc, (ProtocolError, ModelFailure))
-    except Exception:
-        return False
-    return False
-
-
 @dataclasses.dataclass
 class _SpendLedger:
     """One run's aggregate spend; Context admission holds lock through debit.
@@ -241,6 +195,25 @@ class _SpendLedger:
     wrap_up_tools: int = 0
     delegated_wrap_up_requests: int = 0
     delegated_wrap_up_tools: int = 0
+
+
+def _bump_counter(context, name: str, delta: int = 1) -> int:
+    """Advance one Context counter through its property seam; return the value."""
+    value = getattr(context, name) + delta
+    setattr(context, name, value)
+    return value
+
+
+def _bump_wrap_up_requests(context, delegated: bool) -> None:
+    name = "delegated_wrap_up_requests" if delegated else "wrap_up_requests"
+    setattr(context, name, getattr(context, name) + 1)
+
+
+def _state_field(context, name: str, absent=None) -> context_protocol.Field:
+    """Bind one named Context state slot for the protocol owner."""
+    return context_protocol.Field(
+        name, lambda: getattr(context, name, absent),
+        lambda value, name=name: setattr(context, name, value), absent)
 
 
 def _spend_counter(name):
@@ -410,6 +383,77 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
         self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
 
+    def _protocol_inputs(self, operation: str, arguments: dict) -> context_protocol.ProtocolInputs:
+        """Compose one host call's inputs from live gate and state holders."""
+        config, spend_role = self.config, self.spend_role or self.role
+        used, limit = self._wrap_up_request_used_limit()
+        fields = context_protocol.Fields(
+            request_failure_pending=_state_field(self, "request_failure_pending"),
+            check_steer_seen=_state_field(self, "check_steer_seen", ()),
+            check_steer_pending=_state_field(self, "_check_steer_pending"),
+            bound_hit=_state_field(self, "bound_hit"),
+            wrap_up_attempted=_state_field(self, "wrap_up_attempted"),
+            tool_admission_exception=_state_field(self, "tool_admission_exception"),
+            progress_tool=_state_field(self, "progress_tool"),
+            drain_admission_refused=_state_field(self, "drain_admission_refused"),
+            request_bound_exhausted=_state_field(self, "request_bound_exhausted"),
+            request_admission_refused=_state_field(self, "request_admission_refused"),
+            admission_wait=_state_field(self, "admission_wait"),
+            admission_error=_state_field(self, "admission_error"),
+            admission_exception=_state_field(self, "admission_exception"),
+        )
+        hooks = context_protocol.Hooks(
+            end_request=self.end_request,
+            enter_drain_wrap_up=self.enter_drain_wrap_up,
+            drain_refusal=self.drain_refusal,
+            start_request=self.start_request,
+            bound_message=self._bound_message,
+            model_evidence=lambda: getattr(self, "model_evidence", None),
+            write_json=write_json,
+            read_request_count=lambda: self.request_count,
+            add_tool_count=lambda delta: _bump_counter(self, "tool_count", delta),
+            add_request_count=lambda delta: _bump_counter(self, "request_count", delta),
+            add_wrap_up_requests=lambda delegated: _bump_wrap_up_requests(self, delegated),
+        )
+        budget = context_protocol.BudgetInputs(
+            root=config.data / "budget",
+            daily=config.limits.daily_requests,
+            retention_days=config.limits.retention_days,
+            shared_daily=config.limits.shared_daily_requests,
+            timezone=config.timezone,
+            day_file_bytes=config.limits.budget_day_file_bytes,
+            project_name=self.project.name,
+        )
+        limits = context_protocol.Limits(
+            requests=role_requests_per_run(config, spend_role),
+            tools=role_tools_per_run(config, spend_role),
+            wrap_up_requests_used=used,
+            wrap_up_requests_limit=limit,
+            engine_tool_invocations=MAX_ENGINE_TOOL_INVOCATIONS,
+            engine_tool_id=MAX_ENGINE_TOOL_ID,
+        )
+        state = context_protocol.State(
+            spend=self._spend,
+            runtime_usage=self.runtime_usage,
+            runtime_models=self.runtime_models,
+            engine_tool_invocations=self.engine_tool_invocations,
+            request_sequences=self.request_sequences,
+            hello=self.hello,
+            usage_path=self.run_dir / "runtime-usage.json",
+            admission_path=self.run_dir / "admission.json",
+            run_name=self.run_dir.name,
+            project=self.project,
+            role_name=self.role.name,
+            engine_tools=self.role.engine_tools,
+            delegated_child=bool(getattr(self, "delegated_child", False)),
+            budget=budget,
+            fields=fields,
+            hooks=hooks,
+        )
+        return context_protocol.ProtocolInputs(
+            operation=operation, arguments=arguments,
+            execution_attempt=self.execution_attempt, limits=limits, state=state)
+
     def handle(self, operation: str, arguments: dict) -> dict:
         if not self.checkpoint_seal_only or operation != "finish":
             return self._handle(operation, arguments)
@@ -457,178 +501,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                         raise Denied("Checkpoint finish requires its one admitted model unit")
                     self._checkpoint_finish_attempted = True
             self.driver_checkpoint = None
-            if operation == "_request_done":
-                sequence = arguments.get("sequence")
-                failed = arguments.get("failed", False)
-                if type(sequence) is not int or sequence < 1 or type(failed) is not bool:
-                    raise Denied("Invalid completed request evidence")
-                self.end_request(sequence)
-                if failed:
-                    self.request_failure_pending = True
-                return {"recorded": True}
-            if operation == "_hello":
-                if arguments != {}:
-                    raise Denied("Unsupported bridge handshake")
-                self.hello.set()
-                return {}
-            if operation == "_model_usage":
-                sequence = arguments.get("sequence")
-                usage = arguments.get("usage")
-                if type(sequence) is not int or sequence < 1 or not isinstance(usage, dict):
-                    raise Denied("Invalid runtime usage")
-                if len(canonical(arguments)) > 65536 or len(self.runtime_usage) >= 4096:
-                    raise LimitExceeded("Runtime usage evidence bound exceeded")
-                key = (self.execution_attempt, sequence)
-                self.runtime_usage.setdefault(key, usage)
-                if isinstance(arguments.get("model"), dict):
-                    self.runtime_models.setdefault(key, arguments["model"])
-                write_json(self.run_dir / "runtime-usage.json", {"observations": [
-                    {"execution_attempt": attempt, "sequence": seq, "usage": value,
-                     "model": self.runtime_models.get((attempt, seq))}
-                    for (attempt, seq), value in self.runtime_usage.items()]})
-                return {"recorded": True}
-            if operation == "_check_steer":
-                # Host-owned bridge operation for the managed pi-durable lane.
-                # It is not a model capability and never exposes job output:
-                # only the bounded, host-written notification reaches the
-                # running unit. The automatic wake stays available until the
-                # adapter confirms durable submission with the separate
-                # acknowledgement; unread output still needs action=result and
-                # the normal successful-finish acknowledgement.
-                if arguments != {}:
-                    raise Denied("Unsupported check steer request")
-                seen = getattr(self, 'check_steer_seen', ())
-                jobs = check_jobs.steer_pending(self.project, self.role.name, seen)
-                messages = [{'id': job['id'], 'message': check_jobs.steer_message(job)}
-                            for job in jobs[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS]]
-                ids = [message['id'] for message in messages]
-                self.check_steer_seen = frozenset(set(seen) | set(ids))
-                self._check_steer_pending = set(ids)
-                return {'messages': messages}
-            if operation == "_check_steer_delivered":
-                # Host-owned second phase: consume a wake only after the
-                # adapter has durably submitted the notification. Never reads
-                # job output or touches result/usage retrieval.
-                ids = arguments.get("ids")
-                if (set(arguments) != {"ids"} or not isinstance(ids, list) or not ids
-                        or len(ids) > check_jobs.MAX_CHECK_STEER_NOTIFICATIONS
-                        or any(not isinstance(item, str) or item not in self._check_steer_pending
-                               for item in ids)):
-                    raise Denied("Invalid check steer delivery")
-                check_jobs.mark_wake_delivered(self.project, self.role.name, ids, self.run_dir.name)
-                self._check_steer_pending.difference_update(ids)
-                return {"recorded": True}
-            if operation == "_engine_tool":
-                if self.bound_hit is not None:
-                    raise Denied(self._bound_message())
-                name = arguments.get("name")
-                invocation_id = arguments.get("invocation_id")
-                if (not isinstance(invocation_id, str) or not invocation_id.strip()
-                        or len(invocation_id) > MAX_ENGINE_TOOL_ID or not invocation_id.isprintable()):
-                    raise Denied("Invalid engine tool invocation id")
-                if not isinstance(name, str) or name not in self.role.engine_tools:
-                    raise Denied("Engine tool has no explicit grant")
-                key = (self.execution_attempt, invocation_id)
-                if key in self.engine_tool_invocations:
-                    if self.engine_tool_invocations[key] != name:
-                        raise Denied("Engine tool invocation id reused for a different name")
-                    self.tool_admission_exception = None
-                    return {"allowed": True}
-                if len(self.engine_tool_invocations) >= MAX_ENGINE_TOOL_INVOCATIONS:
-                    raise LimitExceeded("Engine tool invocation evidence bound exceeded")
-                with self._spend.lock:
-                    self.tool_count += 1
-                    if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
-                        # Native tools are never wrap-up operations: record the
-                        # bound and refuse without drawing the allowance.
-                        self.bound_hit = self.bound_hit or "tools"
-                        self.tool_admission_exception = LimitExceeded("Per-run tool limit exceeded")
-                        raise self.tool_admission_exception
-                    self.tool_admission_exception = None
-                    self.engine_tool_invocations[key] = name
-                self.progress_tool = True
-                return {"allowed": True}
-            if operation == "_budget":
-                self.enter_drain_wrap_up()
-                if self.bound_hit == "drain" and not self.wrap_up_attempted:
-                    # One shared handshake: the message carries the bound kind,
-                    # so each engine reports the kind it was given instead of
-                    # naming the request budget. This is not a daily-budget
-                    # rejection or an admitted request.
-                    self.drain_admission_refused = True
-                    self.drain_refusal("Drain bound refused the provider request")
-                try:
-                    sequence = arguments.get("sequence")
-                    if type(sequence) is not int or sequence < 1:
-                        raise Denied("Invalid request sequence")
-                    sequence_key = (self.execution_attempt, sequence)
-                    with self._spend.lock:
-                        if sequence_key not in self.request_sequences:
-                            over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
-                                self.config, self.spend_role or self.role)
-                            if (over and self.bound_hit == "deadline"
-                                    and not self.wrap_up_attempted):
-                                # The reserved allowance belongs to Engine's
-                                # reduced-grant follow-up, never the still-active
-                                # normal invocation that crossed the cutoff.
-                                raise DeadlineWrapUp(self._bound_message())
-                            if (over and self.bound_hit in (None, "requests")
-                                    and not self.wrap_up_attempted):
-                                self.bound_hit = "requests"
-                                self.request_admission_refused = True
-                                raise DeadlineWrapUp("Per-run provider request budget exhausted")
-                            requests_used, requests_limit = self._wrap_up_request_used_limit()
-                            if over and requests_used >= requests_limit:
-                                if self.bound_hit == "drain":
-                                    raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
-                                if self.bound_hit == "deadline":
-                                    raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
-                                self.request_bound_exhausted = True
-                                raise RequestYieldExceeded("Per-run provider request budget exhausted")
-                            try:
-                                Budget(self.config.data / "budget", self.config.limits.daily_requests,
-                                       self.config.limits.retention_days,
-                                       self.config.limits.shared_daily_requests, self.config.timezone,
-                                       day_file_bytes=self.config.limits.budget_day_file_bytes).take(
-                                           f"{self.run_dir.name}:{self.execution_attempt}:{sequence}",
-                                           project=self.project.name)
-                            except InfraExceeded:
-                                if hasattr(self, 'model_evidence'):
-                                    self.model_evidence['admission_status'] = 'rejected'
-                                self.admission_wait = True
-                                raise
-                            except LimitExceeded:
-                                if hasattr(self, 'model_evidence'):
-                                    self.model_evidence['admission_status'] = 'rejected'
-                                raise
-                            except Exception:
-                                if hasattr(self, 'model_evidence'):
-                                    self.model_evidence.update(requests_known=False, admission_status='unconfirmed')
-                                raise
-                            if over:
-                                # Wrap state records only after daily admission
-                                # succeeds: an infrastructure refusal must not
-                                # burn the allowance or mislabel the context.
-                                self.bound_hit = self.bound_hit or "requests"
-                                if self.delegated_child:
-                                    self.delegated_wrap_up_requests += 1
-                                else:
-                                    self.wrap_up_requests += 1
-                            self.request_sequences.add(sequence_key)
-                            self.start_request(sequence)
-                            self.request_count += 1
-                            if hasattr(self, "model_evidence"):
-                                self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
-                            write_json(self.run_dir / "admission.json", {"requests": self.request_count})
-                    self.admission_error = None
-                    self.admission_exception = None
-                    self.admission_wait = False
-                    self.tool_admission_exception = None
-                    return {"admitted": True}
-                except MizuError as exc:
-                    self.admission_error = str(exc)
-                    self.admission_exception = exc
-                    raise
+            if context_protocol.is_host_operation(operation):
+                return context_protocol.handle(self._protocol_inputs(operation, arguments))
             if self.bound_hit == "drain" and not self.wrap_up_attempted:
                 # Fence this transport after latching the boundary. Even a
                 # wrap-up tool must wait for the reduced-grant invocation;

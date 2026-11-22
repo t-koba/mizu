@@ -20,7 +20,7 @@ pagination behavior otherwise follows the VCS schema without a provider guess.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. Constructor policy defaults
 include policy supplied by `Project`; literal bound-parameter defaults are
-classified separately below. The `runtime.py` and `engine_run.py` literals
+classified separately below. The `runtime.py`, `context_protocol.py` and `engine_run.py` literals
 are fixed run-local memory, one-row probe and public page bounds. Runtime's configurable admission
 and dispatch choices are `Limits` and `[dispatch_evidence]` fields, including the run-local
 queue-observation sample.
@@ -2307,10 +2307,10 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('persistent_exec.py', 'ExecSession.execute', 1, 1): (
         '4', 'format',
         'persistent exec / completion trailer is at most three decimal digits plus US'),
-    ('runtime.py', 'Context._handle', 1, 0): (
+    ('context_protocol.py', '_model_usage', 1, 0): (
         '65536', 'safety',
         'runtime usage / fixed canonical bridge-frame byte ceiling for one observation'),
-    ('runtime.py', 'Context._handle', 1, 1): (
+    ('context_protocol.py', '_model_usage', 1, 1): (
         '4096', 'safety',
         'runtime usage / fixed per-run retained observation-row ceiling'),
     ('context_vcs_request_tools.py', 'ContextVcsRequestToolsMixin._covered_waits', 1, 0): (
