@@ -135,6 +135,29 @@ class WrapperTraceDiagnosticFixture:
             raise
 
 
+class WorkflowTriggerTests(unittest.TestCase):
+    def test_integration_branch_has_no_automatic_push_ci(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        lines = workflow.splitlines()
+        push_blocks = []
+        for index, line in enumerate(lines):
+            if line != '  push:':
+                continue
+            body = []
+            for following in lines[index + 1:]:
+                if following and not following.startswith('    '):
+                    break
+                body.append(following)
+            push_blocks.append(body)
+        self.assertEqual(len(push_blocks), 1)
+        push = push_blocks[0]
+        self.assertIn('branches: [main]', [line.strip() for line in push])
+        self.assertIn("tags: ['*']", [line.strip() for line in push])
+        self.assertNotIn('mizu', '\n'.join(lines[:lines.index('permissions:')]))
+        self.assertIn('  pull_request:', workflow)
+        self.assertIn('  workflow_dispatch:', workflow)
+
+
 class CheckTimeoutTests(unittest.TestCase):
     def test_suite_child_budget_covers_setup_child_timeout_and_receipt_path(self):
         child_timeout = CHECK._unittest_timeout_seconds()
