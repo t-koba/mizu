@@ -565,6 +565,16 @@ class SteerTests(SteerFixture):
                     self.project, 'worker', (), cursor=check_jobs.CheckSteerCursor())],
                 [row['id'] for row in full])
 
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            plan = db.execute(
+                'EXPLAIN QUERY PLAN ' + check_jobs._STEER_CHANGES_QUERY
+                + ' ORDER BY c.created_at DESC, c.job_id DESC LIMIT ?',
+                ('worker', 0, 4096, check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
+        self.assertIn('INDEXED BY check_completion_changes_created',
+                      check_jobs._STEER_CHANGES_QUERY)
+        self.assertTrue(any('check_completion_changes_created' in str(row[3])
+                            for row in plan), plan)
+
         # A 16x larger seq window must not turn a two-page read into a sort and
         # scan of that window: the creation index seeks to the exclusive key and
         # touches one page plus its job lookups at each boundary. Allow 2x plus

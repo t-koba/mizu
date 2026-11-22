@@ -2056,6 +2056,17 @@ class CheckSteerCursor:
     generation: str = ''
 
 
+# The creation index supplies the ORDER BY and the exclusive key seek. Bind it
+# explicitly: SQLite may otherwise pick the seq index and sort a growing window
+# on a different planner version, making a bounded page read unbounded.
+_STEER_CHANGES_QUERY = (
+    "SELECT c.seq, c.job_id, c.created_at "
+    'FROM check_completion_changes c INDEXED BY check_completion_changes_created '
+    'JOIN check_jobs j ON j.id=c.job_id '
+    'WHERE c.role=? AND c.seq>? AND c.seq<=? '
+    'AND (j.acknowledged IS NULL OR j.acknowledged=0)')
+
+
 def _steer_changes(project, role, cursor):
     """Read one bounded page of this role's creation-ordered completions."""
     with project.ledger.read('check_jobs', locked=False) as db:
@@ -2082,11 +2093,7 @@ def _steer_changes(project, role, cursor):
         # The creation index supplies the ORDER BY and the exclusive key seek
         # directly, so a boundary reads at most one page instead of sorting the
         # whole seq window; seq only limits which rows are eligible.
-        query = (
-            "SELECT c.seq, c.job_id, c.created_at "
-            'FROM check_completion_changes c JOIN check_jobs j ON j.id=c.job_id '
-            'WHERE c.role=? AND c.seq>? AND c.seq<=? '
-            'AND (j.acknowledged IS NULL OR j.acknowledged=0)')
+        query = _STEER_CHANGES_QUERY
         parameters = [role, cursor.floor, cursor.ceiling]
         if cursor.page_after is not None:
             created_at, job_id = cursor.page_after
