@@ -47,6 +47,7 @@ from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
+from .context_host_tools import ContextHostToolsMixin
 from .context_kernel_tools import ContextKernelToolsMixin
 from .context_evidence import ContextEvidenceMixin
 from .context_web_tools import ContextWebToolsMixin
@@ -264,7 +265,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextWorkToolsMixin, ContextGrantReadToolsMixin,
                 ContextVcsReadToolsMixin, ContextVcsPublishMixin,
                 ContextVcsRetireMixin, ContextVcsDisposeMixin,
-                ContextVcsRequestToolsMixin):
+                ContextVcsRequestToolsMixin, ContextHostToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -705,38 +706,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             self, args, max_identities=MAX_READ_IDENTITIES)
 
 
-    def _op_sync(self, args: dict) -> dict:
-        # Host-side refresh only: fetch upstream refs via the trusted adapter
-        # and inject them read-only into the harness store (virtual
-        # refs/remotes/upstream/*, never inside the working tree). Merging is
-        # worker policy (workspace edits + verify + publish); the mechanism
-        # only records the receipt. Requires a writable workspace so read
-        # roles cannot mutate the shared ref view.
-        if self.role.workspace != "write":
-            raise Denied("Sync requires a writable workspace")
-        try:
-            fetched = _vcs.fetch_refs(self.config.vcs, cancel=self.tools_cancelled)
-        except OSError as exc:
-            raise Denied(f"Upstream sync is unavailable: {exc}") from exc
-        try:
-            receipt = _vcs.inject_refs(self.project.root, fetched["refs"])
-        except OSError as exc:
-            raise Denied(f"Upstream refs are unavailable: {exc}") from exc
-        names = sorted(fetched["refs"])
-        record = {"synced": True, "injected": receipt["injected"],
-                  "prefix": receipt["prefix"], "trust": "external-untrusted",
-                  "upstream": fetched["refs"].get("main"),
-                  "evidence": "sync.json", "refs": names}
-        write_json(self.run_dir / "sync.json",
-                   {"injected": receipt["injected"], "prefix": receipt["prefix"],
-                    "trust": "external-untrusted", "refs": fetched["refs"]})
-        return record
-
-    def _op_report(self, args: dict) -> dict:
-        self.commentary = args
-        write_json(self.run_dir / "commentary.json", args)
-        return {"staged": True}
-
     def _writer_wait_liveness(self, *, releases=()):
         return _writer_wait_liveness(self.project, self.role, releases=releases)
 
@@ -760,13 +729,13 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "queue_ack": ContextKernelToolsMixin._op_queue_ack,
         "message_read": ContextKernelToolsMixin._op_message_read,
         "message_refs": ContextKernelToolsMixin._op_message_refs,
-        "sync": _op_sync, "vcs_read": ContextVcsReadToolsMixin._op_vcs_read,
+        "sync": ContextHostToolsMixin._op_sync, "vcs_read": ContextVcsReadToolsMixin._op_vcs_read,
         "vcs_publish": ContextVcsPublishMixin._op_vcs_publish,
         "vcs_request": ContextVcsRequestToolsMixin._op_vcs_request,
         "vcs_retire": ContextVcsRetireMixin._op_vcs_retire,
         "vcs_dispose": ContextVcsDisposeMixin._op_vcs_dispose,
         "materialize": ContextRoleToolsMixin._op_materialize,
-        "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate, "report": _op_report,
+        "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate, "report": ContextHostToolsMixin._op_report,
         "research_read": ContextRoleToolsMixin._op_research_read, "research": ContextRoleToolsMixin._op_research,
         "finish": ContextFinishMixin._op_finish,
     }
