@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu import delegation_async
+from mizu.admission import role_exclusion
 from mizu.delegation_jobs import DelegationJobs, digest, canonical
-from mizu.errors import Denied
+from mizu.errors import Busy, Denied
+from mizu.fs import lock
 from mizu.protocol import tool_definitions
 from mizu.runtime import Engine
 
@@ -206,6 +208,58 @@ class AsyncDelegationTests(Fixture):
 
         self.run_parent(work)
         self.assertEqual(len(count), 1)
+
+    def test_nonterminal_retry_from_fresh_owner_context_keeps_one_child_and_fence(self):
+        """A new owner view cannot relaunch or unfence a still-running child."""
+        count = []
+        release = threading.Event()
+        child_started = threading.Event()
+
+        def work(ctx, *_):
+            if ctx.role.name == 'helper':
+                count.append(ctx.run_dir.name)
+                child_started.set()
+                release.wait(5)
+                ctx.handle('finish', {'outcome': 'wait', 'summary': 'Child', 'state': 'x'})
+                return
+            snap = ctx.snapshot
+            accepted = ctx.handle('delegate', {'role': 'helper', 'task': self.task,
+                                               'async_mode': True})
+            self.assertTrue(child_started.wait(5))
+            key = digest(canonical([ctx.run_dir.name, 'helper', self.task, snap['id']]))[:32]
+            child = delegation_async._CHILDREN[accepted['id']]
+            self.assertFalse(child.done.is_set())
+            self.assertTrue(child.thread.is_alive())
+            # Model a restarted owner: a fresh context with only the durable
+            # reservation projection, while the original child is nonterminal.
+            fresh = self.context(reservation_view=DelegationJobs.reservation_projection(
+                self.project.root))
+            retry = delegation_async.start(Engine(self.config), fresh, key, 'helper',
+                                           self.task, snap)
+            self.assertEqual(retry['id'], accepted['id'])
+            self.assertEqual(retry['run'], count[0])
+            self.assertFalse(retry.get('result_available', False))
+            self.assertIs(delegation_async._CHILDREN[accepted['id']], child)
+            # The child's helper-role exclusion fence is still held.
+            with self.assertRaises(Busy):
+                with lock(role_exclusion(self.project.root, 'helper'), blocking=False):
+                    pass
+            time.sleep(.05)
+            self.assertEqual(count, [child.run_id])
+            self.assertFalse(child.done.is_set())
+            self.assertIsNotNone(DelegationJobs(self.project.root).reservation())
+            release.set()
+            result = _join_until_terminal(ctx, accepted['id'])
+            self.assertEqual(result['answer'], 'Child')
+            self.assertEqual(result['run'], count[0])
+            self.assertNotIn(accepted['id'], delegation_async._CHILDREN)
+
+        self.run_parent(work)
+        self.assertEqual(len(count), 1)
+        self.assertIsNone(DelegationJobs(self.project.root).reservation())
+        # Handback releases the helper-role fence.
+        with lock(role_exclusion(self.project.root, 'helper'), blocking=False):
+            pass
 
     def test_missing_lease_and_wrong_owner_are_typed_refusals(self):
         engine = Engine(self.config)
