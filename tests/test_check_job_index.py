@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from support import Fixture, forget_ledger
 from test_check_jobs import FakeSandbox
-from mizu import acceptance, check_jobs, ledger
+from mizu import acceptance, check_job_index, check_jobs, ledger
 from mizu.fs import lock, write_json
 
 
@@ -120,6 +120,46 @@ class CheckJobIndexTests(Fixture):
             with patch.object(type(self.project.root), 'iterdir', selected_only):
                 check_jobs._release_locked(self.project, [job['id']])
         self.assertEqual(rows(self.project.root)[0], [])
+
+    def test_completion_cleanup_is_keyed_and_skips_states_without_a_row(self):
+        job = self.queue()
+        self.build()
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            plan = db.execute(
+                "EXPLAIN QUERY PLAN DELETE FROM check_completion_changes WHERE job_id=?",
+                (job['id'],)).fetchall()
+            self.assertTrue(any('check_completion_changes_job' in row[3] for row in plan), plan)
+
+            class RecordingDB:
+                def __init__(self, connection):
+                    self.connection, self.sql = connection, []
+
+                def execute(self, statement, parameters=()):
+                    self.sql.append(statement)
+                    return self.connection.execute(statement, parameters)
+
+            entry = db.execute("SELECT * FROM check_jobs WHERE id=?", (job['id'],)).fetchone()
+            recording = RecordingDB(db)
+            check_job_index.CHECK_JOBS.replace(recording, job['id'], [entry])
+            self.assertFalse([statement for statement in recording.sql
+                              if statement.startswith('DELETE FROM check_completion_changes')])
+
+        # Releasing a job that did have a completion row still deletes by key.
+        self.project.set_control(paused=False)
+        self.run_all()
+        self.build()
+        with self.project.ledger.read('check_jobs', locked=True) as db:
+            before = db.execute(
+                "SELECT COUNT(*) FROM check_completion_changes WHERE job_id=?",
+                (job['id'],)).fetchone()[0]
+            recording = RecordingDB(db)
+            check_job_index.CHECK_JOBS.replace(recording, job['id'], [])
+            after = db.execute(
+                "SELECT COUNT(*) FROM check_completion_changes WHERE job_id=?",
+                (job['id'],)).fetchone()[0]
+            self.assertTrue([statement for statement in recording.sql
+                             if statement.startswith('DELETE FROM check_completion_changes')])
+        self.assertEqual((before, after), (1, 0))
 
     def test_wake_readiness_reads_columns_not_files(self):
         job = self.queue()

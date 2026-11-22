@@ -32,6 +32,7 @@ CREATE TABLE check_jobs(
 CREATE TABLE check_completion_changes(
     seq INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, job_id TEXT NOT NULL);
 CREATE INDEX check_completion_changes_role ON check_completion_changes(role, seq);
+CREATE UNIQUE INDEX check_completion_changes_job ON check_completion_changes(job_id);
 CREATE INDEX check_jobs_role ON check_jobs(role, valid, acknowledged);
 CREATE INDEX check_jobs_shared ON check_jobs(shared_job);
 CREATE INDEX check_jobs_shared_key ON check_jobs(valid, shared_key, status, passed, shared_job, detached, cancel_requested, created_at);
@@ -117,9 +118,11 @@ class _CheckJobs(Domain):
         for job_id in sorted(affected):
             role = self._completion_role(db, job_id)
             if role is None:
-                # A released job or a subscriber whose original is gone has no
-                # live completion left to present; its change row ends here.
-                db.execute("DELETE FROM check_completion_changes WHERE job_id=?", (job_id,))
+                # Only a job that had a live completion can lose one. Ordinary
+                # queued/running writes have no row, so skip the keyed delete
+                # instead of scanning retained history for nothing.
+                if before.get(job_id) is not None:
+                    db.execute("DELETE FROM check_completion_changes WHERE job_id=?", (job_id,))
             elif before.get(job_id) is None:
                 db.execute("INSERT INTO check_completion_changes(role, job_id) VALUES (?, ?)",
                            (role, job_id))
@@ -145,7 +148,7 @@ class _CheckJobs(Domain):
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 8, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 9, _TABLES)
 
 
 def entry_key(name: str) -> str:
