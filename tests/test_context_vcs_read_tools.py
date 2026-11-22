@@ -29,6 +29,13 @@ def _context():
     return context
 
 
+def _receipt():
+    return {"publication_id": "a" * 64, "branch": "pinned-branch",
+            "published_sha": "b" * 40, "source_commit": "c" * 40,
+            "code_digest": "e" * 64, "approval": "approved", "run": "run-1",
+            "lineage": {"target": "baseline"}}
+
+
 class ContextVcsReadToolsTests(unittest.TestCase):
     def test_context_inherits_every_helper(self):
         for name in (*HANDLERS, "_op_vcs_read"):
@@ -42,8 +49,6 @@ class ContextVcsReadToolsTests(unittest.TestCase):
                 self.assertIs(method, getattr(ContextVcsReadToolsMixin, name))
                 self.assertEqual(method.__module__, OWNER)
                 self.assertNotIn(method, tuple(Context._DISPATCH.values()))
-        self.assertEqual(Context._op_vcs_read.__module__, "mizu.runtime")
-        self.assertIs(Context._DISPATCH["vcs_read"], Context._op_vcs_read)
 
     def test_vcs_read_reaches_each_helper_through_self(self):
         context = _context()
@@ -158,6 +163,113 @@ class ContextVcsReadToolsTests(unittest.TestCase):
     def test_ci_costs_keeps_its_local_observation_import(self):
         source = inspect.getsource(ContextVcsReadToolsMixin._op_vcs_read_ci_costs)
         self.assertIn("from .ci_costs import observed_costs", source)
+
+
+    def test_vcs_read_is_mixin_owned_and_dispatched_unchanged(self):
+        self.assertIs(Context._op_vcs_read, ContextVcsReadToolsMixin._op_vcs_read)
+        self.assertEqual(Context._op_vcs_read.__module__, OWNER)
+        self.assertIs(Context._DISPATCH["vcs_read"], Context._op_vcs_read)
+
+    def test_vcs_read_denials_keep_their_messages(self):
+        cases = (
+            ({"op": "status", "branch": "main"}, "none", "This role has no workspace"),
+            ({"op": "status", "branch": "main", "check": "unit"}, "local",
+             "check is only valid for log reads"),
+            ({"op": "status", "branch": "main", "offset": 1}, "local",
+             "offset is only valid for CI costs or artifact byte pages"),
+            ({"op": "status", "branch": "main", "limit": 1}, "local",
+             "limit is only valid for CI costs or artifact reads/listings"),
+            ({"op": "status", "branch": "main", "code_digest": "b" * 64}, "local",
+             "code_digest is only valid for the publications listing"),
+            ({"op": "status", "publication_id": "a" * 64, "branch": "main"}, "local",
+             "publication_id status reads take no branch, sha, or other filters"),
+        )
+        for args, workspace, message in cases:
+            with self.subTest(args=args):
+                context = _context()
+                context.role.workspace = workspace
+                with self.assertRaisesRegex(Denied, message), \
+                        patch(f"{OWNER}._vcs.read_via") as read, \
+                        patch(f"{OWNER}.write_json") as write:
+                    Context._op_vcs_read(context, args)
+                read.assert_not_called()
+                write.assert_not_called()
+                context._new_invocation_evidence.assert_not_called()
+
+    def test_publication_status_pins_receipt_branch_and_sha_into_adapter_params(self):
+        context = _context()
+        # Without both grants the diagnostics branch stays off.
+        context.role.capabilities = ("vcs_read",)
+        receipt = _receipt()
+        observation = {"head": receipt["published_sha"]}
+        data = {"checks": [], "lineage_observation": observation,
+                "lineage_reason": "fresh", "status": "complete"}
+        args = {"op": "status", "publication_id": receipt["publication_id"]}
+        with patch(f"{OWNER}.Publication") as publication, \
+                patch(f"{OWNER}._vcs.read_via", return_value=data) as read, \
+                patch(f"{OWNER}.lineage.status", return_value={"state": "current"}) as status, \
+                patch(f"{OWNER}.lineage.validate", return_value={"valid": True}) as validate, \
+                patch(f"{OWNER}.ci_waits.status_diagnostics") as diagnostics, \
+                patch(f"{OWNER}.write_json") as write:
+            publication.read_receipt.return_value = receipt
+            result = Context._op_vcs_read(context, args)
+
+        publication.read_receipt.assert_called_once_with(
+            context.project.root, receipt["publication_id"])
+        read.assert_called_once()
+        self.assertEqual(read.call_args.args[1], "status")
+        self.assertEqual(read.call_args.args[2],
+                         {"branch": receipt["branch"], "sha": receipt["published_sha"],
+                          "publication_id": receipt["publication_id"]})
+        self.assertIs(read.call_args.kwargs["cancel"], context.tools_cancelled)
+        self.assertNotIn("preserve_status_rows", read.call_args.kwargs)
+        diagnostics.assert_not_called()
+        status.assert_called_once_with(
+            receipt, observation, "fresh", context.project.lineage_target)
+        validate.assert_called_once_with(receipt["lineage"], receipt["published_sha"])
+        self.assertEqual(result, {
+            "op": "status", "branch": receipt["branch"], "trust": "external-untrusted",
+            "evidence_id": "eid-1", "evidence": EVIDENCE,
+            "result": {"checks": [], "status": "complete",
+                       "lineage": {"state": "current", "receipt": {"valid": True},
+                                   "observation": observation},
+                       "publication": {key: receipt[key] for key in (
+                           "publication_id", "source_commit", "code_digest", "branch",
+                           "published_sha", "approval", "run")}},
+        })
+        write.assert_called_once_with(context.run_dir / EVIDENCE, result)
+
+    def test_diagnostics_branch_adds_ci_waits_and_filters_exact_sha_rows(self):
+        context = _context()
+        context.role.capabilities = ("vcs_read", "work_items_read")
+        context.role.name = "worker"
+        receipt = _receipt()
+        sha = receipt["published_sha"]
+        rows = [{"check": "keep-1", "sha": sha}, {"check": "drop", "sha": "d" * 40},
+                {"check": "keep-2", "sha": sha}]
+        data = {"checks": rows, "lineage_observation": {"head": sha}, "lineage_reason": "fresh"}
+        diagnostics = {"items": [{"work_item": "wi_1"}], "observed": 1}
+        args = {"op": "status", "publication_id": receipt["publication_id"]}
+        with patch(f"{OWNER}.Publication") as publication, \
+                patch(f"{OWNER}._vcs.read_via", return_value=data) as read, \
+                patch(f"{OWNER}.ci_waits.status_diagnostics", return_value=diagnostics) as diag, \
+                patch(f"{OWNER}.lineage.status", return_value={"state": "current"}), \
+                patch(f"{OWNER}.lineage.validate", return_value={"valid": True}), \
+                patch(f"{OWNER}.write_json") as write:
+            publication.read_receipt.return_value = receipt
+            result = Context._op_vcs_read(context, args)
+
+        read.assert_called_once()
+        self.assertTrue(read.call_args.kwargs["preserve_status_rows"])
+        diag.assert_called_once_with(
+            context.project.work_items, "worker", receipt, data)
+        self.assertEqual(diag.call_args.args[3]["checks"], rows)  # unfiltered observation
+        self.assertEqual(result["result"]["checks"],
+                         [{"check": "keep-1", "sha": sha}, {"check": "keep-2", "sha": sha}])
+        self.assertEqual(result["result"]["ci_waits"], diagnostics)
+        write.assert_called_once_with(context.run_dir / EVIDENCE, result)
+        self.assertEqual(write.call_args.args[1]["result"]["checks"],
+                         [{"check": "keep-1", "sha": sha}, {"check": "keep-2", "sha": sha}])
 
 
 if __name__ == "__main__":
