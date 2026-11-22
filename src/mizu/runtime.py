@@ -57,6 +57,7 @@ from .context_join_tools import ContextJoinToolsMixin
 from .context_work_tools import ContextWorkToolsMixin
 from .context_grant_read_tools import ContextGrantReadToolsMixin
 from .context_vcs_read_tools import ContextVcsReadToolsMixin
+from .context_vcs_publish_tools import ContextVcsPublishMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_dispatch import EngineDispatchMixin
 from .engine_delegation import (EngineDelegationMixin, CONSULT_FORBIDDEN,
@@ -85,9 +86,9 @@ from .report import publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
 from .ci_requests import CiRequests, request_id as ci_request_id
+# source_commit keeps its established runtime re-export seam.
 from .publication import Publication, source_commit
 from .web import Web
-from . import reviews
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 # Ready-work observation keeps its established runtime import seam.
 from .work_readiness import (_has_ready_work, _ready_work_changed,
@@ -261,7 +262,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
                 ContextRoleToolsMixin, ContextJoinToolsMixin,
                 ContextWorkToolsMixin, ContextGrantReadToolsMixin,
-                ContextVcsReadToolsMixin):
+                ContextVcsReadToolsMixin, ContextVcsPublishMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -841,72 +842,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         write_json(self.run_dir / evidence, record)
         return record
 
-    def _op_vcs_publish(self, args: dict) -> dict:
-        # External publication: push/PR via the trusted adapter behind a
-        # recorded human GO approval bound to branch and code digest.
-        # Fail-closed without approval; stale digests refused. Merging stays
-        # workspace edits + verify; this only ships the approved tree.
-        if self.role.workspace != "write":
-            raise Denied("Publication requires a writable workspace")
-        self.close_exec()
-        captured = self.project.snapshots.capture_files(self.workspace)
-        if captured.get("skipped"):
-            raise Denied("Publication requires a representable snapshot")
-        code_digest = captured["code_digest"]
-        from .distribution import public_source_identity
-        try:
-            projection = public_source_identity(captured.get("files", {}))
-        except ValueError as exc:
-            raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
-        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest,
-                                            queue=self.config.vcs.get("approval_queue"))
-        review_approvals = reviews.require_approvals(self, code_digest)
-        try:
-            source = source_commit(
-                self.workspace, timeout=self.config.publication.source_commit_timeout_seconds,
-                cancel=self.tools_cancelled)
-            publication = Publication(self.project.root, source, code_digest,
-                                      args["branch"], args["op"], projection=projection)
-            with lock(publication.lock):
-                intent, receipt = publication.prepare(approval["approval"], self.run_dir.name)
-                before_local, observe = self._mutation_evidence(
-                    "vcs-publish", args["op"],
-                    {"branch": args["branch"], "code_digest": code_digest,
-                     "projection_schema": projection["schema"],
-                     "projection_algorithm": projection["algorithm"],
-                     "projection_digest": projection["digest"],
-                     "approval": approval["approval"], "source_commit": source,
-                     "publication_id": publication.id})
-
-                def before_invoke():
-                    before_local()
-                    publication.mark_dispatch()
-
-                if receipt is None:
-                    try:
-                        data = _vcs.publish_via(
-                            self.project.vcs_settings(self.config), args["op"],
-                            {**publication.identity, "publication_id": publication.id},
-                            cancel=self.tools_cancelled, before_invoke=before_invoke)
-                    except (Denied, OSError) as exc:
-                        raise Denied(f"VCS publication {publication.id}: {exc}") from exc
-                    receipt = publication.complete(intent, data["published_sha"], data.get("lineage"))
-                else:
-                    # Retain a run-local observation even on a durable replay.
-                    before_local()
-                    data = {"digest": code_digest, "publication_id": publication.id,
-                            "projection_schema": projection["schema"],
-                            "projection_algorithm": projection["algorithm"],
-                            "projection_digest": projection["digest"],
-                            "published_sha": receipt["published_sha"],
-                            "trust": "external-untrusted"}
-        except OSError as exc:
-            raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        record = {**receipt, "published": True, "review": list(review_approvals),
-                  "receipt": publication.path("receipt").relative_to(self.project.root).as_posix(),
-                  "trust": "external-untrusted", "result": data}
-        return observe(record)
-
     def _op_vcs_request(self, args: dict) -> dict:
         # Ask the provider for one CI run per workflow at an exact published
         # commit. The target is a completed publication receipt, never a
@@ -1256,7 +1191,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "queue_ack": ContextKernelToolsMixin._op_queue_ack,
         "message_read": ContextKernelToolsMixin._op_message_read,
         "message_refs": ContextKernelToolsMixin._op_message_refs,
-        "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
+        "sync": _op_sync, "vcs_read": _op_vcs_read,
+        "vcs_publish": ContextVcsPublishMixin._op_vcs_publish,
         "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": ContextRoleToolsMixin._op_materialize,

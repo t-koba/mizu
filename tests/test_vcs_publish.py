@@ -151,7 +151,7 @@ class VcsPublishTests(PublishFixture):
             publication=dataclasses.replace(config.publication, source_commit_timeout_seconds=13))
         approve(self, "main", current_digest(self))
         ctx = make_context(self, config, role)
-        with patch("mizu.runtime.source_commit", wraps=source_commit) as local_head, \
+        with patch("mizu.context_vcs_publish_tools.source_commit", wraps=source_commit) as local_head, \
                 patch("mizu.publication.process.run",
                       return_value=Result(0, self.source_commit, "", "exited", 0)) as git:
             out = ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
