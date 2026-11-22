@@ -141,7 +141,7 @@ class CiRequestTests(Fixture):
                     patch("mizu.vcs.invoke", **({"side_effect": payload} if isinstance(payload, Exception)
                                               else {"return_value": payload})):
                 ctx = self.context({})
-                with patch("mizu.runtime.now", return_value="2036-10-21T00:00:00+00:00"):
+                with patch("mizu.context_vcs_request_tools.now", return_value="2036-10-21T00:00:00+00:00"):
                     with self.assertRaises(Denied):
                         self.request(ctx)
                     with self.assertRaisesRegex(Denied, "preceding"):
@@ -1029,7 +1029,7 @@ class CiRequestTests(Fixture):
             return answer if state["dispatched"] else dispatch
 
         ctx = self.context(runs(), poll_enabled=True)
-        with patch("mizu.runtime.now", clock), \
+        with patch("mizu.context_vcs_request_tools.now", clock), \
                 patch.object(CiRequests, "mark_dispatch", mark_dispatch):
             out = self.request(ctx)
         # The answer really did arrive on the next day.

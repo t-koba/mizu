@@ -587,6 +587,11 @@ DECLARATIONS = {
             '2147483647', 'mechanism',
             'lock diagnostics / fixed signed-32-bit duration saturation'),
     },
+    'context_vcs_request_tools.py': {
+        'MAX_COVERED_BYTES': (
+            '2048', 'safety',
+            'VCS request tools / bounded serialized CI-request covered-item set'),
+    },
     'runtime.py': {
         'WRAP_UP_REQUESTS': (
             '3', 'configured policy',
@@ -598,8 +603,6 @@ DECLARATIONS = {
             '4096', 'safety', 'runtime / fixed run-local engine-tool admission identity memory bound'),
         'MAX_ENGINE_TOOL_ID': (
             '256', 'mechanism', 'runtime / engine-tool invocation id format bound'),
-        'MAX_COVERED_BYTES': (
-            '2048', 'safety', 'runtime / bounded serialized CI-request covered-item set'),
     },
     'wake_evidence.py': {
         'OBSERVED_CURSOR_MAX_BYTES': (
@@ -2310,7 +2313,7 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', 'Context._handle', 1, 1): (
         '4096', 'safety',
         'runtime usage / fixed per-run retained observation-row ceiling'),
-    ('runtime.py', 'Context._covered_waits', 1, 0): (
+    ('context_vcs_request_tools.py', 'ContextVcsRequestToolsMixin._covered_waits', 1, 0): (
         '16', 'format',
         'VCS request / covered work-item count follows the public request protocol'),
     ('unit_finish.py', 'ContextFinishMixin._op_finish', 1, 0): (
