@@ -1610,12 +1610,13 @@ human-triggered stock harness connected through a readonly capsule.
 `mizu_delegate` is synchronous by default. A parent role holding both `delegate`
 and `delegate_join` can pass `async_mode=true`: Mizu reserves the caller's
 admitted snapshot, starts one ephemeral child execution thread in the same
-process, and returns a durable job id promptly. The child shares the caller's
-workspace lease and spend ledger, is restricted to file edits, and holds neither
-`delegate` nor `delegate_join`. Its narrow companion tool `mizu_delegate_join`
-accepts only that exact id; it reports a pending status while the child holds
-the tree and returns the sealed child record unchanged only after terminal
-execution and proven in-process handback. A missing `delegate_join` grant denies
+process, and returns a durable job id with the child's `run` identity promptly.
+The child shares the caller's workspace lease and spend ledger, is restricted to
+file edits, and holds neither `delegate` nor `delegate_join`. Its narrow
+companion tool `mizu_delegate_join` accepts only that exact id; it reports a
+pending status with the child's `run` when the live reservation is available
+and returns the sealed child record (already carrying `run`) unchanged only
+after terminal execution and proven in-process handback. A missing `delegate_join` grant denies
 `async_mode=true` before any reservation. There is no external runner, fan-out
 or second concurrent child; external runner handback paths remain refused.
 

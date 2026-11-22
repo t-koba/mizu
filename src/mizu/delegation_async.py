@@ -92,6 +92,14 @@ def _gate(engine, role, profile):
         raise Denied('Async delegation child cannot use MCP servers')
 
 
+def _live_run(store: DelegationJobs, job_id: str):
+    """Exact child run identity from the live ledger reservation, if present."""
+    reservation = store.reservation()
+    if reservation is not None and reservation.get('id') == job_id:
+        return reservation['run_id']
+    return None
+
+
 def _clear_gate(parent, job_id: str) -> None:
     with parent.mutex:
         if (parent._reservation_view is not None
@@ -138,11 +146,14 @@ def start(engine, parent, key: str, role_name: str, task: str, snap: dict) -> di
         return join(parent, job_id)
     if view is not None:
         # An exact retry (or a restart with a held reservation) never launches
-        # another child. Refresh the trusted gate first so the parent stays
-        # fenced from the live tree while the original job still holds it.
+        # another child. Its run identity is still live in the reservation;
+        # fail closed before fencing if that exact identity is unavailable.
+        run = _live_run(store, job_id)
+        if run is None:
+            raise Denied('Delegation run identity is unavailable')
         with parent.mutex:
             parent._reservation_view = DelegationJobs.reservation_projection(parent.project.root)
-        return view
+        return view | {'run': run}
 
     request = {'role': role_name, 'task': task,
                'profile': None, 'source_snapshot': snap['id']}
@@ -153,7 +164,8 @@ def start(engine, parent, key: str, role_name: str, task: str, snap: dict) -> di
     try:
         with _LOCK:
             if job_id in _CHILDREN:
-                return view
+                return {'id': job_id, 'status': 'running', 'reserved': True,
+                        'run': _CHILDREN[job_id].run_id}
             reservation = store.reservation()
             if (reservation is None or reservation['id'] != job_id
                     or reservation['owner'] != owner):
@@ -207,7 +219,7 @@ def start(engine, parent, key: str, role_name: str, task: str, snap: dict) -> di
         if child.token:
             _abort(child, parent, str(exc))
         raise
-    return {'id': job_id, 'status': 'running', 'reserved': True}
+    return {'id': job_id, 'status': 'running', 'reserved': True, 'run': run_id}
 
 
 def _bounded_result(record: dict) -> str:
@@ -268,8 +280,12 @@ def join(context, job_id: str) -> dict:
     if view['status'] != 'terminal' or not view['result_available']:
         if context._reservation_view is not None and context._reservation_view.get('id') != job_id:
             raise Busy('Another delegation reservation is active')
-        return {'id': job_id, 'status': view['status'], 'reserved': True,
-                'result_available': False}
+        response = {'id': job_id, 'status': view['status'], 'reserved': True,
+                    'result_available': False}
+        run = _live_run(store, job_id)
+        if run is not None:
+            response['run'] = run
+        return response
     result = loads_finite(store.result(context.role.name, job_id)['result'].encode('utf-8'))
     with context.mutex:
         if (context._reservation_view is not None

@@ -7,10 +7,12 @@ Synchronous delegation uses the same role/profile resolver and remains
 synchronous by default.
 
 The opt-in `mizu_delegate` argument `async_mode=true` starts one in-process
-child under that reservation and returns a durable job id promptly. Its narrow
-companion `mizu_delegate_join` accepts only that exact id: it reports
-`status=running` while the child holds the tree and returns the sealed child
-record unchanged after terminal execution and handback. Both tools require the
+child under that reservation and returns a durable job id with the child's
+`run` identity promptly. Its narrow companion `mizu_delegate_join` accepts only
+that exact id: while the child holds the tree it reports `status=running` and
+the same `run` when the live reservation is available, then returns the sealed
+child record (already carrying `run`) unchanged after terminal execution and
+handback. Both tools require the
 `delegate` and `delegate_join` capabilities; the child role has neither. There
 is no external runner, fan-out or second concurrent child.
 

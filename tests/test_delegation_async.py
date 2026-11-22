@@ -112,6 +112,7 @@ class AsyncDelegationTests(Fixture):
         def work(ctx, *_):
             if ctx.role.name == 'helper':
                 started.set()
+                seen['child_run'] = ctx.run_dir.name
                 if not release.wait(5):
                     raise AssertionError('child release timed out')
                 ctx.handle('finish', {'outcome': 'wait', 'summary': 'Async child done',
@@ -135,10 +136,14 @@ class AsyncDelegationTests(Fixture):
         result = self.run_parent(work)
         self.assertEqual(result['status'], 'completed')
         accepted = seen['accepted']
-        self.assertEqual(set(accepted), {'id', 'status', 'reserved'})
+        self.assertEqual(set(accepted), {'id', 'status', 'reserved', 'run'})
         self.assertEqual(len(accepted['id']), 64)
+        self.assertEqual(accepted['run'], seen['child_run'])
         self.assertLess(seen['elapsed'], 1.0)
+        self.assertEqual(set(seen['pending']),
+                         {'id', 'status', 'reserved', 'result_available', 'run'})
         self.assertEqual(seen['pending']['status'], 'running')
+        self.assertEqual(seen['pending']['run'], seen['child_run'])
         self.assertNotIn('answer', seen['pending'])
         self.assertEqual(seen['result'], seen['again'])
         self.assertEqual(seen['result']['answer'], 'Async child done')
@@ -194,6 +199,7 @@ class AsyncDelegationTests(Fixture):
             time.sleep(.05)
             self.assertEqual(count, count_before)
             self.assertEqual(retry['status'], 'running')
+            self.assertEqual(retry['run'], count[0])
             release.set()
             seen = _join_until_terminal(ctx, accepted['id'])
             self.assertEqual(seen['answer'], 'Child')
@@ -268,6 +274,7 @@ class AsyncDelegationTests(Fixture):
         with self.assertRaisesRegex(Denied, 'unavailable while the workspace is reserved'):
             self.run_parent(work)
         self.assertEqual(seen['status']['status'], 'running')
+        self.assertIn('run', seen['status'])
         self.assertIsNotNone(DelegationJobs(self.project.root).reservation())
 
 
