@@ -30,9 +30,11 @@ CREATE TABLE check_jobs(
     proof_pending INTEGER, job TEXT, lifecycle_key TEXT, shared_key TEXT, purpose TEXT,
     cache_request TEXT, request_sequence INTEGER, passed INTEGER, cancel_requested INTEGER);
 CREATE TABLE check_completion_changes(
-    seq INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, job_id TEXT NOT NULL);
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, job_id TEXT NOT NULL,
+    created_at TEXT);
 CREATE INDEX check_completion_changes_role ON check_completion_changes(role, seq);
 CREATE UNIQUE INDEX check_completion_changes_job ON check_completion_changes(job_id);
+CREATE INDEX check_completion_changes_created ON check_completion_changes(role, created_at DESC, job_id DESC, seq);
 CREATE INDEX check_jobs_role ON check_jobs(role, valid, acknowledged);
 CREATE INDEX check_jobs_shared ON check_jobs(shared_job);
 CREATE INDEX check_jobs_shared_key ON check_jobs(valid, shared_key, status, passed, shared_job, detached, cancel_requested, created_at);
@@ -124,19 +126,24 @@ class _CheckJobs(Domain):
                 if before.get(job_id) is not None:
                     db.execute("DELETE FROM check_completion_changes WHERE job_id=?", (job_id,))
             elif before.get(job_id) is None:
-                db.execute("INSERT INTO check_completion_changes(role, job_id) VALUES (?, ?)",
-                           (role, job_id))
+                created = db.execute(
+                    "SELECT created_at FROM check_jobs WHERE id=?", (job_id,)).fetchone()
+                db.execute(
+                    "INSERT INTO check_completion_changes(role, job_id, created_at) VALUES (?, ?, ?)",
+                    (role, job_id, created[0] if created else ''))
 
     def finish(self, db) -> None:
         # A rebuilt index has no incremental history: seed one exact change per
         # currently effective terminal job, oldest first so seq orders by time.
         db.execute("DELETE FROM check_completion_changes")
         rows = db.execute(
-            "SELECT id, valid, NULL, role, status, NULL, detached, NULL, shared_job "
+            "SELECT id, valid, NULL, role, status, NULL, detached, NULL, shared_job, created_at "
             "FROM check_jobs ORDER BY created_at, id").fetchall()
+        creation = {row[0]: row[9] or '' for row in rows}
         for role, job_id in completion_pairs(rows):
-            db.execute("INSERT INTO check_completion_changes(role, job_id) VALUES (?, ?)",
-                       (role, job_id))
+            db.execute(
+                "INSERT INTO check_completion_changes(role, job_id, created_at) VALUES (?, ?, ?)",
+                (role, job_id, creation[job_id]))
 
     def snapshot(self, db):
         if db is None:
@@ -144,11 +151,11 @@ class _CheckJobs(Domain):
         return {row[0]: tuple(row) for table in ("check_jobs", "check_waits")
                 for row in db.execute(f"SELECT * FROM {table}")} | {
             row[0]: tuple(row) for row in db.execute(
-                "SELECT seq, role, job_id FROM check_completion_changes")}
+                "SELECT seq, role, job_id, created_at FROM check_completion_changes")}
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 9, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 10, _TABLES)
 
 
 def entry_key(name: str) -> str:

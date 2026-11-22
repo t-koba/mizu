@@ -74,6 +74,27 @@ class CheckJobIndexTests(Fixture):
         self.build()
         self.assertEqual(rows(self.project.root)[1], [])
 
+    def test_completion_changes_carry_creation_time_through_rebuild(self):
+        job = self.queue()
+        self.project.set_control(paused=False)
+        self.run_all()
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            created = db.execute('SELECT created_at FROM check_jobs WHERE id=?',
+                                 (job['id'],)).fetchone()[0]
+            changes = db.execute('SELECT seq, role, job_id, created_at '
+                                 'FROM check_completion_changes').fetchall()
+            schema = db.execute("SELECT value FROM meta WHERE key='check_jobs.schema'").fetchone()[0]
+        self.assertEqual(schema, check_job_index.CHECK_JOBS.schema)
+        self.assertEqual(changes, [(1, 'worker', job['id'], created)])
+        expected = self.project.ledger.snapshot('check_jobs')
+        forget_ledger(self.project.root)
+        self.build()
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            rebuilt = db.execute('SELECT seq, role, job_id, created_at '
+                                 'FROM check_completion_changes').fetchall()
+        self.assertEqual(rebuilt, changes)
+        self.assertEqual(self.project.ledger.snapshot('check_jobs'), expected)
+
     def test_release_removes_the_row_with_the_directory(self):
         job = self.queue()
         self.build()

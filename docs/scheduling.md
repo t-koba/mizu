@@ -1117,9 +1117,11 @@ and policy gate. That in-unit delivery is presentation only: no polling, no
 sleeping, no output acknowledgement and no model receipt; output stays behind
 `action=result`. Managed Pi captures the completion index position with the
 opening prompt and reads only later indexed changes in bounded pages ordered
-newest-first by job creation time with a job-id tie-break; the captured
-completion sequence only seals which window is eligible, and each window drains
-before a new high opens another: work per boundary
+newest-first by job creation time with a job-id tie-break; the cursor advances
+by an exclusive (creation time, job id) key through a covering index, so each
+boundary reads one page instead of sorting the whole window. The captured
+completion sequence high-water only seals which window is eligible, and each
+window drains before a new high opens another: work per boundary
 stays bounded, unchanged boundaries are constant-cost, and pre-opening history
 cannot delay or repeat a fresh result. A completion that races into the prompt
 is seeded as seen and filtered by that position, never steered twice. Managed

@@ -2042,17 +2042,20 @@ def _steer_changes(project, role, cursor):
             if high <= cursor.floor:
                 return []
             cursor.ceiling = high
+        # The creation index supplies the ORDER BY and the exclusive key seek
+        # directly, so a boundary reads at most one page instead of sorting the
+        # whole seq window; seq only limits which rows are eligible.
         query = (
-            "SELECT c.seq, c.job_id, COALESCE(j.created_at, '') "
-            'FROM check_completion_changes c LEFT JOIN check_jobs j ON j.id=c.job_id '
+            "SELECT c.seq, c.job_id, c.created_at "
+            'FROM check_completion_changes c JOIN check_jobs j ON j.id=c.job_id '
             'WHERE c.role=? AND c.seq>? AND c.seq<=? '
             'AND (j.acknowledged IS NULL OR j.acknowledged=0)')
         parameters = [role, cursor.floor, cursor.ceiling]
         if cursor.page_after is not None:
             created_at, job_id = cursor.page_after
-            query += ' AND (j.created_at < ? OR (j.created_at = ? AND c.job_id < ?))'
+            query += ' AND (c.created_at < ? OR (c.created_at = ? AND c.job_id < ?))'
             parameters.extend((created_at, created_at, job_id))
-        query += " ORDER BY COALESCE(j.created_at, '') DESC, c.job_id DESC LIMIT ?"
+        query += ' ORDER BY c.created_at DESC, c.job_id DESC LIMIT ?'
         parameters.append(MAX_CHECK_STEER_CHANGE_ROWS)
         rows = db.execute(query, parameters).fetchall()
     if rows:
