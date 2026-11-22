@@ -2056,15 +2056,18 @@ class CheckSteerCursor:
     generation: str = ''
 
 
-# The creation index supplies the ORDER BY and the exclusive key seek. Bind it
-# explicitly: SQLite may otherwise pick the seq index and sort a growing window
-# on a different planner version, making a bounded page read unbounded.
+# First fence by seq, then sort only that eligible window. Seeking the seq
+# index here keeps pre-opening history out of the read even when a completion
+# created before that history joins the window later. The outer row-value key
+# seeks forward within the window; neither step scans the retained index.
 _STEER_CHANGES_QUERY = (
-    "SELECT c.seq, c.job_id, c.created_at "
-    'FROM check_completion_changes c INDEXED BY check_completion_changes_created '
-    'JOIN check_jobs j ON j.id=c.job_id '
-    'WHERE c.role=? AND c.seq>? AND c.seq<=? '
-    'AND (j.acknowledged IS NULL OR j.acknowledged=0)')
+    'WITH eligible AS ('
+    'SELECT seq, job_id, created_at '
+    'FROM check_completion_changes INDEXED BY check_completion_changes_role '
+    'WHERE role=? AND seq>? AND seq<=?) '
+    'SELECT c.seq, c.job_id, c.created_at '
+    'FROM eligible c JOIN check_jobs j ON j.id=c.job_id '
+    'WHERE (j.acknowledged IS NULL OR j.acknowledged=0)')
 
 
 def _steer_changes(project, role, cursor):
@@ -2090,15 +2093,15 @@ def _steer_changes(project, role, cursor):
             if high <= cursor.floor:
                 return []
             cursor.ceiling = high
-        # The creation index supplies the ORDER BY and the exclusive key seek
-        # directly, so a boundary reads at most one page instead of sorting the
-        # whole seq window; seq only limits which rows are eligible.
+        # The fenced set is bounded by the cursor window; ordering it and
+        # seeking the exclusive (created_at, job_id) key cannot walk history
+        # retained before the window opened or acknowledged rows in it.
         query = _STEER_CHANGES_QUERY
         parameters = [role, cursor.floor, cursor.ceiling]
         if cursor.page_after is not None:
             created_at, job_id = cursor.page_after
-            query += ' AND (c.created_at < ? OR (c.created_at = ? AND c.job_id < ?))'
-            parameters.extend((created_at, created_at, job_id))
+            query += ' AND (c.created_at, c.job_id) < (?, ?)'
+            parameters.extend((created_at, job_id))
         query += ' ORDER BY c.created_at DESC, c.job_id DESC LIMIT ?'
         parameters.append(MAX_CHECK_STEER_CHANGE_ROWS)
         rows = db.execute(query, parameters).fetchall()

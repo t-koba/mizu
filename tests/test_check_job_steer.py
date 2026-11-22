@@ -488,100 +488,108 @@ class SteerTests(SteerFixture):
 
     def test_indexed_pages_are_bounded_by_page_size_not_retained_history(self):
         page = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS
-        base = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
-        ticks = itertools.count()
+        steps_by_scale = {}
+        for retained in (224, 4096):
+            with self.subTest(retained=retained):
+                case = SteerTests(self._testMethodName)
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                self.addCleanup(case.tearDown)
+                base = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
+                ticks = itertools.count()
 
-        def distinct_now():
-            return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
+                def distinct_now():
+                    return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
 
-        # Two pages of real completions with distinct creation timestamps.
-        with patch.object(check_jobs, 'now', distinct_now):
-            jobs = [self.job(f'printf bounded-{index}') for index in range(2 * page)]
-        newest_first = [job['id'] for job in reversed(jobs)]
-        full = check_jobs.steer_pending(self.project, 'worker', ())
-        self.assertEqual([row['id'] for row in full],
-                         newest_first[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS])
+                seed = case.job()
+                with case.project.ledger.read('check_jobs', locked=True) as db:
+                    columns = [row[1] for row in db.execute('PRAGMA table_info(check_jobs)')]
+                    slots = {name: index for index, name in enumerate(columns)}
+                    template = db.execute('SELECT * FROM check_jobs WHERE id=?',
+                                          (seed['id'],)).fetchone()
 
-        with self.project.ledger.read('check_jobs', locked=True) as db:
-            columns = [row[1] for row in db.execute('PRAGMA table_info(check_jobs)')]
-            position = {name: index for index, name in enumerate(columns)}
-            template = db.execute('SELECT * FROM check_jobs WHERE id=?', (jobs[0]['id'],)).fetchone()
-
-        def retain_older(start, stop):
-            # Bulk-load older terminal rows into the derived index directly:
-            # steer reads only that index, and this keeps the scale cheap. Their
-            # timestamps sit below every steer job, so neither page changes.
-            with self.project.ledger.read('check_jobs', locked=True) as db:
-                for index in range(start, stop):
-                    job_id = 'f' * 32 + f'{index + 1:032x}'
-                    created_at = (base - dt.timedelta(seconds=index + 1)).isoformat(timespec='seconds')
+                def insert_direct(job_id, created_at):
                     row = list(template)
-                    row[position['id']] = job_id
-                    row[position['created_at']] = created_at
-                    record = json.loads(row[position['job']])
+                    row[slots['id']] = job_id
+                    row[slots['created_at']] = created_at
+                    record = json.loads(row[slots['job']])
                     record['id'], record['created_at'] = job_id, created_at
-                    row[position['job']] = json.dumps(record)
-                    db.execute(f"INSERT INTO check_jobs VALUES ({','.join('?' * len(columns))})", row)
-                    db.execute('INSERT INTO check_completion_changes(role, job_id, created_at) '
-                               'VALUES (?, ?, ?)', ('worker', job_id, created_at))
+                    row[slots['job']] = json.dumps(record)
+                    with case.project.ledger.read('check_jobs', locked=True) as db:
+                        db.execute(f"INSERT INTO check_jobs VALUES ({','.join('?' * len(columns))})", row)
+                        db.execute('INSERT INTO check_completion_changes(role, job_id, created_at) '
+                                   'VALUES (?, ?, ?)', ('worker', job_id, created_at))
 
-        def measured_pages():
-            cursor = check_jobs.CheckSteerCursor()
-            original_read = self.project.ledger.read
-            pages, steps = [], []
-            for _ in range(2):
-                counted = [0]
+                # History retained before the unit opened has lower seq values
+                # than its cursor floor, whatever its creation timestamps.
+                for index in range(retained):
+                    insert_direct('f' * 32 + f'{index + 1:032x}',
+                                  (base - dt.timedelta(seconds=index + 1)).isoformat(timespec='seconds'))
+                position = check_jobs.completion_position(case.project)
+                # A long-running job completed after the boundary can still be
+                # created before all the retained history it now sits beside.
+                insert_direct('a' * 32, (base - dt.timedelta(days=10)).isoformat(timespec='seconds'))
+                with patch.object(check_jobs, 'now', distinct_now):
+                    jobs = [case.job(f'printf bounded-{index}') for index in range(2 * page)]
+                newest_first = [job['id'] for job in reversed(jobs)]
+                def fresh_cursor():
+                    return check_jobs.CheckSteerCursor(
+                        floor=position.seq, generation=position.generation)
 
-                def tick():
-                    counted[0] += 1
-                    return 0
+                full = check_jobs.steer_pending(case.project, 'worker', (), cursor=fresh_cursor())
+                self.assertEqual([row['id'] for row in full],
+                                 newest_first[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS])
 
-                @contextlib.contextmanager
-                def counting(*args, **kwargs):
-                    with original_read(*args, **kwargs) as db:
-                        db.set_progress_handler(tick, 1)
-                        try:
-                            yield db
-                        finally:
-                            db.set_progress_handler(None, 1)
+                cursor = fresh_cursor()
+                original_read = case.project.ledger.read
+                pages, steps = [], []
+                for _ in range(3):
+                    counted = [0]
 
-                with patch.object(self.project.ledger, 'read', counting):
-                    pages.append(check_jobs._steer_changes(self.project, 'worker', cursor))
-                steps.append(counted[0])
-            return pages, steps
+                    def tick():
+                        counted[0] += 1
+                        return 0
 
-        retain_older(0, 224)     # 64 steer jobs + 224 retained older completions.
-        small_pages, small_steps = measured_pages()
-        retain_older(224, 4096)  # Same two pages, 16x more retained completions.
-        large_pages, large_steps = measured_pages()
+                    @contextlib.contextmanager
+                    def counting(*args, **kwargs):
+                        with original_read(*args, **kwargs) as db:
+                            db.set_progress_handler(tick, 1)
+                            try:
+                                yield db
+                            finally:
+                                db.set_progress_handler(None, 1)
 
-        for pages in (small_pages, large_pages):
-            self.assertEqual([len(page) for page in pages], [page, page])
-            self.assertEqual(pages[0], newest_first[:page])
-            self.assertEqual(pages[1], newest_first[page:2 * page])
-            self.assertEqual(pages[0][:len(full)], [row['id'] for row in full])
-            self.assertEqual(
-                [row['id'] for row in check_jobs.steer_pending(
-                    self.project, 'worker', (), cursor=check_jobs.CheckSteerCursor())],
-                [row['id'] for row in full])
+                    with patch.object(case.project.ledger, 'read', counting):
+                        pages.append(check_jobs._steer_changes(case.project, 'worker', cursor))
+                    steps.append(counted[0])
 
-        with self.project.ledger.read('check_jobs', locked=False) as db:
-            plan = db.execute(
-                'EXPLAIN QUERY PLAN ' + check_jobs._STEER_CHANGES_QUERY
-                + ' ORDER BY c.created_at DESC, c.job_id DESC LIMIT ?',
-                ('worker', 0, 4096, check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
-        self.assertIn('INDEXED BY check_completion_changes_created',
-                      check_jobs._STEER_CHANGES_QUERY)
-        self.assertTrue(any('check_completion_changes_created' in str(row[3])
-                            for row in plan), plan)
+                self.assertEqual([len(p) for p in pages], [page, page, 1])
+                self.assertEqual(pages[0], newest_first[:page])
+                self.assertEqual(pages[1], newest_first[page:2 * page])
+                self.assertEqual(pages[2], ['a' * 32])
+                self.assertEqual(
+                    [row['id'] for row in check_jobs.steer_pending(
+                        case.project, 'worker', (), cursor=fresh_cursor())],
+                    [row['id'] for row in full])
 
-        # A 16x larger seq window must not turn a two-page read into a sort and
-        # scan of that window: the creation index seeks to the exclusive key and
-        # touches one page plus its job lookups at each boundary. Allow 2x plus
-        # fixed headroom for SQLite-version differences; the old whole-window
-        # sort grew roughly 15x over the same range.
-        for small, large in zip(small_steps, large_steps):
-            self.assertLessEqual(large, small * 2 + 500, (small_steps, large_steps))
+                with case.project.ledger.read('check_jobs', locked=False) as db:
+                    plan = db.execute(
+                        'EXPLAIN QUERY PLAN ' + check_jobs._STEER_CHANGES_QUERY
+                        + ' AND (c.created_at, c.job_id) < (?, ?)'
+                        + ' ORDER BY c.created_at DESC, c.job_id DESC LIMIT ?',
+                        ('worker', 0, position.seq, 'z' * 32, 'z' * 32, page)).fetchall()
+                self.assertIn('INDEXED BY check_completion_changes_role',
+                              check_jobs._STEER_CHANGES_QUERY)
+                self.assertTrue(any('check_completion_changes_role' in str(row[3])
+                                    for row in plan), plan)
+                self.assertTrue(any('TEMP B-TREE' in str(row[3]) for row in plan), plan)
+                steps_by_scale[retained] = steps
+
+        # Neither a late page nor a completion created before retained history
+        # grows with the retained index. Allow 2x plus fixed headroom for
+        # SQLite-version differences; the old pre-opening scan grew ~15x.
+        for small, large in zip(steps_by_scale[224], steps_by_scale[4096]):
+            self.assertLessEqual(large, small * 2 + 500, (steps_by_scale, large))
 
     def test_completion_change_index_covers_overlay_and_rebuild(self):
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
