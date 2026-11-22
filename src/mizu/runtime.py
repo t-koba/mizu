@@ -58,6 +58,7 @@ from .context_work_tools import ContextWorkToolsMixin
 from .context_grant_read_tools import ContextGrantReadToolsMixin
 from .context_vcs_read_tools import ContextVcsReadToolsMixin
 from .context_vcs_publish_tools import ContextVcsPublishMixin
+from .context_vcs_retire_tools import ContextVcsRetireMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_dispatch import EngineDispatchMixin
 from .engine_delegation import (EngineDelegationMixin, CONSULT_FORBIDDEN,
@@ -262,7 +263,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
                 ContextRoleToolsMixin, ContextJoinToolsMixin,
                 ContextWorkToolsMixin, ContextGrantReadToolsMixin,
-                ContextVcsReadToolsMixin, ContextVcsPublishMixin):
+                ContextVcsReadToolsMixin, ContextVcsPublishMixin,
+                ContextVcsRetireMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -919,44 +921,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                                     "checks": wait["checks"]}})
         return waits
 
-    def _op_vcs_retire(self, args: dict) -> dict:
-        # Branch retirement: delete an owned temporary integration branch
-        # at an exact expected sha behind the configured retire grant.
-        # Classification is enforced inside retire_via (owned only);
-        # protected, external, tracking, and other refs are preserved.
-        # A failed call implies nothing about the remote ref: reconcile by
-        # re-observing, never by assuming deletion. Retirement is tied to
-        # terminal disposition twice: recorded observations refuse early
-        # before dispatch (they may be stale), and the provider must
-        # affirm atomically with the delete that no live proposal
-        # references the branch, naming blockers in live_refs.
-        # Integration authority is the capability plus the configured
-        # grant, never source-write access: read-workspace integrators
-        # retire without touching the shared workspace.
-        if self.role.workspace == "none":
-            raise Denied("Branch retirement requires a visible workspace")
-        blocking = _vcs.live_proposal_refs(self.project, args.get("branch"))
-        if blocking:
-            raise Denied("Branch retirement is blocked by open proposal "
-                         f"reference(s) {', '.join(blocking)}; dispose the "
-                         "proposal to a terminal state and re-observe before "
-                         "retiring")
-        before_invoke, observe = self._mutation_evidence(
-            "vcs-retire", "retire",
-            {"branch": args.get("branch"), "expected_sha": args.get("expected_sha")})
-        try:
-            data = _vcs.retire_via(self.config.vcs, args.get("branch"),
-                                   args.get("expected_sha"), cancel=self.tools_cancelled,
-                                   before_invoke=before_invoke)
-        except OSError as exc:
-            raise Denied(f"Branch retirement is unavailable: {exc}") from exc
-        record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
-                  "classification": data["classification"],
-                  "live_refs": data["live_refs"],
-                  "trust": "external-untrusted",
-                  "result": data}
-        return observe(record)
-
     def _op_vcs_dispose(self, args: dict) -> dict:
         # Proposal disposition: close/merge an external proposal at the
         # exact assessed head, base, and target behind the matching
@@ -1082,7 +1046,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "sync": _op_sync, "vcs_read": ContextVcsReadToolsMixin._op_vcs_read,
         "vcs_publish": ContextVcsPublishMixin._op_vcs_publish,
         "vcs_request": _op_vcs_request,
-        "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
+        "vcs_retire": ContextVcsRetireMixin._op_vcs_retire,
+        "vcs_dispose": _op_vcs_dispose,
         "materialize": ContextRoleToolsMixin._op_materialize,
         "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate, "report": _op_report,
         "research_read": ContextRoleToolsMixin._op_research_read, "research": ContextRoleToolsMixin._op_research,
