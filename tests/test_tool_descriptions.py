@@ -39,6 +39,7 @@ PURPOSE_PREFIXES = {
         "Move a work item to a new state or update scope, smoke pins or delivery in place."),
     "delegate": (
         "Give a configured delegate a self-contained implementation task in your live workspace."),
+    "delegate_join": "Join one opted-in async delegation by its exact durable job id.",
     "consult": "Ask named read-only roles independently about one immutable code snapshot.",
     "report": "Stage a Markdown report as your unit's artifact; staging does not publish it.",
     "sync": (
@@ -83,7 +84,7 @@ HISTORY_WORDING = re.compile(
 
 class ToolDescriptionTests(unittest.TestCase):
     def test_definition_inventory(self):
-        self.assertEqual(len(DEFINITIONS), 40)
+        self.assertEqual(len(DEFINITIONS), 41)
         for retired in ("work_items_legacy_read", "work_items_reconcile"):
             self.assertNotIn(retired, DEFINITIONS)
         for tool, (description, _) in DEFINITIONS.items():

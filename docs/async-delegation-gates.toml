@@ -1,7 +1,9 @@
 # Runtime-loaded parent-access policy and remaining integration contract.
 # Loaded only for a trusted injected reservation view, never for ordinary calls.
-# Context gates plus admission/maintenance fences are partial; do not enable a
-# runner until every entrypoint is gated and authority/quiescence evidence passes.
+# Context gates plus admission/maintenance fences are partial; an external
+# runner stays disabled until every entrypoint is gated and
+# authority/quiescence evidence passes. The only enabled child substrate is
+# the Mizu-owned in-process path described by inprocess_async below.
 # View schema: {id: SHA256, owner: role, status: reserved_statuses entry,
 # request: {source_snapshot: SHA256}}; extra trusted store fields are ignored.
 # None preserves ordinary access; every malformed/unknown or non-owner view
@@ -35,7 +37,7 @@ parent_snapshot_only = ["diff", "consult"]
 
 # finish remains denied. A future dedicated wait path must bind this exact job
 # and skip ordinary workspace bounds/final capture; the current API cannot.
-parent_exact_job_wait = ["finish"]
+parent_exact_job_wait = ["finish", "delegate_join"]
 
 # Deny the rest of Context._DISPATCH while the parent is reserved. Unknown
 # operations and unsupported parameter values fail closed as well.
@@ -57,6 +59,7 @@ default = "deny"
 diff = "Use only the parent's immutable context snapshot, and require its identity to equal reservation.request.source_snapshot."
 consult = "Require explicit source_snapshot equal to reservation.request.source_snapshot; retrieve and validate that exact retained manifest for consultation and selector preview. Missing, malformed or identity-mismatched manifests deny. Never capture/read parent.workspace or close its execution while reserved; source_snapshot is forbidden without a reservation."
 finish = "Only outcome=wait with an exact wait job id equal to the active reservation; bypass all live-tree bounds/captures on that path. Current API has no such delegation wait field, so it is not yet available."
+delegate_join = "Require job_id equal to the exact active reservation id. Return pending without result while it is not terminal; return the durable sealed result only after terminal execution, proven in-process quiescence and ledger handback. Unknown, stale or other-owner ids deny."
 vcs_read = "Only the listed read-only status/evidence suboperations; every other or malformed suboperation is denied."
 native_tools = "Deny parent native engine-tool calls, regardless of role grants, while reserved."
 external_mcp = "Disable parent MCP servers that see context.workspace; a read-only live mount can still observe partial child edits. A future exception requires an exact immutable snapshot mount."
@@ -111,12 +114,19 @@ quiescence_required = [
 ]
 quiescence_release_rule = "Keep the reservation through cancellation, supervisor death, and reconciliation. All production handback paths, prepared and post-execution, remain unsupported until Mizu enforces a durable no-new-launch fence, verifies terminal execution and supervisor settlement, and proves the exact process scope empty and every exact owned container absent; caller assertions are not proof and uncertain proof never releases it."
 
+# Narrow enabled substrate: one in-process child thread in the admitted parent
+# process, with no external scope, worktree or container. Its ledger claim is
+# the launch fence; handback requires a trusted live probe of child completion,
+# registered driver channels, their process groups and the pinned run directory.
+# A lost process leaves the job running forever; recovery never relaunches it.
+inprocess_async = "Opt-in mizu_delegate async_mode=true plus mizu_delegate_join with the exact job id. Child roles are restricted to file edits (no exec/verify/materialize/MCP/native tools/delegation/consultation). External runner handback paths remain refused."
+
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
   "Engine.run binds a scoped parent gate and the admitted handoff binds resolved child configuration in the immutable queued request; actual runner integration with supervisor-only directory/resources remains absent.",
   "Driver quiescence only observes the direct process and reader threads. No execution substrate has a Mizu-owned launch fence and supervisor-settlement proof; private post-execution and prepared handback now both refuse rather than trusting host callbacks or cleanup booleans. Production descendant/container recovery remains absent.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
-  "Admitted-parent lease handoff commits and refreshes the Context gate, but has no model entrypoint, exact-job wait, child launch or runner integration.",
+  "Admitted-parent lease handoff has a model-visible start/join and one in-process child path; external runner integration, supervisor-only directory/resources and descendant/container recovery remain absent.",
 ]
 
 [child_authority]
@@ -134,7 +144,7 @@ remaining_authority_gaps = [
   "Mutable executable/PATH, installed SDK/runtime and ambient environment/home configuration.",
   "Agent-directory content beyond local models.json; credentials and remote provider/MCP grants.",
   "Container image/mount/seccomp content and atomic use of resolved inputs at launch.",
-  "Concurrent model-slot admission, exact-job wait and durable process/container descendant quiescence.",
+  "Concurrent model-slot admission for an external runner and its durable process/container descendant quiescence; the exact-job wait exists only for the in-process path.",
 ]
 
 [observed_lifecycle]

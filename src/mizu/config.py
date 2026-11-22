@@ -19,7 +19,7 @@ from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT, PIPE_POLL_INTERVAL_M
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
-                          "search", "feed_updates", "consult", "delegate",
+                          "search", "feed_updates", "consult", "delegate", "delegate_join",
                           "report", "finish", "review_verdict", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",

@@ -2,9 +2,17 @@
 
 `engine_config.child_authority_digest` is a pure configuration-binding helper
 returning only a SHA-256 string (64 lowercase hex characters). The private
-admitted-parent reservation now retains that digest in the immutable queued job;
-there is still no runner, model-visible async API or execution authorization.
-Synchronous delegation uses the same role/profile resolver and remains synchronous.
+admitted-parent reservation retains that digest in the immutable queued job.
+Synchronous delegation uses the same role/profile resolver and remains
+synchronous by default.
+
+The opt-in `mizu_delegate` argument `async_mode=true` starts one in-process
+child under that reservation and returns a durable job id promptly. Its narrow
+companion `mizu_delegate_join` accepts only that exact id: it reports
+`status=running` while the child holds the tree and returns the sealed child
+record unchanged after terminal execution and handback. Both tools require the
+`delegate` and `delegate_join` capabilities; the child role has neither. There
+is no external runner, fan-out or second concurrent child.
 
 ## Reservation and retry contract
 

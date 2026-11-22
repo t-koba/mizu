@@ -293,6 +293,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         self.joins_idle = threading.Event()
         self.joins_idle.set()
         self.operation_active = threading.Event()
+        # Mizu-owned driver channels created for this context, retained only
+        # for bounded teardown proof of an in-process delegation child.
+        self._driver_channels: list = []
         self.mutex = threading.RLock()
         self.hello = threading.Event()
         self._spend = _SpendLedger()
@@ -609,7 +612,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "vcs_retire": ContextVcsRetireMixin._op_vcs_retire,
         "vcs_dispose": ContextVcsDisposeMixin._op_vcs_dispose,
         "materialize": ContextRoleToolsMixin._op_materialize,
-        "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate, "report": ContextHostToolsMixin._op_report,
+        "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate,
+        "delegate_join": ContextJoinToolsMixin._op_delegate_join, "report": ContextHostToolsMixin._op_report,
         "research_read": ContextRoleToolsMixin._op_research_read, "research": ContextRoleToolsMixin._op_research,
         "finish": ContextFinishMixin._op_finish,
     }

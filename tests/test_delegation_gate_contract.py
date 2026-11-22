@@ -96,6 +96,22 @@ class DelegationGateContractTests(Fixture):
         self.ctx._reservation_view = None
         self.assert_refused_without_effects("consult", args)
 
+    def test_delegate_join_requires_the_exact_reserved_job_id(self):
+        # A held reservation exposes one narrow wait: its own id, never any
+        # other model-supplied digest or a malformed/missing parameter.
+        job_id = self.view["id"]
+        result = {"status": "terminal", "answer": "sealed child record"}
+        with patch("mizu.delegation_async.join", return_value=result) as join:
+            self.assertEqual(self.ctx.handle("delegate_join", {"job_id": job_id}), result)
+            self.assertEqual(self.ctx.dispatch("delegate_join", {"job_id": job_id}), result)
+        self.assertEqual([call.args for call in join.call_args_list],
+                         [(self.ctx, job_id), (self.ctx, job_id)])
+        for args in ({"job_id": "b" * 64}, {"job_id": "a" * 63 + "g"},
+                     {"job_id": job_id.upper()}, {"job_id": "short"},
+                     {"job_id": None}, {}, {"job_id": job_id, "other": True}):
+            with self.subTest(args=args):
+                self.assert_refused_without_effects("delegate_join", args)
+
     def test_reserved_consult_and_selector_use_only_exact_retained_source(self):
         source = self.project.snapshots.get(self.view["request"]["source_snapshot"])
         original = (self.project.workspace / "app.py").read_text()

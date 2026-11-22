@@ -1,6 +1,6 @@
 """Context nested-join dispatch: consultation and delegation join lifecycle.
 
-These two methods own the Context side of nested consultation and delegation:
+These methods own the Context side of nested consultation and delegation:
 they gate the join on its injected callback, mark the join active through the
 Context activity accounting and restore the idle signal on exit. They are
 mixed back into ``Context`` and referenced by its dispatch table, so every
@@ -34,3 +34,15 @@ class ContextJoinToolsMixin:
         finally:
             self._activity_change(lambda: setattr(self, "_activity_join", None))
             self.joins_idle.set()
+
+    def _op_delegate_join(self, args: dict) -> dict:
+        # The durable ledger, not a model-supplied identity, owns the result.
+        from .delegation_async import join
+
+        join_id = args["job_id"]
+        self._activity_change(lambda: setattr(self, "_activity_join", "delegate_join"),
+                              count="join:delegate")
+        try:
+            return join(self, join_id)
+        finally:
+            self._activity_change(lambda: setattr(self, "_activity_join", None))

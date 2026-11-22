@@ -1523,7 +1523,7 @@ tool boundary, never the meaning of a message or the outcome of work.
 | `check_job` | Submit and inspect asynchronous frozen-input sandbox checks; results import only while source, commands and environment still match |
 | `fetch`, `search`, `feed_updates`, `probe` | Allowlisted retrieval, trusted discovery, query-free feed observation and one policy-bounded HTTPS probe |
 | `queues` | Append to, read, acknowledge and look up messages in declared queues under the principal grants |
-| `consult`, `delegate` | Bounded read-only consultation and one-shot implementation children under their own role grants |
+| `consult`, `delegate`, `delegate_join` | Bounded read-only consultation and one-shot implementation children under their own role grants. `delegate` is synchronous by default; a parent also holding `delegate_join` can pass `async_mode=true` to start one in-process child and join it with `mizu_delegate_join` by its exact job id. There is no external runner, fan-out or second child |
 | `report`, `finish`, `review_verdict` | Stage a report, seal a work unit, or record a typed publication review receipt |
 | `sync`, `vcs_read`, `vcs_publish`, `vcs_retire`, `vcs_dispose`, `vcs_request` | Trusted VCS adapter operations behind their separate operator grants and recorded human approval |
 | `research_read`, `research` | Read and replace this role's bounded current research-state record |
@@ -1605,9 +1605,20 @@ serializes them. The supplied Maintainer belongs to its own candidate project.
 Editor is intentionally not an autonomous role table: it is a separate,
 human-triggered stock harness connected through a readonly capsule.
 
-### Asynchronous delegation prerequisite (not enabled)
+### Asynchronous delegation (opt-in, in-process)
 
-The `delegate` tool remains synchronous; there is no async mode or fan-out grant.
+`mizu_delegate` is synchronous by default. A parent role holding both `delegate`
+and `delegate_join` can pass `async_mode=true`: Mizu reserves the caller's
+admitted snapshot, starts one ephemeral child execution thread in the same
+process, and returns a durable job id promptly. The child shares the caller's
+workspace lease and spend ledger, is restricted to file edits, and holds neither
+`delegate` nor `delegate_join`. Its narrow companion tool `mizu_delegate_join`
+accepts only that exact id; it reports a pending status while the child holds
+the tree and returns the sealed child record unchanged only after terminal
+execution and proven in-process handback. A missing `delegate_join` grant denies
+`async_mode=true` before any reservation. There is no external runner, fan-out
+or second concurrent child; external runner handback paths remain refused.
+
 The private trusted-host API `DelegationJobs.workspace_start(project_root)` is a
 reservation-preparation critical section, not a runner or model tool. It takes
 `locks/workspace.lock` nonblocking, then checks the durable reservation before
@@ -1689,18 +1700,21 @@ copied saved hash; legacy requests cannot launch or acquire new launch bindings.
 Saved resource identities and provisioning intents remain recovery evidence, not
 permission to replay. Uncertain cleanup retains the reservation.
 
-This binds queued configuration, not full runtime authority or runner integration.
-There is no model-visible entrypoint, child launch or background runner. Mutable
-executables/SDKs, agent-directory content, ambient environment/credentials, image
-and mount bytes, remote grants, atomic launch-input use, exact-job wait,
-concurrent model-slot accounting and durable descendant/container quiescence
-remain integration blockers; see [the binding contract](child-authority.md).
+This binds queued configuration and the admitted in-process child path, not an
+external runner. Mutable executables/SDKs, agent-directory content, ambient
+environment/credentials, image and mount bytes, remote grants, atomic
+launch-input use, concurrent external-runner model-slot accounting and durable
+descendant/container quiescence remain integration blockers for an external
+runner; see [the binding contract](child-authority.md).
 The closed runtime policy in [the access contract](async-delegation-gates.toml) stays in force: reserved
 parents deny live-tree operations (including ordinary finish), while declared
-control-plane access remains available. Focused fake-driver tests cover lease
+control-plane access and the exact-id `mizu_delegate_join` wait remain available.
+Focused fake-driver tests cover lease
 refusal, role/profile resolution, authority drift, legacy preservation, no digest
-leak, gate refresh, exact retry, uncertain commits and admission/maintenance
-exclusion; they do not demonstrate async execution or production quiescence.
+leak, gate refresh, exact retry, uncertain commits, in-process start/join and
+handback proof, the missing-`delegate_join` refusal, and admission/maintenance
+exclusion; they do not demonstrate an external runner or production
+descendant/container quiescence.
 
 ## Pi extensions
 

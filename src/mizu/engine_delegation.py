@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 #: the child's own profile/selector/policy) stay operator choice. finish
 #: stays allowed: every configured role carries it so the child can seal,
 #: and delegation ensures it (idempotent when already present).
-DELEGATE_FORBIDDEN = frozenset({"delegate",
+DELEGATE_FORBIDDEN = frozenset({"delegate", "delegate_join",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reopen",
                                 "work_order", "queues", "review_verdict"})

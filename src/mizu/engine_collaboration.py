@@ -153,12 +153,8 @@ class EngineCollaborationMixin:
     def delegate(self, parent: Context, args: dict) -> dict:
         # Runtime still owns these bindings; resolve them at call time so
         # existing ``mizu.runtime`` patch seams keep intercepting this call.
-        from .runtime import (AuthorityGrantMismatch, Busy, Cancelled, Denied,
-                              DrainYieldExceeded, RequestYieldExceeded,
-                              RunDeadlineExceeded, ToolYieldExceeded, Context,
-                              check_jobs, cleanup, container_runtime,
-                              delegation_gates, lock, mkdir, now, prompt_for,
-                              role_exclusion, write_json)
+        from .runtime import (Busy, Denied, delegation_gates)
+        from .fs import canonical, digest
 
         # One-shot implementation child in the caller's live workspace. The
         # caller waits holding its workspace lock, so exactly one writer
@@ -170,37 +166,70 @@ class EngineCollaborationMixin:
         # shared counters; nested delegation and consultation stay disabled
         # so no spend escapes the unit.
         role = self._delegate_role(parent.role, args.get("role"))
-        role_name = role.name
         task = args.get("task") or ""
         if not task.strip():
             raise Denied("Delegation needs a self-contained task")
         if not parent._slot_lease or parent.closed:
             raise Busy("Delegation requires a live admitted caller execution slot")
         delegation_gates.refuse_live_tree(parent._reservation_view, "Delegation capture")
+        if args.get("async_mode") is True:
+            # Opt-in only, and the caller must be able to join what it starts:
+            # refuse before any reservation or child launch when the grant is
+            # absent, never leaving an unjoinable child holding the tree.
+            if "delegate_join" not in parent.role.capabilities:
+                raise Denied("Async delegation requires the delegate_join capability")
+            # The durable reservation pins the caller's own admitted snapshot;
+            # no extra live capture competes with the child. The default path
+            # below stays byte-for-byte synchronous.
+            from .delegation_async import start
+            snap = parent.snapshot
+            key = digest(canonical([parent.run_dir.name, role.name, task, snap["id"]]))[:32]
+            return start(self, parent, key, role.name, task, snap)
         parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                               run=parent.run_dir.name, outcome="wait", summary="Delegation input")
         run_dir = parent.project.root / "runs" / uuid.uuid4().hex
+        return self._delegate_child(parent, role, task, snap, run_dir)
+
+    def _delegate_child(self, parent: Context, role, task: str, snap: dict, run_dir,
+                        *, resolved_profile: str | None = None, context_sink=None,
+                        role_guard=None) -> dict:
+        """One ephemeral child execution, shared by sync and in-process async."""
+        from .runtime import (AuthorityGrantMismatch, Busy, Cancelled, Denied,
+                              DrainYieldExceeded, RequestYieldExceeded,
+                              RunDeadlineExceeded, ToolYieldExceeded, Context,
+                              check_jobs, cleanup, container_runtime,
+                              lock, mkdir, now, prompt_for, role_exclusion,
+                              write_json)
+
+        role_name = role.name
         ctx = None
         profile = ""
         # The child is an invocation of its own role, so it takes that role's
         # exclusion for its whole life: a sibling cleanup cannot remove the
         # child's containers while it runs, and a role runs once at a time in
         # a project, delegated children included.
-        guard = contextlib.ExitStack()
-        try:
-            guard.enter_context(lock(role_exclusion(parent.project.root, role_name),
-                                     blocking=False))
-        except Busy as exc:
-            guard.close()
-            raise Denied("The delegate role is active; delegation needs the role free") from exc
+        guard = role_guard
+        if guard is None:
+            guard = contextlib.ExitStack()
+            try:
+                guard.enter_context(lock(role_exclusion(parent.project.root, role_name),
+                                         blocking=False))
+            except Busy as exc:
+                guard.close()
+                raise Denied("The delegate role is active; delegation needs the role free") from exc
         try:
             mkdir(run_dir)
             # Synchronous routing still uses the published current snapshot,
             # exactly as before the queued-reservation path existed; the new
-            # unpublished capture stays the child's input snapshot only.
-            role = self._delegate_profile(parent.project, role, parent.project.snapshots.get())
+            # unpublished capture stays the child's input snapshot only. An
+            # async child instead uses the profile resolved into its durable
+            # request, so a later configuration drift cannot reselect it.
+            if resolved_profile is None:
+                role = self._delegate_profile(parent.project, role, parent.project.snapshots.get())
+            else:
+                role = dataclasses.replace(role, profile=resolved_profile, selector="")
             profile = role.profile
             write_json(run_dir / "started.json", {"run": run_dir.name,
                        "parent_run": parent.run_dir.name, "delegation": True,
@@ -220,6 +249,8 @@ class EngineCollaborationMixin:
             ctx.spend_role = parent.role
             ctx.delegated_child = True
             ctx._spend = parent._spend
+            if context_sink is not None:
+                context_sink(ctx)
             try:
                 model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
                                        + "\n\nCall finish once with a result summary (and short state) "

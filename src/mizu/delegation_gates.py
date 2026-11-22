@@ -73,6 +73,11 @@ def check_access(view, role_name, snapshot, operation, arguments):
         validate(arguments, DEFINITIONS[operation][1])
         if arguments.get("op") in policy["parameterized"][operation]["allow"]:
             return
+    if operation == "delegate_join":
+        # Only the exact reserved job; the ledger, not the model, owns the result.
+        validate(arguments, DEFINITIONS[operation][1])
+        if arguments["job_id"] == view["id"]:
+            return
     # finish has no exact-job wait; missing/mismatched snapshot inputs deny.
     # Neither a native tool grant nor an unknown operation bypasses this fence.
     raise Denied("Operation is unavailable while the workspace is reserved")

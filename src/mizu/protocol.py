@@ -429,8 +429,14 @@ DEFINITIONS = {
     "delegate": ("Give a configured delegate a self-contained implementation task in your live "
                  "workspace. Its edits are in that workspace, its spend counts against this unit, "
                  "and you receive its sealed result summary. "
-                 "The delegate cannot mutate VCS or delegate again.",
-                 obj({"role": text(64), "task": text(8000)}, ("task",))),
+                 "The delegate cannot mutate VCS or delegate again. "
+                 "Pass async_mode=true to start one bounded child and get a durable job id "
+                 "promptly; join it with mizu_delegate_join. Without it delegation stays synchronous.",
+                 obj({"role": text(64), "task": text(8000), "async_mode": {"type": "boolean"}}, ("task",))),
+    "delegate_join": ("Join one opted-in async delegation by its exact durable job id. Returns "
+                      "the durable reservation status without a result while the child runs; once it is terminal and quiescent, returns "
+                      "the exact sealed result. Repeated joins after handback return the same result.",
+                      obj({"job_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ("job_id",))),
     "consult": ("Ask named read-only roles independently about one immutable code snapshot. You "
                 "receive their replies without granting live workspace access; nested consultation "
                 "is disabled. "

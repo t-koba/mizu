@@ -891,6 +891,53 @@ class DelegationJobs:
             job['status'] = 'running'
             self._save(state)
 
+    def runner_claim_inprocess(self, job_id, token, *, authority_digest, run_id):
+        """Durable one-shot claim for a Mizu-owned in-process child; no spawn.
+
+        The run identity is already pinned by this job. Claiming before any
+        model call fences restart reconciliation: a claimed or terminal job is
+        never relaunched. No binding or provisioning intent is fabricated; this
+        substrate owns no container or external scope.
+        """
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            self._authority(job, authority_digest)
+            if (job['run_id'] != run_id or job['status'] != 'queued'
+                    or job['intent'] is not None or job['binding'] is not None
+                    or job['execution'] is not None):
+                raise Denied('Delegation is not an unclaimed in-process job')
+            job['status'] = 'running'
+            self._save(state)
+
+    def runner_quiescent_inprocess(self, job_id, token, result, *, run_id, probe):
+        """Hand back only after the trusted in-process runner proves teardown.
+
+        ``probe`` is trusted supervisor code, never model input: it inspects
+        the live child thread, every channel it spawned and their process
+        groups while this store lock is held. Caller-supplied booleans cannot
+        satisfy the exact proof schema. A failed or interrupted proof leaves
+        the reservation held; a repeated exact call after handback is a
+        terminal-owner read, not a second execution.
+        """
+        _text(result, MAX_RESULT_BYTES)
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            if (job['run_id'] != run_id or job['status'] != 'running'
+                    or job['execution'] is None):
+                raise Denied('Delegation execution is not terminal for in-process handback')
+            proof = probe()
+            expected = {'thread_done': True, 'drivers_quiescent': True,
+                        'process_groups_absent': True, 'no_external_resources': True}
+            if (type(proof) is not dict or set(proof) != {*expected, 'directory'}
+                    or any(proof[key] is not True for key in expected)
+                    or canonical(proof['directory']) != canonical(
+                        _directory_identity(str(self.root.parent / 'runs' / run_id)))):
+                raise Denied('Delegation in-process quiescence proof missing or mismatched')
+            self._terminal(state, job, result, job['execution'])
+            self._save(state)
+
     def runner_finished(self, job_id, token, outcome):
         """Report terminal execution, NOT teardown. Reservation remains held.
 

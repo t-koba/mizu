@@ -56,6 +56,7 @@ class Channel:
             thread = threading.Thread(target=self._read, args=(stream, events, poll_interval), daemon=True)
             self.readers.append(thread)
             thread.start()
+        context._driver_channels.append(self)
 
     def _put(self, item):
         while not self.stop.is_set():
