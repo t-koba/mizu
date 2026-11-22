@@ -1,4 +1,6 @@
 """Adapter-owned CI reachability is holder-actionable liveness, never auto-resolution."""
+import contextlib
+import sqlite3
 import threading
 from unittest import TestCase
 from unittest.mock import patch
@@ -8,8 +10,10 @@ from mizu.ci_observation import POLL_STATE_FILE
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied
 from mizu.fs import lock, write_json
+from mizu.ledger import NAME as LEDGER_NAME
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS
+from support import index_items
 from test_ci_waits import CiWaitFixture, SHA
 
 OTHER = "c" * 40
@@ -165,6 +169,75 @@ class UnreachableCiWaitTests(CiWaitFixture):
               self.answered("no", REASON) as query):
             self.assertEqual(ci_waits.unreachable(self.store, self.item), REASON)
         query.assert_called_once_with(self.store.vcs, SHA)
+
+    def test_transition_reads_only_its_target_from_a_large_index(self):
+        seed = self.store.create(actor="worker", idempotency_key="scale", title="Scale")["record"]["work_item"]
+        extras = [{**seed, "id": f"wi_{i:032x}"} for i in range(1, 202)]
+        index_items(self.project.root, [seed, *extras], replace=True)
+        self.assertEqual(len(self.store.current_items(statuses=("open",))), 202)
+        scanned = []
+        plains = []
+        active_rows = self.store._active_rows
+        plain = self.store._plain
+
+        def counted_rows(*args, **kwargs):
+            for row in active_rows(*args, **kwargs):
+                scanned.append(row)
+                yield row
+
+        def counted_plain(item_id, **kwargs):
+            plains.append((item_id, kwargs))
+            return plain(item_id, **kwargs)
+
+        with (patch.object(self.store, "_active_rows", counted_rows),
+              patch.object(self.store, "_plain", counted_plain)):
+            changed = self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
+        self.assertEqual(changed["status"], "doing")
+        self.assertEqual(scanned, [], "transition scanned the active index")
+        self.assertEqual(plains, [(seed["id"], {"locked": False, "durable": True})])
+
+    def test_pending_intent_denies_ci_reopen_without_verification(self):
+        with contextlib.closing(sqlite3.connect(self.project.root / LEDGER_NAME)) as db, db:
+            db.execute("INSERT INTO intents(domain, key) VALUES ('items', ?)", (self.item["id"],))
+        with self.answered("no", REASON) as query:
+            with self.assertRaisesRegex(Denied, "Cannot verify.*retry"):
+                self.store.transition(self.item["id"], expected_rev=2, status="open", actor="worker")
+        self.assertEqual(query.call_count, 0, "adapter ran for an unverifiable index")
+        unchanged = self.store.get(self.item["id"])
+        self.assertEqual((unchanged["status"], unchanged["rev"]), ("blocked", 2))
+
+    def test_changed_wait_identity_cannot_inherit_a_pre_read_answer(self):
+        plain = self.store._plain
+
+        def stale_plain(item_id, **kwargs):
+            item = plain(item_id, **kwargs)
+            return {**item, "rev": item["rev"] + 1}
+
+        with (self.answered("no", REASON),
+              patch.object(self.store, "_plain", stale_plain)):
+            with self.assertRaisesRegex(Denied, "Cannot verify.*changed"):
+                self.store.transition(self.item["id"], expected_rev=2, status="open", actor="worker")
+        self.assertEqual(self.store.get(self.item["id"])["rev"], 2)
+
+    def test_clean_index_keeps_the_reopen_with_reason_guard(self):
+        with self.answered("no", REASON) as query:
+            with self.assertRaisesRegex(Denied, "Reopening blocked work requires a reason"):
+                self.store.transition(self.item["id"], expected_rev=2, status="open", actor="worker")
+            opened = self.store.transition(self.item["id"], expected_rev=2, status="open", actor="worker",
+                                           reason="Pinned commit is no longer a branch head")
+        self.assertEqual(opened["status"], "open")
+        self.assertEqual(query.call_count, 2)
+
+    def test_yes_and_unknown_answers_stay_pending_on_a_normal_reopen(self):
+        for answer in ("yes", "unknown"):
+            with self.subTest(answer=answer):
+                item = self.block(key=f"pending-{answer}")
+                with self.answered(answer, "adapter cannot commit to absence") as query:
+                    opened = self.store.transition(item["id"], expected_rev=2, status="open", actor="worker")
+                self.assertEqual(opened["status"], "open")
+                self.assertEqual(query.call_count, 1)
+                blocked_ids = [row["id"] for row in self.store.blocked_liveness_readonly()["items"]]
+                self.assertNotIn(item["id"], blocked_ids)
 
     def test_holder_reopens_with_a_reason_and_cannot_renew_without_it(self):
         with self.answered("no", REASON):

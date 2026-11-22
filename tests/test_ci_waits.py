@@ -239,6 +239,7 @@ class CiWaitTests(CiWaitFixture):
             self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open", actor="worker")
 
     def test_ready_refuses_invalid_or_unavailable_terminal_source(self):
+        from mizu.fs import write_json as write_evidence
         blocked = self.block()
         self.poll()
         path = ci_waits._path(self.store, blocked)
@@ -249,7 +250,7 @@ class CiWaitTests(CiWaitFixture):
                         {"conclusion": "failure"}, {"checks": self.rows("pending")},
                         {"checks": self.rows() + self.rows()}):
             with self.subTest(changes=changes):
-                write_json(path, {**original, **changes})
+                write_evidence(path, {**original, **changes})
                 page = self.store.page_ready(role_name="worker")
                 self.assertEqual(page["total"], 0)
                 self.assertEqual(page["unknown_blocked"], 1)
@@ -257,7 +258,7 @@ class CiWaitTests(CiWaitFixture):
                 self.assertFalse(page["coverage_complete"])
         path.write_text("not JSON")
         self.assertEqual(self.store.page_ready()["total"], 0)
-        write_json(path, original)
+        write_evidence(path, original)
         with patch("mizu.ci_waits._read", side_effect=OSError("unavailable")):
             self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
         self.assertEqual(self.store.page_ready()["total"], 1)
@@ -265,9 +266,9 @@ class CiWaitTests(CiWaitFixture):
         shared = ci_waits.shared_store(self.store)
         envelope, _ = shared.get(context.ci_wait_manifest[0].record_id)
         shared_path = self.project.root / shared.record_name(envelope["id"])
-        write_json(shared_path, {**envelope, "payload": {**envelope["payload"], "wait_digest": "0" * 64}})
+        write_evidence(shared_path, {**envelope, "payload": {**envelope["payload"], "wait_digest": "0" * 64}})
         self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
-        write_json(shared_path, envelope)
+        write_evidence(shared_path, envelope)
         opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open",
                                        actor="worker", reason="receipt_route_terminal: reassess CI")
         current = self.store.transition(opened["id"], expected_rev=opened["rev"], status="blocked",
@@ -275,7 +276,7 @@ class CiWaitTests(CiWaitFixture):
         # Old evidence is not reused by a later revision of the same wait.
         self.assertEqual(self.store.page_ready()["total"], 0)
         current_path = ci_waits._path(self.store, current)
-        write_json(current_path, original)
+        write_evidence(current_path, original)
         self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
         current_path.unlink()
         self.poll()

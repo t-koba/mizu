@@ -964,10 +964,10 @@ class WorkItems:
         """Current record of one item, without locks or writes."""
         return self._plain(item_id)
 
-    def _plain(self, item_id: str, *, locked: bool = False) -> dict:
+    def _plain(self, item_id: str, *, locked: bool = False, durable: bool = False) -> dict:
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        with self._ledger.read("items", locked=locked) as db:
+        with self._ledger.read("items", locked=locked, durable=durable) as db:
             found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
         if not found:
             raise Denied("Work item has no immutable seed")
@@ -1399,6 +1399,32 @@ class WorkItems:
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {}
         return hints
+
+    def _transition_ci_unreachable(self, item_id: str):
+        """Gather one transition's CI hint from the target alone, outside any lock.
+
+        ``None`` means the durable index could not be verified; an empty
+        mapping means the target is not a blocked CI waiter. Otherwise the
+        mapping holds one exact wait identity and its answer, where ``None``
+        is a legitimate still-pending result from an adapter query.
+        """
+        from . import ci_waits
+        bounded = (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError)
+        try:
+            item = self._plain(item_id, locked=False, durable=True)
+        except bounded:
+            return None
+        wait = item.get("wait")
+        if (item.get("status") != "blocked" or not isinstance(wait, dict)
+                or wait.get("kind") not in ("ci", "publication_ci")):
+            return {}
+        try:
+            reason = ci_waits.unreachable(self, item)
+        except (*bounded, KeyError):
+            # An unanswered adapter keeps the wait pending; only an
+            # unverifiable index may justify refusing a locked CI waiter.
+            reason = None
+        return {ci_wait_identity(item): reason}
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
@@ -1916,11 +1942,12 @@ class WorkItems:
         binding_request = (status == "doing" and snapshot_id is not None)
         publication_wait = (status == "blocked" and isinstance(wait, dict)
                             and wait.get("kind") == "publication_ci")
-        # Peek at the target before locking: a held CI waiter needs an adapter
-        # answer, and that answer must be gathered without records.lock.
-        # A durable index peek never rebuilds or writes state: if it is
-        # unavailable, no hint is gathered and locked liveness stays pending.
-        ci_unreachable = self._ci_unreachable_hints(item_ids={item_id}, durable=True)
+        # Peek at the target alone before locking: a held CI waiter needs an
+        # adapter answer, and that answer must be gathered without records.lock.
+        # The peek never scans other items or repairs the index. An unavailable
+        # durable index yields an unverifiable sentinel, so locked liveness
+        # cannot silently mistake a held waiter for a pending one.
+        ci_unreachable = self._transition_ci_unreachable(item_id)
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
                        if binding_request or publication_wait or _resolve_wait else contextlib.nullcontext())
         with publication, record_lock(self.root):
@@ -1957,11 +1984,22 @@ class WorkItems:
             if status == "blocked" and wait is None:
                 raise Denied("New blocked transitions require a supported observable wait")
             if blocked_waiter:
-                # A hint from the pre-read cannot match a changed identity;
-                # the lookup then misses and stays pending, never querying
-                # the adapter under this lock.
-                state = liveness(self, blocked_waiter.get("wait"), None, item=blocked_waiter,
-                                 ci_unreachable=ci_unreachable)
+                blocked_wait = blocked_waiter.get("wait")
+                if (isinstance(blocked_wait, dict)
+                        and blocked_wait.get("kind") in ("ci", "publication_ci")):
+                    if ci_unreachable is None:
+                        raise Denied("Cannot verify CI wait reachability: work-item change index "
+                                     "unavailable; retry after locked recovery")
+                    if (current["status"] == "blocked"
+                            and ci_wait_identity(blocked_waiter) not in ci_unreachable):
+                        raise Denied("Cannot verify CI wait reachability: the blocked wait changed; "
+                                     "re-read and retry")
+                # A stale waiter from an earlier blocked episode has no pre-read
+                # identity, but it must never trigger a direct adapter query
+                # while records.lock is held.
+                hints = ci_unreachable if ci_unreachable is not None else {}
+                state = liveness(self, blocked_wait, None, item=blocked_waiter,
+                                 ci_unreachable=hints)
                 needs_open = state["state"] in ("terminal", "impossible")
                 if needs_open and (status == "blocked" or (status == "doing" and current["status"] == "blocked")):
                     raise Denied(f"Reopen blocked work with a reason before renewing its wait: {state['reason']}")
