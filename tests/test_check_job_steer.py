@@ -212,7 +212,14 @@ class SteerTests(SteerFixture):
 
     def test_exact_full_page_seals_its_window_without_rereading(self):
         count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS
-        jobs = [self.job(f'printf exact-{index}') for index in range(count)]
+        base = dt.datetime(2026, 3, 1, tzinfo=dt.timezone.utc)
+        ticks = itertools.count()
+
+        def distinct_now():
+            return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
+
+        with patch.object(check_jobs, 'now', distinct_now):
+            jobs = [self.job(f'printf exact-{index}') for index in range(count)]
         cursor = check_jobs.CheckSteerCursor()
         presented, delivered = set(), []
         for _ in range(count):
@@ -297,6 +304,84 @@ class SteerTests(SteerFixture):
                 presented.add(row['id'])
                 delivered.append(row['id'])
         self.assertEqual(delivered, expected)
+
+    def test_creation_order_parity_when_terminal_order_is_reversed(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 8
+        # Every job is queued before any of them finishes, so completion seq
+        # cannot stand in for creation time.
+        self.config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, check_pending=count + 4))
+        self.project.config = self.config
+        captured = check_jobs.completion_high_water(self.project)
+        self.assertEqual(captured, 0)
+        base = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
+        ticks = itertools.count()
+
+        def distinct_now():
+            return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
+
+        context = self.context()
+        with patch.object(check_jobs, 'now', distinct_now):
+            jobs = [check_jobs.submit(context, f'printf ordered-{index}') for index in range(count)]
+            for job in reversed(jobs):
+                record = check_jobs.raw_read(self.project, job['id'])
+                check_jobs.save_execution(self.project, {
+                    **record, 'status': 'cancelled', 'finished_at': check_jobs.now()})
+        expected = [job['id'] for job in reversed(jobs)]
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            seq_order = [row[0] for row in db.execute(
+                'SELECT job_id FROM check_completion_changes WHERE role=? ORDER BY seq',
+                ('worker',))]
+        self.assertEqual(seq_order, expected)
+
+        full = check_jobs.steer_pending(self.project, 'worker', ())
+        self.assertEqual([row['id'] for row in full],
+                         expected[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS])
+        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        presented, delivered, pages = set(), [], []
+        real_read = check_jobs._steer_changes
+
+        def bounded_read(*args):
+            page = real_read(*args)
+            pages.append(len(page))
+            return page
+
+        with patch.object(check_jobs, '_steer_changes', bounded_read):
+            first = check_jobs.steer_pending(self.project, 'worker', (), cursor=cursor)
+            self.assertEqual([row['id'] for row in first], [row['id'] for row in full])
+            for row in first:
+                presented.add(row['id'])
+                delivered.append(row['id'])
+            for _ in range(count + 2):
+                batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+                if not batch:
+                    break
+                self.assertLessEqual(len(batch), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
+                for row in batch:
+                    self.assertNotIn(row['id'], presented)
+                    presented.add(row['id'])
+                    delivered.append(row['id'])
+        self.assertEqual(delivered, expected)
+        self.assertEqual(len(delivered), len(set(delivered)))
+        self.assertTrue(pages)
+        self.assertLessEqual(max(pages), check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)
+        self.assertEqual(sum(pages), count)
+
+    def test_tied_creation_timestamps_break_by_job_id(self):
+        fixed = dt.datetime(2026, 4, 1, tzinfo=dt.timezone.utc).isoformat(timespec='seconds')
+        context = self.context()
+        with patch.object(check_jobs, 'now', return_value=fixed):
+            jobs = [check_jobs.submit(context, f'printf tied-{index}') for index in range(3)]
+            for job in reversed(jobs):
+                record = check_jobs.raw_read(self.project, job['id'])
+                check_jobs.save_execution(self.project, {
+                    **record, 'status': 'cancelled', 'finished_at': check_jobs.now()})
+        expected = sorted((job['id'] for job in jobs), reverse=True)
+        full = check_jobs.steer_pending(self.project, 'worker', ())
+        self.assertEqual([row['id'] for row in full], expected)
+        cursor = check_jobs.CheckSteerCursor()
+        batch = check_jobs.steer_pending(self.project, 'worker', (), cursor=cursor)
+        self.assertEqual([row['id'] for row in batch], expected)
 
     def test_completion_change_index_covers_overlay_and_rebuild(self):
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))

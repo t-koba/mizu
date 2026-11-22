@@ -2022,41 +2022,49 @@ class CheckSteerCursor:
 
     ``floor`` covers every seq already accounted for (the opening prompt's
     captured high-water at first); ``ceiling`` is the high-water of the active
-    window; ``upper`` is the inclusive top of the next descending page. Pages
-    walk newest-first through the whole window before it is sealed by moving
-    ``floor`` to ``ceiling``, so older unread rows are never skipped and a new
-    high starts a fresh window. Buffered IDs drain before another page is read.
+    window; ``page_after`` is the exclusive (created_at, job_id) key of the
+    next page. Pages walk newest-first by job creation time with a job-id
+    tie-break through the whole window before it is sealed by moving ``floor``
+    to ``ceiling``, so older unread rows are never skipped and a new high
+    starts a fresh window. Buffered IDs drain before another page is read.
     """
     floor: int = 0
     ceiling: int = 0
-    upper: int = 0
+    page_after: tuple[str, str] | None = None
     candidates: list = dataclasses.field(default_factory=list)
 
 
 def _steer_changes(project, role, cursor):
-    """Read one newest-first bounded page of this role's completion changes."""
+    """Read one bounded page of this role's creation-ordered completions."""
     with project.ledger.read('check_jobs', locked=False) as db:
-        if cursor.upper <= cursor.floor:
+        if cursor.page_after is None:
             high = _completion_high(db)
             if high <= cursor.floor:
                 return []
-            cursor.ceiling, cursor.upper = high, high
-        rows = db.execute(
-            'SELECT seq, job_id FROM check_completion_changes '
-            'WHERE role=? AND seq>? AND seq<=? ORDER BY seq DESC LIMIT ?',
-            (role, cursor.floor, cursor.upper, MAX_CHECK_STEER_CHANGE_ROWS)).fetchall()
+            cursor.ceiling = high
+        query = (
+            "SELECT c.seq, c.job_id, COALESCE(j.created_at, '') "
+            'FROM check_completion_changes c LEFT JOIN check_jobs j ON j.id=c.job_id '
+            'WHERE c.role=? AND c.seq>? AND c.seq<=?')
+        parameters = [role, cursor.floor, cursor.ceiling]
+        if cursor.page_after is not None:
+            created_at, job_id = cursor.page_after
+            query += ' AND (j.created_at < ? OR (j.created_at = ? AND c.job_id < ?))'
+            parameters.extend((created_at, created_at, job_id))
+        query += " ORDER BY COALESCE(j.created_at, '') DESC, c.job_id DESC LIMIT ?"
+        parameters.append(MAX_CHECK_STEER_CHANGE_ROWS)
+        rows = db.execute(query, parameters).fetchall()
     if rows:
-        cursor.upper = min(row[0] for row in rows) - 1
-    if not rows or cursor.upper <= cursor.floor:
-        # An empty read means this role has no more rows in the window; a
-        # drained lower bound means the last page was read. Seal either way so
-        # a later boundary follows a new high instead of rereading old rows.
-        cursor.floor, cursor.upper = cursor.ceiling, cursor.ceiling
+        cursor.page_after = (rows[-1][2], rows[-1][1])
+    else:
+        # An empty read means this role has no more rows in the window; seal it
+        # so a later boundary follows a new high instead of rereading old rows.
+        cursor.floor, cursor.page_after = cursor.ceiling, None
     return [row[1] for row in rows if isinstance(row[1], str)]
 
 
 def _steer_incremental(project, role, already, cursor):
-    """Present newest-first completion changes since this unit's last boundary."""
+    """Present creation-ordered completion changes since the last boundary."""
     if not cursor.candidates:
         cursor.candidates = _steer_changes(project, role, cursor)
     batch = cursor.candidates[:MAX_CHECK_STEER_CHANGE_ROWS]
@@ -2087,8 +2095,10 @@ def steer_pending(project, role, presented, *, discovery=None, cursor=None):
     caller's ``presented`` set filters what this unit has already shown.
     Trust: only this role's unacknowledged terminal jobs, under the same
     capability and automatic wake policy that governs dispatch wakes. A
-    cursor reads writer-maintained completion changes in newest-first pages;
-    without one, a full discovery serves one-shot callers. Failure: a role
+    cursor reads writer-maintained completion changes in bounded pages ordered
+    by job creation time with a job-id tie-break; the captured completion seq
+    only seals which window is eligible. Without one, a full discovery serves
+    one-shot callers. Failure: a role
     without the capability or policy has nothing to present. This is a pure read: it never
     acknowledges output, marks a wake delivered or changes scheduling.
     """
@@ -2104,7 +2114,7 @@ def steer_pending(project, role, presented, *, discovery=None, cursor=None):
     jobs = [job for job in discovery[0].values()
             if job.get('role') == role and job.get('id') not in already
             and job.get('status') in TERMINAL_WAKE_STATUSES and not job.get('acknowledged')]
-    jobs.sort(key=lambda job: job.get('created_at', ''), reverse=True)
+    jobs.sort(key=lambda job: (job.get('created_at', ''), job.get('id', '')), reverse=True)
     return [summary(job, project) for job in jobs[:MAX_CHECK_STEER_NOTIFICATIONS]]
 
 
