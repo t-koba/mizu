@@ -34,7 +34,8 @@ inputs. The trusted host adapter never executes model-provided host commands.
 |---|---|---|
 | `config.py` | Strict typed TOML, grants, limits, profile resolution | Project priorities |
 | `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
-| `runtime.py` | Slot/admission primitives, `Context` and `Engine` composition, capability dispatch, publication and the VCS polling daemon; runtime re-exports extracted helpers | Which algorithm is best |
+| `runtime.py` | Slot/admission primitives, `Context` and `Engine` composition, capability dispatch and publication; runtime re-exports extracted helpers | Which algorithm is best |
+| `daemon_runtime.py` | Per-project VCS poll coordination (`poll_project_vcs`) and the resident daemon loop; re-exported via `runtime.py` | Which algorithm is best |
 | `unit_finish.py` | Unit finish validation, acknowledgement selection, writer-parking evidence and progress records; runtime re-exports its helpers | Which work is ready, which events were delivered, or which finish outcome is desirable |
 | `engine_admission.py` | Fresh Engine authority, budget and disk guards plus FIFO dispatch lock admission | Which role should run, request priority, or configured limit values |
 | `engine_delegation.py` | Caller-authoritative child-role and delegation-request resolution and reservation, plus the capability gate, mixed back into `Engine`; runtime re-exports the gate names | Which role to delegate to, request authority details, or retry/scheduling policy |

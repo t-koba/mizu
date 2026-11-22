@@ -1964,8 +1964,8 @@ Configures the operator-owned upstream-sync adapter. `src/mizu/vcs.py`
 (`invoke`/`fetch_refs`, plus host-side `inject_refs`/`list_refs`/`read_ref`)
 implements the single-invocation contract and read-only ref injection.
 `src/mizu/context_host_tools.py` (`ContextHostToolsMixin._op_sync`)
-implements the grant-gated `sync` refresh; `src/mizu/runtime.py`
-(`refresh_upstream`, `upstream_fetch_due`/`poll_upstream`) implements the
+implements the grant-gated `sync` refresh; `src/mizu/daemon_runtime.py`
+(`poll_project_vcs` coordinating `refresh_upstream`, `upstream_fetch_due`/`poll_upstream`) implements the
 best-effort daemon periodic fetch.
 
 | Key | Default | Description |

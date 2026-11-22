@@ -818,8 +818,8 @@ class RecoveryProbeTests(SelectionFixture):
                                                daemon=True, workspace='write')
                 daemon_config = dataclasses.replace(self.config,
                                                     roles={**self.config.roles, 'observer': observer})
-                with patch('mizu.runtime.load', return_value=daemon_config), patch('mizu.runtime.vcs_poll_enabled', return_value=False), \
-                     patch('mizu.probes.service_due', run_probe), patch('mizu.runtime.should_run', side_effect=readiness), \
+                with patch('mizu.daemon_runtime.load', return_value=daemon_config), patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), \
+                     patch('mizu.probes.service_due', run_probe), patch('mizu.daemon_runtime.should_run', side_effect=readiness), \
                      patch.object(type(self.project.snapshots), 'get', return_value=snapshot), patch('builtins.print'), \
                      patch.object(Engine, 'run') as run:
                     daemon(daemon_config, 'sample', 'observer')
@@ -861,10 +861,10 @@ class RecoveryProbeTests(SelectionFixture):
         # A ready daemon iteration must service exactly one due contribution
         # before the ordinary run and mark the attempt so Engine.run does not
         # service a second one in the same top-level iteration.
-        with patch('mizu.runtime.load', return_value=self.config), \
-             patch('mizu.runtime.vcs_poll_enabled', return_value=False), \
+        with patch('mizu.daemon_runtime.load', return_value=self.config), \
+             patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), \
              patch('mizu.probes.service_due', run_probe), \
-             patch('mizu.runtime.should_run', return_value=True), \
+             patch('mizu.daemon_runtime.should_run', return_value=True), \
              patch('builtins.print'), \
              patch.object(Engine, 'run', return_value={'status': 'completed'}) as run:
             daemon(self.config, 'sample', 'worker')
@@ -1316,9 +1316,9 @@ class RecoveryProbeTests(SelectionFixture):
             waits.append(seconds)
             event.set()
         event.wait = wait
-        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.runtime.load', return_value=self.config), \
-             patch('mizu.runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None), \
-             patch('mizu.runtime.should_run', return_value=False), patch('mizu.runtime.time.time', return_value=1000), \
+        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=self.config), \
+             patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None), \
+             patch('mizu.daemon_runtime.should_run', return_value=False), patch('mizu.runtime.time.time', return_value=1000), \
              patch('mizu.probes.next_deadline', return_value=1000.5), patch('builtins.print'):
             daemon(self.config, 'sample', 'worker')
         self.assertEqual(waits, [0.5])
@@ -1366,9 +1366,9 @@ class RecoveryProbeTests(SelectionFixture):
         event.wait = wait
         config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
                                      idle_seconds=10, cooldown_seconds=100))
-        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.runtime.load', return_value=config), \
-             patch('mizu.runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None) as service, \
-             patch('mizu.runtime.should_run', return_value=True), patch('mizu.runtime.time.monotonic', side_effect=lambda: ticks[0]), \
+        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=config), \
+             patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None) as service, \
+             patch('mizu.daemon_runtime.should_run', return_value=True), patch('mizu.runtime.time.monotonic', side_effect=lambda: ticks[0]), \
              patch('mizu.probes.next_deadline', return_value=None), patch('builtins.print'), \
              patch.object(Engine, 'run', return_value={'status': 'completed'}) as run:
             daemon(config, 'sample', 'worker')

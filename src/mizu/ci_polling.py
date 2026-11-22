@@ -3,7 +3,7 @@
 This leaf owns periodic CI status polling into the dedicated CI
 notification cache plus its bounded cache merge/prune helpers. Poll coordination
 (``poll_project_vcs``), shared poll-state persistence and daemon orchestration
-stay in runtime; CI cache projection stays in ``ci_observation`` and per-role
+live in ``daemon_runtime``; CI cache projection stays in ``ci_observation`` and per-role
 wake records/due policy stay in ``ci_wake``. This module never imports runtime.
 """
 from __future__ import annotations

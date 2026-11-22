@@ -1088,9 +1088,9 @@ class CiCacheRetentionTests(Fixture):
                         # so cache normalization must wait until after fetch.
                         vcs.inject_refs(self.project.root, refs)
                         return None
-                    with (patch("mizu.runtime.poll_upstream", side_effect=fetch),
-                          patch("mizu.runtime.ci_waits.poll", return_value=None),
-                          patch("mizu.runtime.poll_proposals", return_value=None),
+                    with (patch("mizu.daemon_runtime.poll_upstream", side_effect=fetch),
+                          patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
+                          patch("mizu.daemon_runtime.poll_proposals", return_value=None),
                           patch("mizu.vcs.read_via", return_value={"checks": []})):
                         events = poll_project_vcs(config, self.project, {"ci": ci},
                                                   now=15.0, interval=15.0)
@@ -1117,9 +1117,9 @@ class CiCacheRetentionTests(Fixture):
                 write_json(self.project.root / "vcs-poll.json", {
                     "failures": value, "successes": value})
                 state = {}
-                with (patch("mizu.runtime.poll_upstream", return_value=None),
-                      patch("mizu.runtime.ci_waits.poll", return_value=None),
-                      patch("mizu.runtime.poll_proposals", return_value=None),
+                with (patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+                      patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
+                      patch("mizu.daemon_runtime.poll_proposals", return_value=None),
                       patch("mizu.vcs.list_refs", side_effect=error),
                       patch("mizu.vcs.read_via") as reader):
                     event, = poll_project_vcs(config, self.project, state,
@@ -1159,9 +1159,9 @@ class CiCacheRetentionTests(Fixture):
         vcs.inject_refs(self.project.root,
                         {branch: SHA_A for branch in ("live-a", "live-b", "stale")})
         state = {}
-        with (patch("mizu.runtime.poll_upstream", return_value=None),
-              patch("mizu.runtime.ci_waits.poll", return_value=None),
-              patch("mizu.runtime.poll_proposals", return_value=None),
+        with (patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+              patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
+              patch("mizu.daemon_runtime.poll_proposals", return_value=None),
               patch("mizu.vcs.list_refs",
                     side_effect=AssertionError("not-due poll must not read refs")),
               patch("mizu.vcs.read_via",
@@ -1179,9 +1179,9 @@ class CiCacheRetentionTests(Fixture):
         vcs.inject_refs(self.project.root,
                         {branch: SHA_A for branch in ("live-a", "live-b", "live-c")})
         state["ci"]["ci_offset"] = 2
-        with (patch("mizu.runtime.poll_upstream", return_value=None),
-              patch("mizu.runtime.ci_waits.poll", return_value=None),
-              patch("mizu.runtime.poll_proposals", return_value=None),
+        with (patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+              patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
+              patch("mizu.daemon_runtime.poll_proposals", return_value=None),
               patch("mizu.vcs.read_via", return_value={"checks": []})):
             events = poll_project_vcs(config, self.project, state,
                                       now=25.0, interval=15.0)
@@ -1330,7 +1330,7 @@ class CiNondeterminismTests(Fixture):
     def _poll_project(self, config, state, current, interval=15.0):
         from unittest.mock import patch
         from mizu.runtime import poll_project_vcs
-        with patch("mizu.runtime.poll_upstream", return_value=None):
+        with patch("mizu.daemon_runtime.poll_upstream", return_value=None):
             return poll_project_vcs(config, self.project, state,
                                     now=current, interval=interval)
 
@@ -1413,9 +1413,9 @@ class CiNondeterminismTests(Fixture):
                         "removed": [{"sha": SHA_A, "check": "old"}],
                     },
                 }}
-                with (patch("mizu.runtime.poll_upstream", return_value=None),
-                      patch("mizu.runtime.ci_waits.poll", return_value=None),
-                      patch("mizu.runtime.poll_proposals", return_value=None),
+                with (patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+                      patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
+                      patch("mizu.daemon_runtime.poll_proposals", return_value=None),
                       patch("mizu.vcs.list_refs",
                             side_effect=AssertionError("stale daemon must not poll CI")),
                       patch("mizu.vcs.read_via",

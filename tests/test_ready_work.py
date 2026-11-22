@@ -280,8 +280,8 @@ class ReadyWorkTests(Fixture):
         config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, idle_seconds=10, cooldown_seconds=100))
         with patch("mizu.runtime.threading.Event", return_value=event), \
-             patch("mizu.runtime.load", return_value=config), \
-             patch("mizu.runtime.vcs_poll_enabled", return_value=False), \
+             patch("mizu.daemon_runtime.load", return_value=config), \
+             patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False), \
              patch("mizu.probes.service_due", return_value=None), \
              patch("mizu.runtime.time.monotonic", side_effect=lambda: ticks[0]), \
              patch("mizu.probes.next_deadline", return_value=None), patch("builtins.print"), \

@@ -717,9 +717,9 @@ class CiWaitTests(CiWaitFixture):
 
     def test_poll_project_persists_ci_wait_state(self):
         self.block()
-        with patch("mizu.runtime.poll_upstream", return_value=None), \
-                patch("mizu.runtime.poll_ci", return_value=None), \
-                patch("mizu.runtime.poll_proposals", return_value=None), \
+        with patch("mizu.daemon_runtime.poll_upstream", return_value=None), \
+                patch("mizu.daemon_runtime.poll_ci", return_value=None), \
+                patch("mizu.daemon_runtime.poll_proposals", return_value=None), \
                 patch("mizu.vcs.read_via", return_value={"checks": self.rows()}) as reader:
             events = poll_project_vcs(self.config, self.project, {}, now=1000, interval=15)
         self.assertEqual(events[0]["observed"], 1)
@@ -958,9 +958,9 @@ class PublicationCiWaitTests(CiWaitFixture):
             projection=public_source_identity(self.snapshot["files"]))
         # Receipt alone is not a wake; no branch-head fallback or auto dispatch.
         self.assertFalse(should_run(self.project, snap, role_name="worker"))
-        with patch("mizu.runtime.poll_upstream", return_value=None), \
-                patch("mizu.runtime.poll_ci", return_value=None), \
-                patch("mizu.runtime.poll_proposals", return_value=None), \
+        with patch("mizu.daemon_runtime.poll_upstream", return_value=None), \
+                patch("mizu.daemon_runtime.poll_ci", return_value=None), \
+                patch("mizu.daemon_runtime.poll_proposals", return_value=None), \
                 patch("mizu.vcs.invoke", return_value={"checks": self.rows("failure")}) as adapter:
             events = poll_project_vcs(self.config, self.project, {}, now=1000, interval=15)
         self.assertEqual(events[0]["observed"], 1)

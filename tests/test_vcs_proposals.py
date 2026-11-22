@@ -375,9 +375,9 @@ class ProposalPollingTests(Fixture):
             {"proposals": [], "complete": True},  # Terminal page, not enumeration.
             {"proposals": [], "complete": True},
         ]
-        with (mock.patch("mizu.runtime.poll_upstream", return_value=None),
-              mock.patch("mizu.runtime.poll_ci", return_value=None),
-              mock.patch("mizu.runtime.ci_waits.poll", return_value=None),
+        with (mock.patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+              mock.patch("mizu.daemon_runtime.poll_ci", return_value=None),
+              mock.patch("mizu.daemon_runtime.ci_waits.poll", return_value=None),
               mock.patch("mizu.vcs.read_via", side_effect=responses)):
             for tick, inventory in enumerate((expected, expected, expected, {})):
                 # Each tick starts with a new daemon's empty memory.
@@ -489,10 +489,10 @@ class ProposalPollingTests(Fixture):
                     "observed": 0, "recorded": 0, "changed": 0,
                     "complete": False, "has_cursor": True}
 
-        with (mock.patch("mizu.runtime.poll_upstream", return_value=None),
-              mock.patch("mizu.runtime.poll_ci", return_value=None),
-              mock.patch("mizu.runtime.poll_proposals", side_effect=proposal_tick),
-              mock.patch("mizu.runtime.write_json", side_effect=OSError("disk full"))):
+        with (mock.patch("mizu.daemon_runtime.poll_upstream", return_value=None),
+              mock.patch("mizu.daemon_runtime.poll_ci", return_value=None),
+              mock.patch("mizu.daemon_runtime.poll_proposals", side_effect=proposal_tick),
+              mock.patch("mizu.daemon_runtime.write_json", side_effect=OSError("disk full"))):
             events = poll_project_vcs(self._config(), self.project, {},
                                       now=3.0, interval=15.0)
         event = next(item for item in events if item["event"] == "proposal_poll")

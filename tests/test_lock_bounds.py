@@ -354,7 +354,7 @@ class LockPolicyTests(Fixture):
         self.assertIsNone(fs._lock_timeout.get())
 
     def test_daemon_rebinds_after_reload_and_restores_outer_scope(self):
-        from mizu import probes, runtime
+        from mizu import daemon_runtime, probes, runtime
         stop = threading.Event()
         seen = []
 
@@ -364,7 +364,7 @@ class LockPolicyTests(Fixture):
             raise ConfigError("stop after reload")
 
         with platform.pipe_poll_policy(500), self.configured(7).lock_policy(), \
-                patch.object(runtime, "load", return_value=self.configured(17)), \
+                patch.object(daemon_runtime, "load", return_value=self.configured(17)), \
                 patch.object(runtime.threading, "Event", return_value=stop), \
                 patch.object(runtime.signal, "signal"), \
                 patch.object(probes, "service_due", side_effect=service), \

@@ -195,10 +195,10 @@ class CiChangesTests(CiWaitFixture):
 
     def test_runtime_round_trip_preserves_stream_state(self):
         self.block()
-        with patch("mizu.runtime.poll_upstream", return_value=None), \
-                patch("mizu.runtime.poll_ci", return_value=None), \
-                patch("mizu.runtime.poll_proposals", return_value=None), \
-                patch("mizu.runtime._live_ci_branches", return_value=set()), \
+        with patch("mizu.daemon_runtime.poll_upstream", return_value=None), \
+                patch("mizu.daemon_runtime.poll_ci", return_value=None), \
+                patch("mizu.daemon_runtime.poll_proposals", return_value=None), \
+                patch("mizu.daemon_runtime._live_ci_branches", return_value=set()), \
                 patch.object(vcs, "invoke", side_effect=self.adapter):
             poll_project_vcs(self.config, self.project, self.state, now=1000, interval=15)
         shared = read_json(self.project.root / "vcs-poll.json")

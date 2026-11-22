@@ -301,7 +301,7 @@ on an already admitted run and missing-finish nudges remain defect backstops,
 not general scheduling sources.
 
 Daemon readiness follows the explicit per-role `daemon_policy` in
-`src/mizu/runtime.py`, never `workspace`: `signals` (the default for `write`
+`src/mizu/daemon_runtime.py`, never `workspace`: `signals` (the default for `write`
 roles) consults the role-aware `should_run` gate, while `periodic` (the
 default for `read`/`none` roles) runs at the ordinary cadence when the project
 is armed and neither paused nor draining, without consulting `should_run`.
