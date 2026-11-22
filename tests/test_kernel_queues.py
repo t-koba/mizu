@@ -68,6 +68,14 @@ class QueueDeclarations(unittest.TestCase):
         example = parse_queues(tomllib.loads(EXAMPLE.read_text(encoding="utf-8"))["queues"])
         self.assertIn("proposals", example)
         self.assertTrue(example["proposals"].fields["title"].required)
+        self.assertIn("work", example)
+        work = example["work"].fields
+        self.assertTrue(work["kind"].required)
+        self.assertEqual(work["kind"].values, ("item", "transition", "wait", "completion"))
+        self.assertEqual(work["status"].values,
+                         ("open", "doing", "blocked", "done", "dropped"))
+        self.assertEqual(work["holder"].type, "principal")
+        self.assertEqual(work["checks"].max_items, 64)
 
     def test_unknown_and_invalid_declarations_refuse(self):
         base = '[queues.q]\nwrite = ["role:alpha"]\nread = ["role:alpha"]\n'

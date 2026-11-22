@@ -34,3 +34,12 @@ arrives, it replaces your default for that question from then on.
 A notice is a fact from the operator or host tooling, for example that an
 external service is down or that a release was installed. Take it into
 account; it needs no reply.
+
+## work
+
+A work item is a message. A revision, a wait or a completion is a later message
+referring to the earlier one it changes; a wait uses delayed delivery so it
+wakes its readers when due. A revision or completion carries the evidence a
+reader needs to judge the result. The kernel assigns no state or meaning to
+these messages: it stores, delivers and references them; their meaning is this
+policy.

@@ -6,13 +6,17 @@ declarations and role policy text on the kernel
 includes it from its own configuration and changes it freely. The kernel reads
 nothing here specially.
 
-- `queues.toml` declares four queues: `proposals` (knowledge and ideas for the
+- `queues.toml` declares five queues: `proposals` (knowledge and ideas for the
   product), `questions` (what only the operator can settle), `answers`
-  (operator replies that refer to their question) and `notices` (operator and
-  host facts for the roles).
+  (operator replies that refer to their question), `notices` (operator and
+  host facts for the roles) and `work` (stage-3 work messages: items,
+  revisions, waits and completions).
 - `policies/messages.md` says what a message in each queue means and what its
   reader does with it. Compose it into the role policies of the roles that
   read or write these queues.
+
+`work` is only the stage-3 message form. The dedicated work-item store stays
+authoritative until cutover; declaring the queue changes no runtime authority.
 
 Roles reach the queues with the `queues` capability and the `queue_*` and
 `message_*` tools. The operator and host tooling use

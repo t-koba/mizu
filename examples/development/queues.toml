@@ -31,3 +31,20 @@ read = ["role:*", "operator"]
 wake = ["role:worker"]
 [queues.notices.schema]
 body = {type = "string", max = 16384, required = true}
+
+[queues.work]           # stage-3 work: items, revisions, waits, completions
+write = ["role:*", "host", "operator"]
+read = ["role:*", "operator", "host"]
+wake = ["role:worker"]
+[queues.work.schema]
+kind = {type = "string", required = true, values = ["item", "transition", "wait", "completion"]}
+item = {type = "string", max = 35}
+rev = {type = "integer", min = 1}
+title = {type = "string", max = 200}
+body = {type = "string", max = 32768}
+scope = {type = "string", max = 32768}
+reason = {type = "string", max = 16384}
+status = {type = "string", values = ["open", "doing", "blocked", "done", "dropped"]}
+holder = {type = "principal"}
+snapshot = {type = "digest"}
+checks = {type = "list", item = {type = "string", max = 256}, max_items = 64}
