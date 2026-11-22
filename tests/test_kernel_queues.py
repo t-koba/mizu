@@ -76,6 +76,12 @@ class QueueDeclarations(unittest.TestCase):
                          ("open", "doing", "blocked", "done", "dropped"))
         self.assertEqual(work["holder"].type, "principal")
         self.assertEqual(work["checks"].max_items, 64)
+        policy = (EXAMPLE.parent / "policies" / "messages.md").read_text(encoding="utf-8")
+        for kind in work["kind"].values:
+            self.assertIn(kind, policy)
+        self.assertNotIn("revision", policy)
+        readme = (EXAMPLE.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn("transitions, waits and completions", readme)
 
     def test_unknown_and_invalid_declarations_refuse(self):
         base = '[queues.q]\nwrite = ["role:alpha"]\nread = ["role:alpha"]\n'

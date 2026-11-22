@@ -10,7 +10,7 @@ nothing here specially.
   product), `questions` (what only the operator can settle), `answers`
   (operator replies that refer to their question), `notices` (operator and
   host facts for the roles) and `work` (stage-3 work messages: items,
-  revisions, waits and completions).
+  transitions, waits and completions).
 - `policies/messages.md` says what a message in each queue means and what its
   reader does with it. Compose it into the role policies of the roles that
   read or write these queues.

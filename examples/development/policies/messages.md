@@ -37,9 +37,9 @@ account; it needs no reply.
 
 ## work
 
-A work item is a message. A revision, a wait or a completion is a later message
+A work item is a message. A transition, a wait or a completion is a later message
 referring to the earlier one it changes; a wait uses delayed delivery so it
-wakes its readers when due. A revision or completion carries the evidence a
+wakes its readers when due. A transition or completion carries the evidence a
 reader needs to judge the result. The kernel assigns no state or meaning to
 these messages: it stores, delivers and references them; their meaning is this
 policy.

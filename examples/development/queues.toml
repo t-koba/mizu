@@ -32,7 +32,7 @@ wake = ["role:worker"]
 [queues.notices.schema]
 body = {type = "string", max = 16384, required = true}
 
-[queues.work]           # stage-3 work: items, revisions, waits, completions
+[queues.work]           # stage-3 work: items, transitions, waits, completions
 write = ["role:*", "host", "operator"]
 read = ["role:*", "operator", "host"]
 wake = ["role:worker"]
