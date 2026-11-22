@@ -22,6 +22,7 @@ CREATE TABLE items(
     change_seq INTEGER NOT NULL);
 CREATE UNIQUE INDEX items_changes ON items(change_seq);
 CREATE INDEX items_open ON items(status, holder);
+CREATE INDEX items_ci_wait ON items(status, wait_kind, holder);
 CREATE INDEX items_closed ON items(status, updated_key DESC, id);
 CREATE INDEX items_origin ON items(origin);
 CREATE TABLE item_changes(
@@ -114,4 +115,4 @@ class _Items(Domain):
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-ITEMS = _Items("items", 5, _TABLES)
+ITEMS = _Items("items", 6, _TABLES)

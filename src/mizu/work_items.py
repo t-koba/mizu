@@ -80,6 +80,12 @@ _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
+# One index supplies status, wait kind and holder; the hint pre-scan must
+# seek blocked CI waits instead of visiting unrelated blocked work.
+_CI_HINT_QUERY = (
+    "SELECT item, doing_since, blocked_since FROM items INDEXED BY items_ci_wait"
+    " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')")
+
 _HISTORY_UNSET = object()
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 _CLOSED_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
@@ -1382,8 +1388,7 @@ class WorkItems:
         """
         from . import ci_waits
         hints = {}
-        sql = ("SELECT item, doing_since, blocked_since FROM items"
-               " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')")
+        sql = _CI_HINT_QUERY
         params = ()
         if role_name is not None:
             sql += " AND (holder IS NULL OR holder=?)"

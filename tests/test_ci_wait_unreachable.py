@@ -5,7 +5,7 @@ import threading
 from unittest import TestCase
 from unittest.mock import patch
 
-from mizu import ci_waits, vcs
+from mizu import ci_waits, vcs, work_items
 from mizu.ci_observation import POLL_STATE_FILE
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied
@@ -245,6 +245,50 @@ class UnreachableCiWaitTests(CiWaitFixture):
                          ("blocked", "impossible", REASON))
         open_ids = {row["id"] for row in page["items"] if row["status"] == "open"}
         self.assertTrue(open_ids, "unrelated open work disappeared from the ready page")
+
+    def test_hint_prescan_seeks_the_blocked_ci_wait_kind(self):
+        steps = {}
+        for count in (256, 4096):
+            with self.subTest(count=count):
+                blocker = {**self.item, "wait": {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"}}
+                extras = [{**blocker, "id": f"wi_{index:032x}"} for index in range(1, count + 1)]
+                index_items(self.project.root, [self.item, *extras], replace=True)
+                counted = [0]
+
+                def tick():
+                    counted[0] += 1
+                    return 0
+
+                original_read = self.store._ledger.read
+
+                @contextlib.contextmanager
+                def counting(*args, **kwargs):
+                    with original_read(*args, **kwargs) as db:
+                        db.set_progress_handler(tick, 1)
+                        try:
+                            yield db
+                        finally:
+                            db.set_progress_handler(None, 1)
+
+                with (patch.object(self.store._ledger, "read", counting),
+                      self.answered("no", REASON)):
+                    hints = self.store._ci_unreachable_hints(role_name="worker")
+                self.assertEqual(len(hints), 1)
+                self.assertEqual(next(iter(hints.values())), REASON)
+                steps[count] = counted[0]
+                with self.store._ledger.read("items", locked=False) as db:
+                    plan = db.execute(
+                        "EXPLAIN QUERY PLAN SELECT item, doing_since, blocked_since FROM items"
+                        " INDEXED BY items_ci_wait"
+                        " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')"
+                        " AND (holder IS NULL OR holder=?) ORDER BY id", ("worker",)).fetchall()
+                self.assertIn('INDEXED BY items_ci_wait',
+                              work_items._CI_HINT_QUERY)
+                self.assertTrue(any('items_ci_wait' in str(row[3]) for row in plan), plan)
+
+        # One CI waiter is still one waiter; unrelated blocked work must not
+        # turn its pre-scan into a decode-and-sort of the whole blocked index.
+        self.assertLessEqual(steps[4096], steps[256] * 2 + 500, steps)
 
     def test_pending_intent_denies_ci_reopen_without_verification(self):
         with contextlib.closing(sqlite3.connect(self.project.root / LEDGER_NAME)) as db, db:
