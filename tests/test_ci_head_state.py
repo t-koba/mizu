@@ -64,10 +64,8 @@ class CiHeadStateTests(Fixture):
             **self.config.vcs, "ci_branch": "main",
             "ci_wake_extra_branches": ["release"]})
 
-    def daily_page(self, items, *, truncated=False):
-        return {"days": [{"date": "2026-10-20", "requests": len(items),
-                          "covered_items": 0, "items": items}],
-                "total": len(items), "truncated": truncated, "scan_stopped": False}
+    def matching_page(self, items, *, incomplete=False):
+        return {"items": items, "incomplete": incomplete}
 
     def context(self, *, vcs_request=True, **role_overrides):
         role = self.config.roles["worker"]
@@ -168,10 +166,11 @@ class CiHeadStateTests(Fixture):
                     "total": 1, "truncated": False, "scan_stopped": False,
                     "next_cursor": None}
 
-        page = self.daily_page([{"request_id": identity, "publication_id": shared,
-                                 "sha": SHA}])
         with patch("mizu.ci_head_state.Publication.list_receipts", side_effect=receipts), \
-                patch("mizu.ci_head_state.CiRequests.daily", return_value=page):
+                patch("mizu.ci_head_state._head_window",
+                      return_value=(dt.date(2026, 10, 1), False)), \
+                patch("mizu.ci_head_state.CiRequests.matching",
+                      return_value=self.matching_page([identity])):
             rows = {row["subject"]: row for row in self.facts(self.two_branches())}
         expected = ci_head_state._row("", SHA, requests=[identity])
         for branch in ("main", "release"):
@@ -193,14 +192,12 @@ class CiHeadStateTests(Fixture):
                             for row in rows))
 
     def test_identity_arrays_are_capped_at_eight_and_flagged(self):
-        receipt = self.receipt(SHA)
-        rows = [{"request_id": f"request-{index}",
-                 "publication_id": receipt["publication_id"], "sha": SHA}
-                for index in range(10)]
+        self.receipt(SHA)
+        rows = [f"request-{index}" for index in range(10)]
         self.cache(successes={"main": [{"sha": SHA, "check": f"check-{index}",
                                         "run": f"run-{index}"} for index in range(10)]})
-        with patch("mizu.ci_head_state.CiRequests.daily",
-                   return_value=self.daily_page(rows)):
+        with patch("mizu.ci_head_state.CiRequests.matching",
+                   return_value=self.matching_page(rows)):
             row = self.facts()[0]
         self.assertEqual(row["runs"], [f"run-{index}" for index in range(8)])
         self.assertEqual(row["requests"], [f"request-{index}" for index in range(8)])
@@ -216,10 +213,7 @@ class CiHeadStateTests(Fixture):
         self.assertTrue(row["may_be_incomplete"])
 
         self.cache()
-        early = {"days": [{"date": "2026-09-30", "requests": 0,
-                           "covered_items": 0, "items": []}],
-                 "total": 101, "truncated": True, "scan_stopped": False}
-        with patch("mizu.ci_head_state.CiRequests.daily", return_value=early):
+        with patch("mizu.ci_requests.CiRequests._rows", return_value=([], True)):
             self.assertTrue(self.facts()[0]["may_be_incomplete"])
         self.inject_ref(SHA)
         with patch("mizu.ci_head_state.read_ref", side_effect=OSError("unreadable")):
@@ -245,12 +239,29 @@ class CiHeadStateTests(Fixture):
         self.assertEqual(row, ci_head_state._row("main", SHA, requests=[identity]))
         self.assertFalse(row["may_be_incomplete"])
 
-    def test_unreadable_request_in_the_head_window_is_incomplete(self):
+    def test_long_history_before_the_head_window_still_reports_the_head_request(self):
+        self.base_time = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+        older = [self.receipt(OLDER, code_digest=f"{index:064x}") for index in range(101)]
+        for receipt in older:
+            self.request(OLDER, receipt, dispatched_at="2026-09-02T00:00:00+00:00")
+        self.base_time = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
         head = self.receipt(SHA)
-        page = self.daily_page([{"request_id": "bad", "publication_id": head["publication_id"]}],
-                               truncated=True)
-        with patch("mizu.ci_head_state.CiRequests.daily", return_value=page):
-            self.assertTrue(self.facts()[0]["may_be_incomplete"])
+        identity = self.request(SHA, head, dispatched_at="2026-10-02T00:00:00+00:00")
+        row = self.facts()[0]
+        self.assertEqual(row, ci_head_state._row("main", SHA, requests=[identity]))
+        self.assertFalse(row["no_evidence"])
+        self.assertFalse(row["may_be_incomplete"])
+
+    def test_stopped_or_unreadable_head_request_scan_is_incomplete(self):
+        self.receipt(SHA)
+        with patch("mizu.ci_requests.CiRequests._rows", return_value=([], True)):
+            row = self.facts()[0]
+        self.assertTrue(row["no_evidence"])
+        self.assertTrue(row["may_be_incomplete"])
+        with patch("mizu.ci_requests.CiRequests._rows", side_effect=OSError("unreadable")):
+            row = self.facts()[0]
+        self.assertTrue(row["no_evidence"])
+        self.assertTrue(row["may_be_incomplete"])
 
     def test_invalid_run_identity_is_incomplete_and_not_a_run(self):
         self.receipt(SHA)

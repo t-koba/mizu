@@ -16,15 +16,16 @@ passing/failing verdict, request state or later-revision coverage inference: a
 request belongs only to the branch whose receipt carries its publication ID at
 the exact head. Bounds: the configured branch set is already deduplicated and
 bounded; the newest head takes one receipt row, the exact head's publication
-IDs come from an exact-SHA/branch page, CI requests from one bounded daily page,
-and each projected identity array is capped at eight. Trust: local records and
-adapter-supplied cache rows are untrusted evidence. Failure: an unreadable ref
-or source, an invalid page, a stopped scan, an exact-head page truncated so
-another publication ID for that head could be hidden, a request page that stops
-before (or cannot establish) the head's publication window, or a reached
-identity cap sets ``may_be_incomplete``. Page fullness after that window or on
-unrelated records never flags the exact head, and missing evidence is never a
-passing verdict.
+IDs come from an exact-SHA/branch page, and the exact head's requests from one
+head-specific newest-first scan of validated request rows that stops at that
+head's publication window; each projected identity array is capped at eight.
+Trust: local records and adapter-supplied cache rows are untrusted evidence.
+Failure: an unreadable ref or source, an invalid page, a stopped scan, an
+exact-head page truncated so another publication ID for that head could be
+hidden, a head-specific request scan that cannot establish the publication
+window or stops before passing it, or a reached identity cap sets
+``may_be_incomplete``. Page fullness after that window or on unrelated records
+never flags the exact head, and missing evidence is never a passing verdict.
 """
 from __future__ import annotations
 
@@ -95,16 +96,16 @@ def _ref_head(project, branch):
 
 
 def _head_window(project, publication_ids):
-    """UTC day of the earliest head publication, plus incompleteness."""
+    """UTC date of the earliest head publication, plus incompleteness."""
     dates, incomplete = [], False
     for identity in publication_ids:
         try:
             record = Publication.read_receipt(project.root, identity)
             dates.append(dt.datetime.fromisoformat(
-                record["recorded_at"]).astimezone(dt.timezone.utc).date().isoformat())
+                record["recorded_at"]).astimezone(dt.timezone.utc).date())
         except Exception:
             incomplete = True
-    return (min(dates) if dates else ""), incomplete
+    return (min(dates) if dates else None), incomplete
 
 
 def _poll_cache(project, config, branches):
@@ -170,47 +171,22 @@ def _poll_cache(project, config, branches):
     return runs, global_incomplete, branch_incomplete
 
 
-def _request_rows(project, config):
-    """``(triples, last_day, full, broken)`` from the bounded daily page.
-
-    Triples are ``(publication_id, sha, request_id)``. ``last_day`` is the
-    newest UTC day the page covers, ``full`` means it stops early, and
-    ``broken`` means the page cannot be trusted at all.
-    """
+def _head_requests(project, config, publication_ids, not_before):
+    """Request identities for the exact head's publications, plus incompleteness."""
+    if not_before is None:
+        return [], True
     try:
-        daily = CiRequests(project.root, getattr(config, "ci_requests", None)).daily(limit=100)
+        result = CiRequests(project.root, getattr(config, "ci_requests", None)).matching(
+            publication_ids, not_before=not_before)
     except Exception:
-        return [], "", False, True
-    if not isinstance(daily, dict) or not isinstance(daily.get("days"), list):
-        return [], "", False, True
-    full = bool(daily.get("truncated"))
-    broken = bool(daily.get("scan_stopped"))
-    rows, last_day = [], ""
-    for day in daily["days"]:
-        if not isinstance(day, dict):
-            broken = True
-            continue
-        date = day.get("date")
-        if not isinstance(date, str) or not date:
-            broken = True
-        else:
-            last_day = max(last_day, date)
-        items = day.get("items")
-        if not isinstance(items, list):
-            broken = True
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                broken = True
-                continue
-            identity, publication_id, sha = (item.get("request_id"),
-                                             item.get("publication_id"), item.get("sha"))
-            if not all(isinstance(value, str) and value for value in
-                       (identity, publication_id, sha)):
-                broken = True
-                continue
-            rows.append((publication_id, sha, identity))
-    return rows, last_day, full, broken
+        return [], True
+    if not isinstance(result, dict):
+        return [], True
+    items = result.get("items")
+    if not isinstance(items, list) or any(
+            not isinstance(value, str) or not value for value in items):
+        return [], True
+    return items, bool(result.get("incomplete"))
 
 
 def ci_head_state_facts(project, config=None) -> list:
@@ -238,25 +214,23 @@ def ci_head_state_facts(project, config=None) -> list:
         pages[branch] = (head, publication_ids, incomplete)
 
     runs, cache_incomplete, cache_branch_incomplete = _poll_cache(project, config, branches)
-    requests, last_day, request_full, request_broken = _request_rows(project, config)
 
     facts = []
     for branch in sorted(branches):
         head, publication_ids, incomplete = pages[branch]
-        incomplete = bool(incomplete or cache_incomplete or request_broken
-                          or cache_branch_incomplete[branch])
-        if request_full and head:
-            window, window_incomplete = _head_window(project, publication_ids)
-            incomplete = bool(incomplete or window_incomplete
-                              or not window or last_day < window)
+        incomplete = bool(incomplete or cache_incomplete or cache_branch_incomplete[branch])
+        branch_requests = []
+        if head and publication_ids:
+            not_before, window_incomplete = _head_window(project, publication_ids)
+            incomplete = bool(incomplete or window_incomplete)
+            branch_requests, request_incomplete = _head_requests(
+                project, config, publication_ids, not_before)
+            incomplete = bool(incomplete or request_incomplete)
         if not head:
             facts.append(_row(branch, "", no_head=True, may_be_incomplete=incomplete))
             continue
         branch_runs, runs_capped = _identity_ids(runs[branch].get(head, ()), 8)
-        eligible = set(publication_ids)
-        branch_requests, requests_capped = _identity_ids(
-            (identity for publication_id, sha, identity in requests
-             if sha == head and publication_id in eligible), 8)
+        branch_requests, requests_capped = _identity_ids(branch_requests, 8)
         incomplete = bool(incomplete or runs_capped or requests_capped)
         facts.append(_row(branch, head, branch_runs, branch_requests,
                           may_be_incomplete=incomplete))

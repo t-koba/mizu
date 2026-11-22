@@ -277,6 +277,49 @@ class CiRequests:
         return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
                 "scan_stopped": scan_stopped}
 
+    def matching(self, publication_ids, *, not_before: dt.date) -> dict:
+        """Validated request identities for exact publication IDs, newest first.
+
+        Schema: ``{"items": [request_id, ...], "incomplete": bool}``. Items are
+        the identities of requests whose ``publication_id`` is in
+        ``publication_ids`` and whose dispatch day is on or after the UTC
+        ``not_before`` date. This reads the same validated rows as ``daily()``,
+        walks them newest first and stops at the first row older than the
+        publication window, so a long history of unrelated earlier requests
+        cannot hide or be mistaken for a head's request. Bounds: the shared
+        reader's configured name and candidate limits apply; no state, writes
+        or new policy are added, and ``daily()`` keeps its own page and order.
+        Trust: locally recorded evidence; a dispatch that cannot be validated
+        is not an identity and is not returned. Failure: unreadable evidence or
+        a stopped scan returns no items with ``incomplete`` true, because
+        either could hide a match; invalid arguments raise ``Denied``.
+        """
+        if isinstance(not_before, dt.datetime):
+            if not_before.tzinfo is None:
+                raise Denied("Invalid CI request publication window")
+            cutoff = not_before.astimezone(dt.timezone.utc).date()
+        elif isinstance(not_before, dt.date):
+            cutoff = not_before
+        else:
+            raise Denied("Invalid CI request publication window")
+        try:
+            wanted = frozenset(publication_ids)
+        except TypeError as exc:
+            raise Denied("Invalid CI request publication filter") from exc
+        if any(not isinstance(value, str) or not value for value in wanted):
+            raise Denied("Invalid CI request publication filter")
+        try:
+            rows, stopped = self._rows()
+        except Exception:
+            return {"items": [], "incomplete": True}
+        items = []
+        for row in reversed(rows):
+            if row["date"] < cutoff.isoformat():
+                break
+            if row["publication_id"] in wanted:
+                items.append(row["request_id"])
+        return {"items": items, "incomplete": bool(stopped)}
+
     def page(self, *, limit: int = 8, offset: int = 0) -> dict:
         """Read at most eight validated attempts for the derived cost view.
 

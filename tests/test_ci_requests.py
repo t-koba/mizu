@@ -3,6 +3,7 @@
 Offline only: the adapter is a local double, no provider, no publication.
 """
 import dataclasses
+import datetime as dt
 import json
 import sys
 import uuid
@@ -875,6 +876,35 @@ class CiRequestTests(Fixture):
         for read in (lambda: store.daily(limit=0), lambda: store.page(limit=0)):
             with self.subTest(read=read), self.assertRaises(Denied):
                 read()
+
+    def test_matching_scans_newest_first_and_stops_at_the_window(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        other = "f" * 64
+        rows = [
+            {"date": "2026-09-30", "request_id": "older-match", "publication_id": publication_id},
+            {"date": "2026-10-01", "request_id": "window-match", "publication_id": publication_id},
+            {"date": "2026-10-02", "request_id": "newer-match", "publication_id": publication_id},
+            {"date": "2026-10-03", "request_id": "newer-other", "publication_id": other},
+        ]
+        with patch.object(store, "_rows", return_value=(rows, False)):
+            found = store.matching([publication_id], not_before=dt.date(2026, 10, 1))
+        self.assertEqual(found, {"items": ["newer-match", "window-match"],
+                                 "incomplete": False})
+
+    def test_matching_fails_closed_on_stopped_or_unreadable_scan(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        rows = [{"date": "2026-10-02", "request_id": "match",
+                 "publication_id": publication_id}]
+        with patch.object(store, "_rows", return_value=(rows, True)):
+            self.assertEqual(store.matching([publication_id], not_before=dt.date(2026, 10, 1)),
+                             {"items": ["match"], "incomplete": True})
+        with patch.object(store, "_rows", side_effect=OSError("unreadable")):
+            self.assertEqual(store.matching([publication_id], not_before=dt.date(2026, 10, 1)),
+                             {"items": [], "incomplete": True})
+        with self.assertRaises(Denied):
+            store.matching([publication_id], not_before=dt.datetime(2026, 10, 1))
 
     def test_persisted_covered_revisions_require_positive_integer(self):
         publication_id = self.receipt["publication_id"]
