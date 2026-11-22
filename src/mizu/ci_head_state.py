@@ -17,16 +17,18 @@ request belongs only to the branch whose receipt carries its publication ID at
 the exact head. Bounds: the configured branch set is already deduplicated and
 bounded; the newest head takes one receipt row, the exact head's publication
 IDs come from an exact-SHA/branch page, and all exact heads' requests from one
-shared newest-first scan of validated request rows bounded by the earliest head
-window, not one scan per head; each projected identity array is capped at eight.
+shared newest-first scan of validated request rows bounded by the configured
+validation limits and the earliest head window, not one scan per head; each
+projected identity array is capped at eight.
 Trust: local records and adapter-supplied cache rows are untrusted evidence.
 Failure: an unreadable ref or source, an invalid page, a stopped scan, an
 exact-head page truncated so another publication ID for that head could be
 hidden, a shared request scan that cannot establish a branch's publication
-window, stops before passing it, or finds an unreadable dispatch record, or a
-reached identity cap sets
-``may_be_incomplete``. Page fullness after that window or on unrelated records
-never flags the exact head, and missing evidence is never a passing verdict.
+window, stops before passing it because of a validation cap or unreadable
+evidence, or finds an unreadable dispatch record, or a reached identity cap
+sets ``may_be_incomplete``. Page fullness after that window never flags the
+exact head; candidate exhaustion before the window does. Missing evidence is
+never a passing verdict.
 """
 from __future__ import annotations
 

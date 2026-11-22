@@ -288,9 +288,10 @@ class CiRequests:
         Each page holds the identities of requests whose ``publication_id`` is
         in that query's set and whose dispatch day is on or after its UTC
         ``not_before`` date. Bounds: one shared newest-first scan of the
-        validated rows stops at the earliest window across all queries, so a
-        long older history is read once and cannot hide any query's request;
-        the shared reader's configured name and candidate limits apply.
+        validated rows stops at the earliest window across all queries; the
+        shared reader's configured name and candidate limits apply before date
+        filtering, so a candidate cap reached before that window makes every
+        page incomplete instead of proving absence.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. Failure: unreadable evidence,
         an unreadable dispatch marker, a stopped scan or dropped records make
@@ -345,10 +346,11 @@ class CiRequests:
         ``publication_ids`` and whose dispatch day is on or after the UTC
         ``not_before`` date. This reads the same validated rows as ``daily()``,
         walks them newest first and stops at the first row older than the
-        publication window, so a long history of unrelated earlier requests
-        cannot hide or be mistaken for a head's request. Bounds: the shared
-        reader's configured name and candidate limits apply; no state, writes
-        or new policy are added, and ``daily()`` keeps its own page and order.
+        publication window. Bounds: the shared reader's configured name and
+        candidate limits apply before date filtering; if they end the scan
+        before the window, the page is incomplete rather than evidence of
+        absence. No state, writes or new policy are added, and ``daily()``
+        keeps its own page and order.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. Failure: unreadable evidence,
         an unreadable dispatch marker, or a stopped scan returns no items with
