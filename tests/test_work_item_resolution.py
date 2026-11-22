@@ -410,7 +410,10 @@ class WaitResolutionTests(Fixture):
                 patch.object(Publication, 'receipt_for_key',
                              wraps=Publication.receipt_for_key) as lookups:
             self.reconcile()
-        self.assertEqual(lookups.call_count, 2)
+        # Advisory discovery, the unlocked CI hint and the locked transition
+        # each consult the exact receipt; no stale advisory cache authorizes it.
+        self.assertEqual([call.args[2] for call in lookups.call_args_list],
+                         [newer['code_digest'], item['wait']['code_digest'], newer['code_digest']])
         self.assertEqual(self.store.get(item['id']), item)
 
     def test_supersession_lists_only_newest_receipt_per_observation(self):
@@ -421,14 +424,12 @@ class WaitResolutionTests(Fixture):
         with patch.object(Publication, 'receipt_for_key',
                           wraps=Publication.receipt_for_key) as lookups:
             self.reconcile()
-        # Advisory discovery, liveness and the locked transition each need one
-        # exact lookup, not a lookup for every older unpublished descendant.
-        self.assertEqual(lookups.call_count, 3)
-        # Advisory discovery and the locked transition observe the superseding
-        # head; liveness resolves the wait's own pinned publication.
-        self.assertEqual([call.args[2] for call in lookups.call_args_list[:2]],
-                         [newest['code_digest']] * 2)
-        self.assertEqual(lookups.call_args_list[2].args[2], item['wait']['code_digest'])
+        # Advisory discovery, the unlocked CI hint and the locked transition
+        # each need one exact lookup, not one for every older unpublished
+        # descendant. The hint resolves the wait's own pinned publication;
+        # both others observe the superseding head.
+        self.assertEqual([call.args[2] for call in lookups.call_args_list],
+                         [newest['code_digest'], item['wait']['code_digest'], newest['code_digest']])
         for call in lookups.call_args_list:
             self.assertEqual(call.args[1], item['wait']['branch'])
         opened = self.store.get(item['id'])

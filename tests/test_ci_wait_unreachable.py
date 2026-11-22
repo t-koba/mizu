@@ -1,12 +1,13 @@
 """Adapter-owned CI reachability is holder-actionable liveness, never auto-resolution."""
+import threading
 from unittest import TestCase
 from unittest.mock import patch
 
 from mizu import ci_waits, vcs
 from mizu.ci_observation import POLL_STATE_FILE
 from mizu.ci_requests import CiRequests, request_id
-from mizu.errors import Denied
-from mizu.fs import write_json
+from mizu.errors import Busy, Denied
+from mizu.fs import lock, write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS
 from test_ci_waits import CiWaitFixture, SHA
@@ -189,3 +190,51 @@ class UnreachableCiWaitTests(CiWaitFixture):
             ready = [r["id"] for r in self.store.page_ready(role_name="worker")["items"]]
             self.assertIn(item["id"], ready)
         query.assert_called_with(self.store.ci_wait_settings(), SHA)
+
+    def probing_adapter(self):
+        """An adapter that checks records.lock from another thread per query."""
+        path = self.project.root / "locks" / "records.lock"
+        probes = []
+
+        def adapter(settings, sha):
+            outcome = {}
+
+            def probe():
+                try:
+                    with lock(path, blocking=False):
+                        outcome["acquired"] = True
+                except Busy:
+                    outcome["error"] = "Busy"
+                except BaseException as exc:
+                    outcome["error"] = repr(exc)
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "record-lock probe hung")
+            probes.append(outcome)
+            return {"sha": sha, "answer": "no", "reason": REASON}
+
+        return probes, adapter
+
+    def test_page_ready_adapter_never_holds_records_lock(self):
+        probes, adapter = self.probing_adapter()
+        with patch("mizu.vcs.ci_reachable", side_effect=adapter):
+            row = self.live()  # unlocked diagnostic keeps the direct query
+            self.assertEqual((row["state"], row["reason"]), ("impossible", REASON))
+            page = self.store.page_ready(role_name="worker")
+        self.assertGreaterEqual(len(probes), 2)
+        self.assertEqual(probes, [{"acquired": True}] * len(probes))
+        live = page["items"][0]["wait_liveness"]
+        self.assertEqual((live["state"], live["reason"]), ("impossible", REASON))
+
+    def test_transition_adapter_never_holds_records_lock(self):
+        probes, adapter = self.probing_adapter()
+        with patch("mizu.vcs.ci_reachable", side_effect=adapter):
+            with self.assertRaisesRegex(Denied, "Reopening blocked work requires a reason"):
+                self.store.transition(self.item["id"], expected_rev=2, status="open", actor="worker")
+            opened = self.store.transition(self.item["id"], expected_rev=2, status="open",
+                                           actor="worker", reason="Pinned commit is gone")
+        self.assertEqual(opened["status"], "open")
+        self.assertTrue(probes)
+        self.assertEqual(probes, [{"acquired": True}] * len(probes))

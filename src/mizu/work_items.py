@@ -30,7 +30,8 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import work_item_retirement
-from .work_item_waits import normalize_wait, stored_wait, liveness, blocked_start, blocked_age, holder_only
+from .work_item_waits import (normalize_wait, stored_wait, liveness, blocked_start,
+                              blocked_age, holder_only, ci_wait_identity)
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      CompletionEvidence, PublicationEvidence)
@@ -1239,6 +1240,9 @@ class WorkItems:
         """
         if role_name is not None:
             identifier(role_name)
+        # The adapter is slow and owns its timeout; gather its answers while
+        # other work-item I/O can still proceed, never under records.lock.
+        ci_unreachable = self._ci_unreachable_hints(role_name=role_name)
         with lock(self.root / "locks" / "records.lock"):
             if _wait_resolution_high_water is not None:
                 from .snapshot import validate_wait_resolution_high_water
@@ -1249,7 +1253,8 @@ class WorkItems:
                 writer_roles = self.writer_roles_lookup()
             args = dict(cursor=None, limit=limit, readonly=False, ready_only=True,
                         role_name=role_name, writer_roles=writer_roles,
-                        delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
+                        delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens,
+                        ci_unreachable=ci_unreachable)
             result = self._page_open_impl(
                 **args, wait_resolution_high_water=_wait_resolution_high_water)
             if (_wait_resolution_high_water is not None
@@ -1359,22 +1364,54 @@ class WorkItems:
             raise LimitExceeded("Closed work-item page row exceeds byte bound")
         return sort_key, row
 
-    def _active_rows(self, *, locked: bool):
+    def _active_rows(self, *, locked: bool, durable: bool = False):
         """Stream every active row in ID order."""
-        with self._ledger.read("items", locked=locked) as db:
+        with self._ledger.read("items", locked=locked, durable=durable) as db:
             yield from db.execute(
                 "SELECT item, doing_since, blocked_since FROM items"
                 " WHERE status IN ('open', 'doing', 'blocked') ORDER BY id")
+
+    def _ci_unreachable_hints(self, *, item_ids=None, role_name=None, durable=False) -> dict:
+        """Ask the adapter about current CI waiters without records.lock.
+
+        Each answer is keyed by the exact wait identity, so a changed record
+        inside the lock cannot inherit a stale answer. The optional role and
+        item filters match the locked reader's visibility; an unreadable or
+        unavailable index gives no hints, and locked liveness then stays
+        pending without querying the adapter.
+        """
+        from . import ci_waits
+        hints = {}
+        try:
+            for entry in self._active_rows(locked=False, durable=durable):
+                item, _ = self._decode(*entry)
+                if item_ids is not None and item.get("id") not in item_ids:
+                    continue
+                wait = item.get("wait")
+                if (item.get("status") != "blocked" or not isinstance(wait, dict)
+                        or wait.get("kind") not in ("ci", "publication_ci")):
+                    continue
+                if role_name is not None and item.get("holder") not in (None, role_name):
+                    continue
+                reason = ci_waits.unreachable(self, item)
+                if reason is not None:
+                    hints[ci_wait_identity(item)] = reason
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
+            return {}
+        return hints
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False, writer_roles=None,
                         wait_resolution_role: str | None = None, _active_transform=None,
-                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
+                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None,
+                        ci_unreachable=None):
         """Collect the bounded open page from the index.
 
         Callers hold records.lock when ``readonly`` is False; the read-only
-        path never locks or writes. Cursor, limit, ordering, overflow and byte
+        path never locks or writes. Locked ready callers supply pre-gathered
+        ``ci_unreachable`` hints so no adapter runs under that lock. Cursor,
+        limit, ordering, overflow and byte
         bounds match :meth:`page_open`. Host-only opening orchestration
         can supply an active transform on the unlocked readonly path; public
         read entry points never do. The returned state is used before selection,
@@ -1456,7 +1493,8 @@ class WorkItems:
                 if (isinstance(wait_probe, dict) and wait_probe.get("kind") == "code_change"
                         and published_snapshot is None):
                     published_snapshot = self.snapshots.get()
-                if holder_only(self, item, published_snapshot, writer_roles=writer_roles) is not None:
+                if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
+                               ci_unreachable=ci_unreachable) is not None:
                     item = {key: value for key, value in item.items()
                             if key not in ("wait", "blocked_since")}
                     item["status"] = "open"
@@ -1464,8 +1502,8 @@ class WorkItems:
                 wait = item.get("wait")
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
-                state = liveness(self, wait, published_snapshot,
-                                 item=item, writer_roles=writer_roles)
+                state = liveness(self, wait, published_snapshot, item=item,
+                                 writer_roles=writer_roles, ci_unreachable=ci_unreachable)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
@@ -1878,6 +1916,11 @@ class WorkItems:
         binding_request = (status == "doing" and snapshot_id is not None)
         publication_wait = (status == "blocked" and isinstance(wait, dict)
                             and wait.get("kind") == "publication_ci")
+        # Peek at the target before locking: a held CI waiter needs an adapter
+        # answer, and that answer must be gathered without records.lock.
+        # A durable index peek never rebuilds or writes state: if it is
+        # unavailable, no hint is gathered and locked liveness stays pending.
+        ci_unreachable = self._ci_unreachable_hints(item_ids={item_id}, durable=True)
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
                        if binding_request or publication_wait or _resolve_wait else contextlib.nullcontext())
         with publication, record_lock(self.root):
@@ -1914,7 +1957,11 @@ class WorkItems:
             if status == "blocked" and wait is None:
                 raise Denied("New blocked transitions require a supported observable wait")
             if blocked_waiter:
-                state = liveness(self, blocked_waiter.get("wait"), None, item=blocked_waiter)
+                # A hint from the pre-read cannot match a changed identity;
+                # the lookup then misses and stays pending, never querying
+                # the adapter under this lock.
+                state = liveness(self, blocked_waiter.get("wait"), None, item=blocked_waiter,
+                                 ci_unreachable=ci_unreachable)
                 needs_open = state["state"] in ("terminal", "impossible")
                 if needs_open and (status == "blocked" or (status == "doing" and current["status"] == "blocked")):
                     raise Denied(f"Reopen blocked work with a reason before renewing its wait: {state['reason']}")

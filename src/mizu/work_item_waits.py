@@ -134,12 +134,25 @@ def blocked_age(item):
     return {"blocked_since": since, "blocked_age_seconds": age}
 
 
-def liveness(store, wait, snapshot, *, item=None, writer_roles=None):
-    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
+def ci_wait_identity(item) -> str:
+    """Bounded key binding a CI liveness hint to one exact wait episode.
+
+    The record revision and the stored wait are part of the key, so a hint
+    gathered before a lock can never answer for a changed waiter.
+    """
+    try:
+        return digest(canonical([item["id"], item["rev"], item.get("wait")]))
+    except (KeyError, TypeError, ValueError, RecursionError, AttributeError):
+        return ""
+
+
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreachable=None):
+    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
+                         ci_unreachable=ci_unreachable)
     return observed if item is None else {**observed, **blocked_age(item)}
 
 
-def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreachable=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Work-item subjects follow the target's current status. CI waits use only
@@ -172,7 +185,11 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
             from . import ci_waits
             observed = ci_waits.terminal_evidence(store, item)
             if observed is None:
-                unreachable = ci_waits.unreachable(store, item)
+                # Locked callers pass hints gathered before the lock: only
+                # look them up, never run the adapter while records.lock is
+                # held. An unlocked reader keeps the direct query.
+                unreachable = (ci_waits.unreachable(store, item) if ci_unreachable is None
+                               else ci_unreachable.get(ci_wait_identity(item)))
                 if unreachable is not None:
                     return result("impossible", unreachable)
                 if ci_waits.holder_only(store, item):
@@ -221,7 +238,7 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
 #: needs no classifier; ``unknown`` and other non-pending states fail closed.
 _HOLDER_ONLY_STATES = ("pending", "receipt_bound")
 
-def holder_only(store, item, snapshot, *, writer_roles) -> str | None:
+def holder_only(store, item, snapshot, *, writer_roles, ci_unreachable=None) -> str | None:
     """Positive witness for a pending wait only its holder can release."""
     try:
         if not isinstance(item, dict) or item.get("status") != "blocked" or not item.get("holder"):
@@ -230,7 +247,8 @@ def holder_only(store, item, snapshot, *, writer_roles) -> str | None:
         if wait.get("kind") not in ("ci", "publication_ci"):
             if not isinstance(writer_roles, (set, frozenset)) or writer_roles != {item["holder"]}:
                 return None
-        observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
+        observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
+                             ci_unreachable=ci_unreachable)
         if observed["state"] in _HOLDER_ONLY_STATES:
             return observed.get("self_resolvable")
     except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):
