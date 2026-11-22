@@ -1879,10 +1879,6 @@ RANGE_ARGUMENTS = {
     ('web.py', 'Web.fetch', 0, 0): (
         '4', 'safety',
         'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
-    ('work_items.py', 'WorkItems._ci_waiter_rows', 0, 0): (
-        '0', 'mechanism', 'work items / optional item-ID batches begin at the first caller ID'),
-    ('work_items.py', 'WorkItems._ci_waiter_rows', 2, 0): (
-        '500', 'safety', 'work items / bound SQL variables per item-ID batch in the CI hint pre-scan'),
     ('work_items.py', 'WorkItems._iter_chain', 0, 0): (
         '2', 'format', 'work items / revision files begin after immutable seed revision 1'),
     ('work_items.py', 'WorkItems._iter_chain', 0, 1): (
@@ -1892,9 +1888,6 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
-    ('work_items.py', 'WorkItems._ci_waiter_rows', 1, 0): (
-        'len(item_ids)', 'safety',
-        'work items / CI hint pre-scan batches only the caller-supplied item IDs'),
     ('kernel/queues.py', 'QueueStore._retain', 0, 0): (
         'cursor + 1', 'mechanism',
         'kernel queues / retention resumes after the durable retain cursor'),

@@ -1371,62 +1371,39 @@ class WorkItems:
                 "SELECT item, doing_since, blocked_since FROM items"
                 " WHERE status IN ('open', 'doing', 'blocked') ORDER BY id")
 
-    def _ci_waiter_rows(self, *, item_ids, role_name, durable):
-        """Yield only blocked CI waiter rows from the index, never the active set.
-
-        The columns match :meth:`_decode` so the decoded record keeps the same
-        blocked-start projection as the normal reader. Batches bound the SQL
-        variables for a caller-supplied ID set; the SQL filters, not Python,
-        limit the rows this pre-scan reads.
-        """
-        where = ["status='blocked'", "wait_kind IN ('ci', 'publication_ci')"]
-        params = []
-        if role_name is not None:
-            where.append("(holder IS NULL OR holder=?)")
-            params.append(role_name)
-        batches = [None] if item_ids is None else [item_ids[i:i + 500]
-                                                   for i in range(0, len(item_ids), 500)]
-        with self._ledger.read("items", locked=False, durable=durable) as db:
-            for batch in batches:
-                conditions = list(where)
-                bound = list(params)
-                if batch is not None:
-                    if not batch:
-                        continue
-                    conditions.append("id IN (" + ", ".join("?" for _ in batch) + ")")
-                    bound.extend(batch)
-                sql = ("SELECT item, doing_since, blocked_since FROM items WHERE "
-                       + " AND ".join(conditions) + " ORDER BY id")
-                yield from _rows(db, sql, tuple(bound))
-
-    def _ci_unreachable_hints(self, *, item_ids=None, role_name=None, durable=False) -> dict:
+    def _ci_unreachable_hints(self, *, role_name=None) -> dict:
         """Ask the adapter about current CI waiters without records.lock.
 
-        Each answer is keyed by the exact wait identity, so a changed record
-        inside the lock cannot inherit a stale answer. The optional role and
-        item filters match the locked reader's visibility; an unreadable or
-        unavailable index gives no hints, and locked liveness then stays
-        pending without querying the adapter.
+        The index query selects only the blocked CI waiters visible to the
+        role, so no unrelated row is decoded. Each answer is keyed by the exact
+        wait identity, so a changed record inside the lock cannot inherit a
+        stale answer. An unreadable or unavailable index gives no hints, and
+        locked liveness then stays pending without querying the adapter.
         """
         from . import ci_waits
         hints = {}
+        sql = ("SELECT item, doing_since, blocked_since FROM items"
+               " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')")
+        params = ()
+        if role_name is not None:
+            sql += " AND (holder IS NULL OR holder=?)"
+            params = (role_name,)
+        sql += " ORDER BY id"
         try:
-            ids = None if item_ids is None else list(item_ids)
-            for entry in self._ci_waiter_rows(item_ids=ids, role_name=role_name, durable=durable):
-                item, _ = self._decode(*entry)
-                # Defensive validation of decoded content; the SQL filter is
-                # what bounds the pre-scan to blocked CI waiters.
-                if ids is not None and item.get("id") not in ids:
-                    continue
-                wait = item.get("wait")
-                if (item.get("status") != "blocked" or not isinstance(wait, dict)
-                        or wait.get("kind") not in ("ci", "publication_ci")):
-                    continue
-                if role_name is not None and item.get("holder") not in (None, role_name):
-                    continue
-                reason = ci_waits.unreachable(self, item)
-                if reason is not None:
-                    hints[ci_wait_identity(item)] = reason
+            with self._ledger.read("items", locked=False) as db:
+                for entry in _rows(db, sql, params):
+                    item, _ = self._decode(*entry)
+                    # Defensive validation of decoded content; the SQL filter is
+                    # what bounds the pre-scan to blocked CI waiters.
+                    wait = item.get("wait")
+                    if (item.get("status") != "blocked" or not isinstance(wait, dict)
+                            or wait.get("kind") not in ("ci", "publication_ci")):
+                        continue
+                    if role_name is not None and item.get("holder") not in (None, role_name):
+                        continue
+                    reason = ci_waits.unreachable(self, item)
+                    if reason is not None:
+                        hints[ci_wait_identity(item)] = reason
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {}
         return hints
