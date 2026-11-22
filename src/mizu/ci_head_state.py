@@ -16,13 +16,13 @@ passing/failing verdict, request state or later-revision coverage inference: a
 request belongs only to the branch whose receipt carries its publication ID at
 the exact head. Bounds: the configured branch set is already deduplicated and
 bounded; the newest head takes one receipt row, the exact head's publication
-IDs come from an exact-SHA/branch page, and the exact head's requests from one
-head-specific newest-first scan of validated request rows that stops at that
-head's publication window; each projected identity array is capped at eight.
+IDs come from an exact-SHA/branch page, and all exact heads' requests from one
+shared newest-first scan of validated request rows bounded by the earliest head
+window, not one scan per head; each projected identity array is capped at eight.
 Trust: local records and adapter-supplied cache rows are untrusted evidence.
 Failure: an unreadable ref or source, an invalid page, a stopped scan, an
 exact-head page truncated so another publication ID for that head could be
-hidden, a head-specific request scan that cannot establish the publication
+hidden, a shared request scan that cannot establish a branch's publication
 window, stops before passing it, or finds an unreadable dispatch record, or a
 reached identity cap sets
 ``may_be_incomplete``. Page fullness after that window or on unrelated records
@@ -172,22 +172,16 @@ def _poll_cache(project, config, branches):
     return runs, global_incomplete, branch_incomplete
 
 
-def _head_requests(project, config, publication_ids, not_before):
-    """Request identities for the exact head's publications, plus incompleteness."""
-    if not_before is None:
-        return [], True
-    try:
-        result = CiRequests(project.root, getattr(config, "ci_requests", None)).matching(
-            publication_ids, not_before=not_before)
-    except Exception:
-        return [], True
+def _request_page(result):
+    """Validate one shared-scan page: request identities plus incompleteness."""
     if not isinstance(result, dict):
         return [], True
-    items = result.get("items")
-    if not isinstance(items, list) or any(
-            not isinstance(value, str) or not value for value in items):
+    items, incomplete = result.get("items"), result.get("incomplete")
+    if (not isinstance(items, list)
+            or any(not isinstance(value, str) or not value for value in items)
+            or not isinstance(incomplete, bool)):
         return [], True
-    return items, bool(result.get("incomplete"))
+    return items, incomplete
 
 
 def ci_head_state_facts(project, config=None) -> list:
@@ -216,16 +210,37 @@ def ci_head_state_facts(project, config=None) -> list:
 
     runs, cache_incomplete, cache_branch_incomplete = _poll_cache(project, config, branches)
 
+    head_requests, queries = {}, {}
+    for branch in branches:
+        head, publication_ids, incomplete = pages[branch]
+        if not (head and publication_ids):
+            continue
+        not_before, window_incomplete = _head_window(project, publication_ids)
+        incomplete = bool(incomplete or window_incomplete)
+        if not_before is None:
+            head_requests[branch] = ([], True)
+        else:
+            queries[branch] = (publication_ids, not_before)
+        pages[branch] = (head, publication_ids, incomplete)
+
+    if queries:
+        try:
+            shared_pages = CiRequests(
+                project.root, getattr(config, "ci_requests", None)).matching_many(queries)
+        except Exception:
+            shared_pages = {}
+        if not isinstance(shared_pages, dict):
+            shared_pages = {}
+        for branch in queries:
+            head_requests[branch] = _request_page(shared_pages.get(branch))
+
     facts = []
     for branch in sorted(branches):
         head, publication_ids, incomplete = pages[branch]
         incomplete = bool(incomplete or cache_incomplete or cache_branch_incomplete[branch])
         branch_requests = []
         if head and publication_ids:
-            not_before, window_incomplete = _head_window(project, publication_ids)
-            incomplete = bool(incomplete or window_incomplete)
-            branch_requests, request_incomplete = _head_requests(
-                project, config, publication_ids, not_before)
+            branch_requests, request_incomplete = head_requests[branch]
             incomplete = bool(incomplete or request_incomplete)
         if not head:
             facts.append(_row(branch, "", no_head=True, may_be_incomplete=incomplete))

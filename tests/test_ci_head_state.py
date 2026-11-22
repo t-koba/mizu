@@ -166,15 +166,31 @@ class CiHeadStateTests(Fixture):
                     "total": 1, "truncated": False, "scan_stopped": False,
                     "next_cursor": None}
 
+        page = self.matching_page([identity])
         with patch("mizu.ci_head_state.Publication.list_receipts", side_effect=receipts), \
                 patch("mizu.ci_head_state._head_window",
                       return_value=(dt.date(2026, 10, 1), False)), \
-                patch("mizu.ci_head_state.CiRequests.matching",
-                      return_value=self.matching_page([identity])):
+                patch("mizu.ci_head_state.CiRequests.matching_many",
+                      return_value={"main": page, "release": page}):
             rows = {row["subject"]: row for row in self.facts(self.two_branches())}
         expected = ci_head_state._row("", SHA, requests=[identity])
         for branch in ("main", "release"):
             self.assertEqual(rows[branch], {**expected, "subject": branch})
+
+    def test_two_configured_branches_share_one_request_scan(self):
+        main_receipt = self.receipt(SHA, branch="main", code_digest="1" * 64)
+        release_receipt = self.receipt(SHA, branch="release", code_digest="2" * 64)
+        main_request = self.request(SHA, main_receipt)
+        release_request = self.request(SHA, release_receipt)
+        real_rows = CiRequests._rows
+        with patch.object(CiRequests, "_rows", autospec=True,
+                          side_effect=lambda store, **kwargs: real_rows(store, **kwargs)) as scan:
+            rows = {row["subject"]: row for row in self.facts(self.two_branches())}
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(set(scan.call_args.kwargs), {"dropped"})
+        self.assertEqual(rows["main"], ci_head_state._row("main", SHA, requests=[main_request]))
+        self.assertEqual(rows["release"], ci_head_state._row(
+            "release", SHA, requests=[release_request]))
 
     def test_one_bounded_row_per_configured_branch_sorted(self):
         self.receipt(SHA)
@@ -196,8 +212,8 @@ class CiHeadStateTests(Fixture):
         rows = [f"request-{index}" for index in range(10)]
         self.cache(successes={"main": [{"sha": SHA, "check": f"check-{index}",
                                         "run": f"run-{index}"} for index in range(10)]})
-        with patch("mizu.ci_head_state.CiRequests.matching",
-                   return_value=self.matching_page(rows)):
+        with patch("mizu.ci_head_state.CiRequests.matching_many",
+                   return_value={"main": self.matching_page(rows)}):
             row = self.facts()[0]
         self.assertEqual(row["runs"], [f"run-{index}" for index in range(8)])
         self.assertEqual(row["requests"], [f"request-{index}" for index in range(8)])

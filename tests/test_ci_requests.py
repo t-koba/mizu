@@ -892,6 +892,28 @@ class CiRequestTests(Fixture):
         self.assertEqual(found, {"items": ["newer-match", "window-match"],
                                  "incomplete": False})
 
+    def test_matching_many_filters_distinct_windows_in_one_scan(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        other = "f" * 64
+        rows = [
+            {"date": "2026-09-30", "request_id": "older-match", "publication_id": publication_id},
+            {"date": "2026-10-01", "request_id": "window-match", "publication_id": publication_id},
+            {"date": "2026-10-02", "request_id": "other-match", "publication_id": other},
+            {"date": "2026-10-03", "request_id": "newer-other", "publication_id": other},
+        ]
+        queries = {"head": ([publication_id], dt.date(2026, 10, 1)),
+                   "later": ([other], dt.date(2026, 10, 3))}
+        with patch.object(store, "_rows", return_value=(rows, False)) as scan:
+            pages = store.matching_many(queries)
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(pages, {
+            "head": {"items": ["window-match"], "incomplete": False},
+            "later": {"items": ["newer-other"], "incomplete": False}})
+        with patch.object(store, "_rows", side_effect=OSError("unreadable")):
+            self.assertEqual(store.matching_many(queries), {
+                key: {"items": [], "incomplete": True} for key in queries})
+
     def test_matching_fails_closed_on_stopped_or_unreadable_scan(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]

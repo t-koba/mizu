@@ -36,6 +36,8 @@ MAX_CI_DIAGNOSTIC_BYTES = ADAPTER_DIAGNOSTIC_BYTES_MAX + 128
 UNKNOWN_REASON = "dispatch_outcome_timeout"
 ATTEMPT_FILE = re.compile(r"([0-9a-f]{64})\.(?:dispatch|request|resolution)\.json\Z")
 ACTIVITY = "evidence/ci-request-activity.json"
+#: Single-key sentinel used when ``matching()`` delegates to the shared scan.
+_MATCHING_KEY = object()
 
 
 def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int = 1) -> str:
@@ -277,6 +279,64 @@ class CiRequests:
         return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
                 "scan_stopped": scan_stopped}
 
+    def matching_many(self, queries) -> dict:
+        """Validated request identities for several publication windows in one scan.
+
+        Schema: ``queries`` maps opaque keys to ``(publication_ids, not_before)``
+        pairs; the result maps the same keys to
+        ``{"items": [request_id, ...], "incomplete": bool}`` pages, newest first.
+        Each page holds the identities of requests whose ``publication_id`` is
+        in that query's set and whose dispatch day is on or after its UTC
+        ``not_before`` date. Bounds: one shared newest-first scan of the
+        validated rows stops at the earliest window across all queries, so a
+        long older history is read once and cannot hide any query's request;
+        the shared reader's configured name and candidate limits apply.
+        Trust: locally recorded evidence; a dispatch that cannot be validated
+        is not an identity and is not returned. Failure: unreadable evidence,
+        an unreadable dispatch marker, a stopped scan or dropped records make
+        every page incomplete; invalid dates or filters raise ``Denied``.
+        """
+        prepared = {}
+        for key, query in queries.items():
+            try:
+                publication_ids, not_before = query
+            except (TypeError, ValueError) as exc:
+                raise Denied("Invalid CI request query") from exc
+            if isinstance(not_before, dt.datetime):
+                if not_before.tzinfo is None:
+                    raise Denied("Invalid CI request publication window")
+                cutoff = not_before.astimezone(dt.timezone.utc).date()
+            elif isinstance(not_before, dt.date):
+                cutoff = not_before
+            else:
+                raise Denied("Invalid CI request publication window")
+            try:
+                wanted = frozenset(publication_ids)
+            except TypeError as exc:
+                raise Denied("Invalid CI request publication filter") from exc
+            if any(not isinstance(value, str) or not value for value in wanted):
+                raise Denied("Invalid CI request publication filter")
+            prepared[key] = (wanted, cutoff.isoformat())
+        if not prepared:
+            return {}
+        earliest = min(cutoff for _, cutoff in prepared.values())
+        dropped = []
+        try:
+            rows, stopped = self._rows(dropped=dropped)
+        except Exception:
+            return {key: {"items": [], "incomplete": True} for key in prepared}
+        items = {key: [] for key in prepared}
+        for row in reversed(rows):
+            date = row["date"]
+            if date < earliest:
+                break
+            for key, (wanted, cutoff) in prepared.items():
+                if date >= cutoff and row["publication_id"] in wanted:
+                    items[key].append(row["request_id"])
+        incomplete = bool(stopped or dropped)
+        return {key: {"items": page, "incomplete": incomplete}
+                for key, page in items.items()}
+
     def matching(self, publication_ids, *, not_before: dt.date) -> dict:
         """Validated request identities for exact publication IDs, newest first.
 
@@ -295,32 +355,7 @@ class CiRequests:
         ``incomplete`` true, because any of them could hide a match; invalid
         arguments raise ``Denied``.
         """
-        if isinstance(not_before, dt.datetime):
-            if not_before.tzinfo is None:
-                raise Denied("Invalid CI request publication window")
-            cutoff = not_before.astimezone(dt.timezone.utc).date()
-        elif isinstance(not_before, dt.date):
-            cutoff = not_before
-        else:
-            raise Denied("Invalid CI request publication window")
-        try:
-            wanted = frozenset(publication_ids)
-        except TypeError as exc:
-            raise Denied("Invalid CI request publication filter") from exc
-        if any(not isinstance(value, str) or not value for value in wanted):
-            raise Denied("Invalid CI request publication filter")
-        dropped = []
-        try:
-            rows, stopped = self._rows(dropped=dropped)
-        except Exception:
-            return {"items": [], "incomplete": True}
-        items = []
-        for row in reversed(rows):
-            if row["date"] < cutoff.isoformat():
-                break
-            if row["publication_id"] in wanted:
-                items.append(row["request_id"])
-        return {"items": items, "incomplete": bool(stopped or dropped)}
+        return self.matching_many({_MATCHING_KEY: (publication_ids, not_before)})[_MATCHING_KEY]
 
     def page(self, *, limit: int = 8, offset: int = 0) -> dict:
         """Read at most eight validated attempts for the derived cost view.
