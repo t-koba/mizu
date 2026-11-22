@@ -367,6 +367,41 @@ class SteerTests(SteerFixture):
         self.assertLessEqual(max(pages), check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)
         self.assertEqual(sum(pages), count)
 
+    def test_acknowledged_retained_completions_do_not_hide_first_boundary(self):
+        count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 4
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=True))
+        self.project.config = self.config
+        base = dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc)
+        ticks = itertools.count()
+
+        def distinct_now():
+            return (base + dt.timedelta(seconds=next(ticks))).isoformat(timespec='seconds')
+
+        context = self.context()
+        with patch.object(check_jobs, 'now', distinct_now):
+            eligible = check_jobs.submit(context, 'printf eligible', purpose='eligible')
+            self.assertEqual(check_jobs.run_one(self.project, threading.Event(),
+                                                sandbox_factory=FakeSandbox)['status'], 'completed')
+            acknowledged = []
+            for index in range(count):
+                job = check_jobs.submit(context, f'printf stale-{index}', purpose=f'stale-{index}')
+                self.assertEqual(check_jobs.run_one(self.project, threading.Event(),
+                                                    sandbox_factory=FakeSandbox)['status'], 'completed')
+                acknowledged.append(job['id'])
+        check_jobs.acknowledge(self.project, 'worker', acknowledged)
+        for job_id in acknowledged:
+            self.assertTrue(check_jobs.read(self.project, job_id)['acknowledged'])
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            rows = db.execute('SELECT COUNT(*) FROM check_completion_changes').fetchone()
+        self.assertGreaterEqual(rows[0], check_jobs.MAX_CHECK_STEER_CHANGE_ROWS)
+
+        full = check_jobs.steer_pending(self.project, 'worker', ())
+        self.assertEqual([row['id'] for row in full], [eligible['id']])
+        cursor = check_jobs.CheckSteerCursor()
+        self.assertEqual([row['id'] for row in check_jobs.steer_pending(
+            self.project, 'worker', (), cursor=cursor)], [eligible['id']])
+
     def test_tied_creation_timestamps_break_by_job_id(self):
         fixed = dt.datetime(2026, 4, 1, tzinfo=dt.timezone.utc).isoformat(timespec='seconds')
         context = self.context()

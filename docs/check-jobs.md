@@ -182,7 +182,9 @@ fresh result. It then follows the writer-maintained index in bounded pages
 ordered newest-first by job creation time with a job-id tie-break, walking
 older rows of each captured completion-sequence window before a new high opens
 a window. The captured sequence only seals which window is eligible; this
-creation order gives the same first batch as full discovery. The captured position
+creation order gives the same first batch as full discovery; retained
+acknowledged completions are excluded before the page limit so they cannot hide
+an unread result. The captured position
 still covers a completion that races into the prompt; the seeded IDs filter it
 out instead of steering it twice. Unchanged boundaries touch no job records.
 The same `check_job` capability and `roles.<name>.check_result_wake` policy

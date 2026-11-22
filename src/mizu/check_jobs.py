@@ -2045,7 +2045,8 @@ def _steer_changes(project, role, cursor):
         query = (
             "SELECT c.seq, c.job_id, COALESCE(j.created_at, '') "
             'FROM check_completion_changes c LEFT JOIN check_jobs j ON j.id=c.job_id '
-            'WHERE c.role=? AND c.seq>? AND c.seq<=?')
+            'WHERE c.role=? AND c.seq>? AND c.seq<=? '
+            'AND (j.acknowledged IS NULL OR j.acknowledged=0)')
         parameters = [role, cursor.floor, cursor.ceiling]
         if cursor.page_after is not None:
             created_at, job_id = cursor.page_after
