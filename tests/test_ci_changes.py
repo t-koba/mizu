@@ -1,4 +1,5 @@
 """Change-driven receipt-wait observation: fake adapters, no network."""
+import contextlib
 import dataclasses
 import json
 from unittest.mock import Mock, patch
@@ -43,6 +44,15 @@ class CiChangesTests(CiWaitFixture):
 
     def calls(self, op):
         return [row for row in self.trace if row["op"] == op]
+
+    @contextlib.contextmanager
+    def traversal_spies(self):
+        """Watch both candidate passes and enrollment without changing behavior."""
+        with patch.object(ci_waits, "_items", wraps=ci_waits._items) as items, \
+                patch.object(ci_waits, "_Enrollment", wraps=ci_waits._Enrollment) as enrollment, \
+                patch.object(ci_waits, "_poll_candidates",
+                             wraps=ci_waits._poll_candidates) as candidates:
+            yield items, enrollment, candidates
 
     def make_wait(self, i, branch="published"):
         publication = Publication(self.project.root, f"{i:040x}", "c" * 64,
@@ -104,10 +114,9 @@ class CiChangesTests(CiWaitFixture):
             result = self.tick()
         self.assertEqual((result["polled"], result["observed"]), (0, 0))
         self.assertTrue(result["ok"])
-        # Only the single eligibility pass traverses candidates. The empty
-        # response pass used to resolve every waiter's candidates again to no
-        # effect (call count was 2); it is now skipped when no target is selected.
-        self.assertEqual(counted.call_count, 1)
+        # Both passes used to traverse candidates (call count was 2, then 1).
+        # An unchanged quiet page with a stable fingerprint now needs none.
+        counted.assert_not_called()
         self.assertEqual(self.calls("status"), [])
         self.assertEqual(len(self.calls("changes")), 1)
 
@@ -243,7 +252,8 @@ class CiChangesTests(CiWaitFixture):
             self.assertEqual(self.tick(adapter)["observed"], 0)
         self.assertFalse(ci_waits._path(self.store, item).exists())
         self.tick()  # polling writer removes observations for the released wait
-        self.assertEqual(list((self.project.root / "ci-wait-observations").iterdir()), [])
+        directory = self.project.root / "ci-wait-observations"
+        self.assertEqual([path.name for path in directory.iterdir()], ["generation.json"])
 
     def test_failed_invalidated_read_retries_after_cursor_commit(self):
         item = self.block()
@@ -338,6 +348,160 @@ class CiChangesTests(CiWaitFixture):
         self.assertEqual(self.tick()["observed"], 1)
         self.assertTrue(ci_waits.evidence(self.store, item))
 
+    def test_quiet_page_fingerprint_skips_all_waiter_traversal(self):
+        self.block()
+        self.assertEqual(self.tick()["polled"], 1)
+        # Enrollment rotated the retry generation, so one full pass follows
+        # before the new fingerprint can be reused on a quiet page.
+        self.assertEqual(self.tick()["polled"], 0)
+        fingerprint = self.state["ci_wait_invalidation"]
+        self.assertRegex(fingerprint, "^[0-9a-f]{64}$")
+        with self.traversal_spies() as (items, enrollment, candidates):
+            result = self.tick()
+        self.assertEqual((result["event"], result["polled"], result["observed"],
+                          result["errors"]), ("ci_wait_poll", 0, 0, []))
+        self.assertTrue(result["ok"])
+        for spy in (items, enrollment, candidates):
+            spy.assert_not_called()
+        self.assertEqual(self.calls("status"), [])
+        self.assertEqual(len(self.calls("changes")), 1)  # page fetched before the skip
+        self.assertEqual(self.state["ci_wait_invalidation"], fingerprint)
+
+    def test_work_item_change_forces_one_full_scan(self):
+        self.block()
+        self.tick()
+        self.tick()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+        self.block("new", wait=self.make_wait(1))
+        with self.traversal_spies() as (items, enrollment, candidates):
+            result = self.tick()
+        self.assertEqual(result["polled"], 1)
+        items.assert_called()
+        enrollment.assert_called_once()
+        candidates.assert_called()
+        # Writing the new observation advanced the retry generation: one more
+        # full pass records a fresh fingerprint, then quiet ticks skip again.
+        with self.traversal_spies() as (_, enrollment, __):
+            self.assertEqual(self.tick()["polled"], 0)
+            enrollment.assert_called_once()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+
+    def test_new_snapshot_forces_one_full_scan(self):
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
+                                                          "ci_branch": "published"})
+        self.store.vcs = self.config.vcs
+        snapshot = self.project.snapshots.get()
+        self.block(wait={"kind": "publication_ci", "snapshot_id": snapshot["id"],
+                         "checks": ["unit", "lint"]})
+        self.assertEqual(self.tick()["polled"], 0)  # no matching receipt yet
+        self.tick()  # first full pass creates the retry generation
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+        self.descendant("next")
+        with self.traversal_spies() as (items, enrollment, candidates):
+            result = self.tick()
+        self.assertTrue(result["ok"])
+        items.assert_called()
+        enrollment.assert_called_once()
+        candidates.assert_called()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+
+    def test_new_publication_receipt_forces_one_full_scan(self):
+        self.block()
+        self.tick()
+        self.tick()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+        fingerprint = self.state["ci_wait_invalidation"]
+        self.make_wait(1, "other")  # a receipt, but no waiter targets it
+        with self.traversal_spies() as (items, enrollment, candidates):
+            result = self.tick()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["polled"], 0)
+        items.assert_called()
+        enrollment.assert_called_once()
+        candidates.assert_called()
+        self.assertNotEqual(fingerprint, self.state["ci_wait_invalidation"])
+
+    def test_cleared_retry_key_forces_one_full_scan(self):
+        item = self.block()
+        self.tick()
+        self.tick()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+        before = ci_waits._Enrollment.retry_generation(self.store)
+        self.subjects = ["ci-status:published"]
+        self.status = "success"
+        result = self.tick()
+        self.assertEqual(result["observed"], 1)
+        self.assertTrue(ci_waits.evidence(self.store, item))
+        self.assertNotEqual(before, ci_waits._Enrollment.retry_generation(self.store))
+        self.subjects = []
+        with self.traversal_spies() as (items, enrollment, _):
+            self.tick()
+        items.assert_called()
+        enrollment.assert_called_once()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+
+    def test_invalid_retry_generation_fails_closed(self):
+        self.block()
+        self.tick()
+        self.tick()
+        with self.traversal_spies() as spies:
+            self.assertEqual(self.tick()["polled"], 0)
+            for spy in spies:
+                spy.assert_not_called()
+        path = ci_waits._retry_generation_path(self.store)
+        for invalid in ("not json", json.dumps({"epoch": "a" * 32, "token": "bad"})):
+            with self.subTest(invalid=invalid):
+                path.write_text(invalid)
+                self.assertIsNone(ci_waits._Enrollment.retry_generation(self.store))
+                with self.traversal_spies() as (items, enrollment, _):
+                    result = self.tick()
+                self.assertTrue(result["ok"])
+                items.assert_called()
+                enrollment.assert_called_once()
+                self.assertRegex(ci_waits._Enrollment.retry_generation(self.store),
+                                 "^[0-9a-f]{32}$")
+                # A tick that started with an invalid head cannot skip the next.
+                with self.traversal_spies() as (_, enrollment, __):
+                    self.tick()
+                enrollment.assert_called_once()
+
+    def test_non_stream_still_enumerates_and_ignores_fingerprint(self):
+        self.block()
+        self.tick()
+        self.tick()
+        fingerprint = self.state["ci_wait_invalidation"]
+        self.assertRegex(fingerprint, "^[0-9a-f]{64}$")
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
+                                                          "change_stream_enabled": False})
+        for _ in range(2):
+            with self.traversal_spies() as (items, enrollment, candidates):
+                result = self.tick()
+            self.assertEqual(result["polled"], 1)  # cadence rotation, no stream
+            items.assert_called()
+            candidates.assert_called()
+            enrollment.assert_not_called()
+        self.assertEqual(self.state["ci_wait_invalidation"], fingerprint)
 
 class ChangePublicationSafetyTests(CiWaitFixture):
     """Reuse the exact receipt/candidate race checks against the new mode."""
@@ -382,7 +546,9 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         reader.assert_called_once_with(self.config.vcs, "status",
                                        {"branch": "published", "sha": SHA})
         directory = self.project.root / "ci-wait-observations"
-        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        observations = lambda: {path.name: path.read_bytes() for path in directory.iterdir()
+                                if path.name != "generation.json"}
+        before = observations()
         self.assertEqual(set(before), {item["id"] + ".json" for item in items})
         for item in items:
             self.assertIsNone(ci_waits.evidence(self.store, item))
@@ -399,7 +565,8 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         self.assertEqual((result["polled"], result["observed"]), (0, 0))
         changes.assert_called_once()
         reader.assert_not_called()
-        self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+        self.assertEqual(observations(), before)
+        self.assertRegex(ci_waits._Enrollment.retry_generation(self.store), "^[0-9a-f]{32}$")
         self.assertEqual(lookups.call_count, 1)
         # One call-local key observation serves the whole tick; the lookup
         # remains the single-key entry point with the same exact key.

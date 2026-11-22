@@ -30,6 +30,7 @@ from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 from .work_items import _directory, _timestamp
 
 MAX_CHECK_SET_BYTES = 2048
+_RETRY_GENERATION_FILE = "generation.json"
 
 
 def normalize(root, value, *, stored=False):
@@ -920,6 +921,33 @@ def _poll_candidates(store, descendants, errors, limit, *, receipt_cache=None, d
                     errors.append(_poll_error_code(exc))
 
 
+def _retry_generation_path(store):
+    return store.root / "ci-wait-observations" / _RETRY_GENERATION_FILE
+
+
+def _read_retry_generation(store):
+    """Read the durable retry head; an absent or invalid file is not a head."""
+    path = _retry_generation_path(store)
+    try:
+        data = loads_finite(safe_read(store.root,
+            path.relative_to(store.root).as_posix(), 256))
+    except (Denied, LimitExceeded, OSError, ValueError, RecursionError):
+        return None
+    if (not isinstance(data, dict) or set(data) != {"epoch", "token"}
+            or any(not isinstance(data[part], str) or len(data[part]) != 32
+                   or any(char not in "0123456789abcdef" for char in data[part])
+                   for part in ("epoch", "token"))):
+        return None
+    return data["token"]
+
+
+def _rotate_retry_generation(store, epoch):
+    """Advance the durable retry head before an observation file is mutated."""
+    token = uuid.uuid4().hex
+    write_json(_retry_generation_path(store), {"epoch": epoch, "token": token})
+    return token
+
+
 class _Enrollment:
     """Disposable per-current-wait observation receipts, never CI evidence.
 
@@ -933,7 +961,11 @@ class _Enrollment:
         self.directory = store.root / "ci-wait-observations"
         _directory(self.directory)
         mkdir(self.directory)
+        if _read_retry_generation(store) is None:
+            _rotate_retry_generation(store, epoch)
         for path in self.directory.iterdir():
+            if path.name == _RETRY_GENERATION_FILE:
+                continue
             identifier(path.stem)
             try:
                 item = store.current(path.stem)
@@ -955,6 +987,11 @@ class _Enrollment:
             kept = old & keys
             if kept != old or not kept:
                 self._write(item, kept)
+
+    @staticmethod
+    def retry_generation(store):
+        """Current durable retry token used by the quiet-tick fingerprint."""
+        return _read_retry_generation(store)
 
     @staticmethod
     def key(candidate, wait):
@@ -995,6 +1032,12 @@ class _Enrollment:
 
     def _write(self, item, keys):
         path = self._path(item)
+        identity = (item["id"], item["rev"])
+        before = self.cached_keys if self.cached_item == identity else self._read_file(item)
+        if keys != before:
+            # The generation is durable before the observation changes: a
+            # crash in between forces a full scan, never a hidden retry.
+            _rotate_retry_generation(self.store, self.epoch)
         if not keys:
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
@@ -1072,6 +1115,20 @@ def _change_page(config, state, limit, changes_reader):
             "branches": sorted(branches), "after": []}
 
 
+def _invalidation_fingerprint(store, epoch, receipt_keys, quiet):
+    """Cheap heads of every source that can change a waiter scan."""
+    try:
+        token, seq = store.ci_invalidation_head()
+        retry = _Enrollment.retry_generation(store)
+        if retry is None:
+            return None
+        heads = [token, seq, store.snapshots.history_head(),
+                 receipt_keys.generation(), retry, epoch, quiet]
+        return digest(canonical(heads))
+    except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def poll(config, project, state, *, now, interval, reader=None, changes_reader=None):
     from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                                   vcs_poll_max_ci_wait_targets, vcs_poll_status_timeout)
@@ -1099,6 +1156,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
     try:
         enrollment = None
         page = None
+        fingerprint = None
         stream = config.vcs.get("change_stream_enabled") is True
         if stream:
             try:
@@ -1108,9 +1166,18 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     if epoch is not None:
                         raise Denied("Invalid CI observation epoch")
                     epoch = state["ci_changes_epoch"] = uuid.uuid4().hex
+                page = _change_page(config, state, limit, changes_reader)
+                quiet = (page is not None and not page["branches"]
+                         and not page.get("subjects")
+                         and state.get("ci_changes_pending") is None)
+                fingerprint = _invalidation_fingerprint(store, epoch, receipt_keys, quiet)
+                if quiet and fingerprint is not None and fingerprint == state.get("ci_wait_invalidation"):
+                    # The change page was already fetched. No waiter can have
+                    # changed and no retry is queued, so no scan or status read.
+                    return {"event": "ci_wait_poll", "ok": True, "polled": 0,
+                            "observed": 0, "errors": []}
                 enrollment = _Enrollment(store, epoch, receipt_cache=receipt_cache,
                                          receipt_keys=receipt_keys)
-                page = _change_page(config, state, limit, changes_reader)
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError) as exc:
                 errors.append(_poll_error_code(exc))
                 # Forget untrustworthy progress, not authoritative evidence.
@@ -1119,6 +1186,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                 state["ci_changes_pending"] = None
                 state["ci_changes_epoch"] = uuid.uuid4().hex
                 enrollment = None
+                fingerprint = None
         page_after = tuple(page["after"]) if page else ()
         tail = False
         enroll_after, enroll_before = set(), set()
@@ -1268,6 +1336,11 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                 if len(errors) < limit:
                     errors.append(_poll_error_code(exc))
         errors.extend(scan_errors[:max(0, limit - len(errors))])
+        if stream:
+            # A fingerprint is reusable only after a clean full pass. Any
+            # observation write or retry inside this tick advanced its head.
+            state["ci_wait_invalidation"] = (
+                fingerprint if fingerprint is not None and not errors else None)
         if page is not None:
             if scan_errors:
                 # Unknown eligibility cannot be treated as covered. Replay the

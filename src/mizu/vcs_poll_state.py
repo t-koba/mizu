@@ -51,7 +51,8 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
         state["ci_wait_cursor"] = shared["ci_wait_cursor"]
     # Copy even corrupt stream state: the CI-wait controller must recover by
     # full reads, not silently retain an apparently caught-up local cursor.
-    for key in ("ci_changes_cursor", "ci_changes_pending", "ci_changes_epoch"):
+    for key in ("ci_changes_cursor", "ci_changes_pending", "ci_changes_epoch",
+                "ci_wait_invalidation"):
         if key in shared:
             state[key] = shared[key]
     if isinstance(shared.get("proposal_refs"), dict):

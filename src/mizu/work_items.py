@@ -1676,6 +1676,17 @@ class WorkItems:
             return result, [entry[3] for entry in sorted(selected, key=lambda value: value[1])]
         return result
 
+    def ci_invalidation_head(self) -> tuple[str, int]:
+        """Durable item head for CI-wait invalidation, without enumerating items.
+
+        Both an index rebuild (new token key) and any item change (new
+        sequence) invalidate a caught-up waiter scan. A non-durable index is
+        refused rather than replaced by a private in-memory generation.
+        """
+        with self._ledger.read("items", locked=False, durable=True) as db:
+            key, _, high = ITEMS.change_position(db, None)
+        return key.hex(), high
+
     def page_changes_readonly(self, *, cursor=None, limit=25) -> dict:
         """Bounded coalesced current records, not an event history or live waits.
 

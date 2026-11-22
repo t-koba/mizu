@@ -1288,6 +1288,7 @@ class ReceiptKeyObservation:
         self.root = Path(project_root)
         self.policy = policy
         self._loaded = False
+        self._generation = None
         self._keys = {}
         self._observed = {}
 
@@ -1301,6 +1302,7 @@ class ReceiptKeyObservation:
                 raise Denied("Publication evidence changed")
             if index["incomplete"]:
                 raise Denied("Publication evidence scan incomplete")
+            self._generation = digest(canonical(index))
             for key in index["keys"]:
                 self._keys.setdefault(
                     (key["branch"], key["code_digest"]), []).extend(key["publication_ids"])
@@ -1317,6 +1319,11 @@ class ReceiptKeyObservation:
                 if entry["publication_id"] in candidates:
                     self._observed[entry["publication_id"]] = {entry["kind"]: (raw, sha)}
         self._loaded = True
+
+    def generation(self):
+        """Head of the validated key index; ``None`` means no index exists."""
+        self._load()
+        return self._generation
 
     def resolve(self, branch, code_digest) -> str | None:
         """Resolve one exact key from this observation's pinned inventory."""

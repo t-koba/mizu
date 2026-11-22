@@ -594,6 +594,10 @@ class Snapshots:
             raise Denied("History generation does not end at the published snapshot")
         return history
 
+    def history_head(self) -> str:
+        """Digest of retained publication history; invalid history fails closed."""
+        return digest(canonical(self._history_ids()))
+
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
                wake_at: float | None = None, wake_generation: str = "",

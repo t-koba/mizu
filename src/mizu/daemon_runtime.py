@@ -96,6 +96,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "ci_changes_cursor": state.get("ci_changes_cursor"),
                             "ci_changes_pending": state.get("ci_changes_pending"),
                             "ci_changes_epoch": state.get("ci_changes_epoch"),
+                            "ci_wait_invalidation": state.get("ci_wait_invalidation"),
                             "failures": _clean_ci_failures(
                                 ci_state.get("failures"), config,
                                 defer_branch_cap=not ci_due),
