@@ -290,9 +290,10 @@ class CiRequests:
         reader's configured name and candidate limits apply; no state, writes
         or new policy are added, and ``daily()`` keeps its own page and order.
         Trust: locally recorded evidence; a dispatch that cannot be validated
-        is not an identity and is not returned. Failure: unreadable evidence or
-        a stopped scan returns no items with ``incomplete`` true, because
-        either could hide a match; invalid arguments raise ``Denied``.
+        is not an identity and is not returned. Failure: unreadable evidence,
+        an unreadable dispatch marker, or a stopped scan returns no items with
+        ``incomplete`` true, because any of them could hide a match; invalid
+        arguments raise ``Denied``.
         """
         if isinstance(not_before, dt.datetime):
             if not_before.tzinfo is None:
@@ -308,8 +309,9 @@ class CiRequests:
             raise Denied("Invalid CI request publication filter") from exc
         if any(not isinstance(value, str) or not value for value in wanted):
             raise Denied("Invalid CI request publication filter")
+        dropped = []
         try:
-            rows, stopped = self._rows()
+            rows, stopped = self._rows(dropped=dropped)
         except Exception:
             return {"items": [], "incomplete": True}
         items = []
@@ -318,7 +320,7 @@ class CiRequests:
                 break
             if row["publication_id"] in wanted:
                 items.append(row["request_id"])
-        return {"items": items, "incomplete": bool(stopped)}
+        return {"items": items, "incomplete": bool(stopped or dropped)}
 
     def page(self, *, limit: int = 8, offset: int = 0) -> dict:
         """Read at most eight validated attempts for the derived cost view.
@@ -336,8 +338,12 @@ class CiRequests:
                 "next_offset": end if end < len(rows) else None,
                 "truncated": offset > 0 or end < len(rows), "scan_stopped": stopped}
 
-    def _rows(self, *, strict=False) -> tuple[list, bool]:
-        """Bounded validation; strict consumers cannot skip ambiguous records."""
+    def _rows(self, *, strict=False, dropped=None) -> tuple[list, bool]:
+        """Bounded validation; strict consumers cannot skip ambiguous records.
+
+        A caller that must fail closed can pass ``dropped``; identities of
+        records whose dispatch marker cannot be read are appended to it.
+        """
         maximum = self.policy.name_processing_limit
         try:
             if strict:
@@ -384,7 +390,11 @@ class CiRequests:
                     return [], True
                 # Without a valid dispatch marker there is no evidence that a
                 # CI run may have been spent, and no instant to date the
-                # request by, so the request is not listed at all.
+                # request by, so the request is not listed at all. A caller
+                # answering an exact-head question must still know that an
+                # attempt may exist here.
+                if dropped is not None:
+                    dropped.append(identity)
                 continue
             if record is None:
                 # No usable outcome: the adapter attempt began and its result

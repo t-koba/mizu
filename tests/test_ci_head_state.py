@@ -263,6 +263,14 @@ class CiHeadStateTests(Fixture):
         self.assertTrue(row["no_evidence"])
         self.assertTrue(row["may_be_incomplete"])
 
+    def test_unreadable_head_dispatch_marker_is_incomplete(self):
+        head = self.receipt(SHA)
+        identity = self.request(SHA, head)
+        CiRequests(self.project.root)._path(identity, "dispatch").write_text("{not-valid-json")
+        row = self.facts()[0]
+        self.assertTrue(row["no_evidence"])
+        self.assertTrue(row["may_be_incomplete"])
+
     def test_invalid_run_identity_is_incomplete_and_not_a_run(self):
         self.receipt(SHA)
         self.cache(failures={"main": [{"sha": SHA, "check": "unit", "run": "bad\nrun"}]})

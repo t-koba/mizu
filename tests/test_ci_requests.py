@@ -906,6 +906,15 @@ class CiRequestTests(Fixture):
         with self.assertRaises(Denied):
             store.matching([publication_id], not_before=dt.datetime(2026, 10, 1))
 
+    def test_matching_fails_closed_for_unreadable_dispatch_marker(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        identity = request_id(publication_id, SHA, ["ci"])
+        mkdir(store.root)
+        store._path(identity, "dispatch").write_text("{not-valid-json")
+        found = store.matching([publication_id], not_before=dt.date(2026, 10, 1))
+        self.assertEqual(found, {"items": [], "incomplete": True})
+
     def test_persisted_covered_revisions_require_positive_integer(self):
         publication_id = self.receipt["publication_id"]
         timestamp = "2026-10-20T23:59:00+00:00"

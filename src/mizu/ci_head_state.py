@@ -23,7 +23,8 @@ Trust: local records and adapter-supplied cache rows are untrusted evidence.
 Failure: an unreadable ref or source, an invalid page, a stopped scan, an
 exact-head page truncated so another publication ID for that head could be
 hidden, a head-specific request scan that cannot establish the publication
-window or stops before passing it, or a reached identity cap sets
+window, stops before passing it, or finds an unreadable dispatch record, or a
+reached identity cap sets
 ``may_be_incomplete``. Page fullness after that window or on unrelated records
 never flags the exact head, and missing evidence is never a passing verdict.
 """
