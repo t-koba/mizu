@@ -5,6 +5,7 @@ Offline only: the adapter is a local double, no provider, no publication.
 import dataclasses
 import datetime as dt
 import json
+import shutil
 import sys
 import uuid
 from unittest.mock import patch
@@ -927,6 +928,20 @@ class CiRequestTests(Fixture):
                              {"items": [], "incomplete": True})
         with self.assertRaises(Denied):
             store.matching([publication_id], not_before=dt.datetime(2026, 10, 1))
+
+    def test_matching_distinguishes_missing_ledger_from_unreadable_path(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        window = dt.date(2026, 10, 1)
+        missing = CiRequests(self.project.root / "absent-project")
+        self.assertEqual(missing.matching([publication_id], not_before=window),
+                         {"items": [], "incomplete": False})
+        mkdir(store.root.parent)
+        if store.root.exists():
+            shutil.rmtree(store.root)
+        store.root.write_text("not a directory")
+        self.assertEqual(store.matching([publication_id], not_before=window),
+                         {"items": [], "incomplete": True})
 
     def test_matching_fails_closed_for_unreadable_dispatch_marker(self):
         store = CiRequests(self.project.root)

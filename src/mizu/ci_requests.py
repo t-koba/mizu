@@ -391,7 +391,9 @@ class CiRequests:
         except FileNotFoundError:
             return [], False
         except NotADirectoryError:
-            return [], strict
+            # The evidence root exists but is not a directory: this is an
+            # unreadable source, not proof that no request was ever made.
+            return [], True
         except OSError as exc:
             raise Denied("CI request evidence is unavailable") from exc
         rows = []
