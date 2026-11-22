@@ -92,7 +92,10 @@ class CheckJobIndexTests(Fixture):
         with self.project.ledger.read('check_jobs', locked=False) as db:
             rebuilt = db.execute('SELECT seq, role, job_id, created_at '
                                  'FROM check_completion_changes').fetchall()
+            indexes = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
         self.assertEqual(rebuilt, changes)
+        self.assertNotIn('check_completion_changes_created', indexes)
         self.assertEqual(self.project.ledger.snapshot('check_jobs'), expected)
 
     def test_rebuild_changes_generation_without_changing_the_snapshot(self):

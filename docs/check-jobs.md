@@ -178,12 +178,15 @@ acceptance. Terminal results already in the opening prompt are not repeated,
 and each new result is injected at most once per unit. Managed Pi captures the
 completion index high-water with the opening prompt, so a long pre-opening
 history of seeded or acknowledged results cannot consume a boundary or delay a
-fresh result. It then follows the writer-maintained creation index in bounded
-pages: the cursor advances by an exclusive (creation time, job id) key through
-a covering index, so each boundary reads one page instead of sorting the whole
-window. Pages are ordered newest-first by job creation time with a job-id
-tie-break, walking older rows of each captured completion-sequence window
-before a new high opens a window. The captured position is the sequence high-water bound to the check-job
+fresh result. It then reads one sequence-fenced window per completion index
+position: a bounded read selects the eligible `check_completion_changes` rows
+by role and sequence, sorts only that fenced window, and advances the cursor by
+an exclusive `(creation time, job id)` row-value key. Work stays proportional
+to the captured window even with much older retained completions, including a
+completion created before that history but finished inside the window. Pages
+are ordered newest-first by job creation time with a job-id tie-break, walking
+older rows of each captured completion-sequence window before a new high opens
+a window. The captured position is the sequence high-water bound to the check-job
 index generation: the high-water only seals which window is eligible, while the
 generation changes when that index is recreated or rebuilt. A live cursor that
 sees a different generation re-enrolls from the start of the rebuilt index and

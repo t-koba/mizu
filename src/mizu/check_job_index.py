@@ -34,7 +34,6 @@ CREATE TABLE check_completion_changes(
     created_at TEXT);
 CREATE INDEX check_completion_changes_role ON check_completion_changes(role, seq);
 CREATE UNIQUE INDEX check_completion_changes_job ON check_completion_changes(job_id);
-CREATE INDEX check_completion_changes_created ON check_completion_changes(role, created_at DESC, job_id DESC, seq);
 CREATE INDEX check_jobs_role ON check_jobs(role, valid, acknowledged);
 CREATE INDEX check_jobs_shared ON check_jobs(shared_job);
 CREATE INDEX check_jobs_shared_key ON check_jobs(valid, shared_key, status, passed, shared_job, detached, cancel_requested, created_at);
@@ -155,7 +154,7 @@ class _CheckJobs(Domain):
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 10, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 11, _TABLES)
 
 
 def entry_key(name: str) -> str:
