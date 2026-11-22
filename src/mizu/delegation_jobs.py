@@ -18,8 +18,9 @@ SHA256([owner, key]); each contains owner/key, immutable request digest, status,
 runner token, stable child run identity, execution outcome, request, result and
 result digest. The run identity is a random lowercase 32-hex string generated
 once on first start, retained in terminal tombstones for crash reconciliation,
-and never exposed in owner views. The supervisor-only binding pins the exact
-run-directory path/device/inode, systemd unit/cgroup and full rootless-Podman
+and omitted from ledger owner views; the async start and join responses
+expose the same identity to the owning role. The supervisor-only binding pins
+the exact run-directory path/device/inode, systemd unit/cgroup and full rootless-Podman
 name/64-hex-ID/UID inventory. A provisioning intent pins one synthetic fixture
 container's expected bounded safe name/UID/run-id marker/image/config before
 creation; the marker must equal run_id while the name is any bounded safe name,
