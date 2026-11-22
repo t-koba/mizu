@@ -13,6 +13,7 @@ from unittest.mock import patch
 from support import Fixture, ROOT, ScriptDriver
 from mizu import acceptance, check_jobs, pi as pi_module
 from mizu.errors import Denied
+from mizu.fs import lock
 from mizu.pi import CheckSteer, PiDriver
 from mizu.runtime import Engine
 from mizu.unit_prompts import prompt_for
@@ -127,8 +128,12 @@ class SteerTests(SteerFixture):
             lambda ctx, prompt, profile: captured.append((ctx, json.loads(prompt)))))
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         context, prompt = captured[-1]
-        self.assertEqual(context.check_steer_seq, check_jobs.completion_high_water(self.project))
+        position = check_jobs.completion_position(self.project)
+        self.assertEqual((context.check_steer_seq, context.check_steer_generation),
+                         (position.seq, position.generation))
         self.assertGreater(context.check_steer_seq, 0)
+        self.assertEqual(len(position.generation), 32)
+        self.assertEqual(check_jobs.completion_high_water(self.project), position.seq)
         self.assertEqual(context.check_steer_seen,
                          frozenset(row['id'] for row in prompt['check_jobs']
                                    if row['status'] in check_jobs.TERMINAL_WAKE_STATUSES))
@@ -156,6 +161,8 @@ class SteerTests(SteerFixture):
         # The cursor seals the pre-opening high; the raced completion is in the
         # bounded prompt, so `already` filters it instead of a duplicate steer.
         self.assertEqual(context.check_steer_seq, 1)
+        self.assertEqual(context.check_steer_generation,
+                         check_jobs.completion_position(self.project).generation)
         self.assertIn(captured['raced'], context.check_steer_seen)
         channel = RecordingChannel()
         pump = CheckSteer(context, channel, context.check_steer_seen)
@@ -246,15 +253,15 @@ class SteerTests(SteerFixture):
     def test_preopening_history_cannot_delay_or_repeat_a_fresh_result(self):
         count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 5
         old = [self.job(f'printf old-{index}') for index in range(count)]
-        captured = check_jobs.completion_high_water(self.project)
-        self.assertEqual(captured, count)
+        captured = check_jobs.completion_position(self.project)
+        self.assertEqual(captured.seq, count)
         # Both prompt seeding and explicit acknowledgement are older history;
         # neither consumes this unit's first incremental boundary.
         old_ids = {job['id'] for job in old}
         check_jobs.acknowledge(self.project, 'worker', old_ids)
         presented = set(old_ids)
         fresh = self.job('printf fresh')
-        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        cursor = check_jobs.CheckSteerCursor(floor=captured.seq, generation=captured.generation)
         batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
         self.assertEqual([row['id'] for row in batch], [fresh['id']])
         presented.add(fresh['id'])
@@ -268,17 +275,77 @@ class SteerTests(SteerFixture):
         self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
         self.assertFalse(check_jobs.read(self.project, fresh['id'])['acknowledged'])
         context = self.context()
-        context.check_steer_seq = captured
+        context.check_steer_seq = captured.seq
+        context.check_steer_generation = captured.generation
         channel = RecordingChannel()
         pump = CheckSteer(context, channel, presented)
-        self.assertEqual(pump.cursor.floor, captured)
+        self.assertEqual(pump.cursor.floor, captured.seq)
+        self.assertEqual(pump.cursor.generation, captured.generation)
         pump.observe({'type': 'agent_start'})
         self.assertEqual(channel.sent, [])
 
+    def test_rebuild_re_enrolls_a_live_position_without_repeating_presented_ids(self):
+        jobs = [self.job(f'printf old-{index}') for index in range(4)]
+        # Acknowledge and release three of the four completions, leaving a gap
+        # below seq 4 that a rebuild will renumber.
+        check_jobs.acknowledge(self.project, 'worker', {job['id'] for job in jobs[:3]})
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            for job in jobs[:3]:
+                record = check_jobs.raw_read(self.project, job['id'])
+                acceptance.write_job(self.project, job['id'],
+                                     {**record, 'status': 'cancelled', 'acknowledged': True})
+            check_jobs._release_locked(self.project, [job['id'] for job in jobs[:3]])
+        position = check_jobs.completion_position(self.project)
+        self.assertEqual(position.seq, 4)
+        self.assertEqual(len(position.generation), 32)
+        for job in jobs[:3]:
+            self.assertFalse((check_jobs.root(self.project) / job['id']).exists())
+
+        presented = {job['id'] for job in jobs}
+        cursor = check_jobs.CheckSteerCursor(floor=position.seq, generation=position.generation)
+        # Drive the boundary until the stale window is sealed at the old high.
+        self.assertEqual(check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor), [])
+        self.assertEqual(check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor), [])
+        self.assertEqual((cursor.floor, cursor.generation), (position.seq, position.generation))
+
+        self.project.ledger.rebuild('check_jobs')
+        rebuilt = check_jobs.completion_position(self.project)
+        self.assertEqual(rebuilt.seq, 1)
+        self.assertNotEqual(rebuilt.generation, position.generation)
+        fresh = self.job('printf fresh-after-rebuild')
+        fresh_position = check_jobs.completion_position(self.project)
+        self.assertEqual(fresh_position.seq, 2)
+        self.assertEqual(fresh_position.generation, rebuilt.generation)
+
+        # A legacy floor-only position cannot prove where its 4 came from; it
+        # must not silently hide the new seq 2 behind that stale floor.
+        legacy = check_jobs.CheckSteerCursor(floor=position.seq)
+        self.assertEqual([row['id'] for row in check_jobs.steer_pending(
+            self.project, 'worker', presented, cursor=legacy)], [fresh['id']])
+
+        delivered = []
+        for _ in range(4):
+            batch = check_jobs.steer_pending(self.project, 'worker', presented, cursor=cursor)
+            for row in batch:
+                self.assertNotIn(row['id'], delivered)
+                self.assertNotIn(row['id'], {job['id'] for job in jobs})
+                delivered.append(row['id'])
+                presented.add(row['id'])
+        self.assertEqual(delivered, [fresh['id']])
+        self.assertEqual(cursor.generation, fresh_position.generation)
+        # The rebuilt seq is lower than the stale sealed floor, but
+        # re-enrollment read it again: presented IDs were filtered, not lost.
+        self.assertLess(fresh_position.seq, position.seq)
+        self.assertEqual(cursor.floor, fresh_position.seq)
+        wake = check_jobs.root(self.project) / fresh['id'] / 'wake.json'
+        self.assertFalse(wake.exists())
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(check_jobs.read(self.project, fresh['id'])['acknowledged'])
+
     def test_newest_first_pages_match_full_discovery_and_drain_in_order(self):
         count = check_jobs.MAX_CHECK_STEER_CHANGE_ROWS + 9
-        captured = check_jobs.completion_high_water(self.project)
-        self.assertEqual(captured, 0)
+        captured = check_jobs.completion_position(self.project)
+        self.assertEqual(captured.seq, 0)
         base = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
         ticks = itertools.count()
 
@@ -290,7 +357,7 @@ class SteerTests(SteerFixture):
         expected = [job['id'] for job in reversed(jobs)]
         full = check_jobs.steer_pending(self.project, 'worker', ())
         self.assertEqual(len(full), check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)
-        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        cursor = check_jobs.CheckSteerCursor(floor=captured.seq, generation=captured.generation)
         first = check_jobs.steer_pending(self.project, 'worker', (), cursor=cursor)
         self.assertEqual([row['id'] for row in first], [row['id'] for row in full])
         presented = {row['id'] for row in first}
@@ -313,8 +380,8 @@ class SteerTests(SteerFixture):
         self.config = dataclasses.replace(
             self.config, limits=dataclasses.replace(self.config.limits, check_pending=count + 4))
         self.project.config = self.config
-        captured = check_jobs.completion_high_water(self.project)
-        self.assertEqual(captured, 0)
+        captured = check_jobs.completion_position(self.project)
+        self.assertEqual(captured.seq, 0)
         base = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
         ticks = itertools.count()
 
@@ -338,7 +405,7 @@ class SteerTests(SteerFixture):
         full = check_jobs.steer_pending(self.project, 'worker', ())
         self.assertEqual([row['id'] for row in full],
                          expected[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS])
-        cursor = check_jobs.CheckSteerCursor(floor=captured)
+        cursor = check_jobs.CheckSteerCursor(floor=captured.seq, generation=captured.generation)
         presented, delivered, pages = set(), [], []
         real_read = check_jobs._steer_changes
 

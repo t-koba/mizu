@@ -414,7 +414,11 @@ class EngineRunMixin:
                 # Capture the completion index with the opening prompt: its
                 # terminal IDs are seeded as seen and filtered as `already`,
                 # while changes omitted by the bounded prompt stay eligible.
-                context.check_steer_seq = check_jobs.completion_high_water(project)
+                # The generation binds this position to the index generation,
+                # so a rebuild re-enrolls instead of trusting a stale seq.
+                position = check_jobs.completion_position(project)
+                context.check_steer_seq = position.seq
+                context.check_steer_generation = position.generation
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 # A pin must be durable before dispatch-adjacent delivery state
                 # changes, so a setup failure cannot consume an unseen wake.

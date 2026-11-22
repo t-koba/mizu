@@ -95,6 +95,22 @@ class CheckJobIndexTests(Fixture):
         self.assertEqual(rebuilt, changes)
         self.assertEqual(self.project.ledger.snapshot('check_jobs'), expected)
 
+    def test_rebuild_changes_generation_without_changing_the_snapshot(self):
+        job = self.queue()
+        self.project.set_control(paused=False)
+        self.run_all()
+        expected = self.project.ledger.snapshot('check_jobs')
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            first = ledger.generation(db, 'check_jobs')
+        self.assertEqual(len(first), 32)
+        self.project.ledger.rebuild('check_jobs')
+        with self.project.ledger.read('check_jobs', locked=False) as db:
+            second = ledger.generation(db, 'check_jobs')
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(second), 32)
+        self.assertEqual(self.project.ledger.snapshot('check_jobs'), expected)
+        self.assertEqual(acceptance.discover(self.project)[0][job['id']]['status'], 'completed')
+
     def test_release_removes_the_row_with_the_directory(self):
         job = self.queue()
         self.build()

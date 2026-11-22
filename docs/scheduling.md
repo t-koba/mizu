@@ -1120,11 +1120,16 @@ opening prompt and reads only later indexed changes in bounded pages ordered
 newest-first by job creation time with a job-id tie-break; the cursor advances
 by an exclusive (creation time, job id) key through a covering index, so each
 boundary reads one page instead of sorting the whole window. The captured
-completion sequence high-water only seals which window is eligible, and each
-window drains before a new high opens another: work per boundary
-stays bounded, unchanged boundaries are constant-cost, and pre-opening history
-cannot delay or repeat a fresh result. A completion that races into the prompt
-is seeded as seen and filtered by that position, never steered twice. Managed
+completion position binds the sequence high-water to the check-job index
+generation: the high-water seals which window is eligible, and each window
+drains before a new high opens another. A rebuilt index gets a new generation;
+a live cursor re-enrolls from its start and uses the unit's already-presented
+IDs to avoid repeats, so a reused sequence cannot hide a fresh result. A
+position from a private in-memory repair is rejected by the durable index.
+Work per boundary stays bounded, unchanged boundaries are constant-cost, and
+pre-opening history cannot delay or repeat a fresh result. A completion that
+races into the prompt is seeded as seen and filtered by that position, never
+steered twice. Managed
 Pi writes no wake marker, so the independent wake and the marker written by a
 later dispatch stay unchanged. Managed pi-durable submits the notification as a
 durable steer input and marks that result's automatic wake as delivered for the

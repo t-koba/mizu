@@ -170,6 +170,33 @@ class LedgerTests(Fixture):
         self.assertEqual(replayed, [other["id"]])
         self.assertEqual(self.store.get(item["id"])["id"], item["id"])
 
+    def test_rebuild_changes_generation_but_not_the_snapshot(self):
+        self.item("First")
+        expected = self.project.ledger.snapshot("items")
+        with self.project.ledger.read("items", locked=False) as db:
+            first = ledger_module.generation(db, "items")
+        self.assertEqual(len(first), 32)
+        self.project.ledger.rebuild("items")
+        with self.project.ledger.read("items", locked=False) as db:
+            second = ledger_module.generation(db, "items")
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.project.ledger.snapshot("items"), expected)
+
+    def test_complete_index_without_generation_gets_one_for_readers(self):
+        self.item("First")
+        path = self.project.root / ledger_module.NAME
+        with contextlib.closing(sqlite3.connect(path)) as db, db:
+            db.execute("DELETE FROM meta WHERE key='items.generation'")
+        expected = self.project.ledger.snapshot("items")
+        with self.project.ledger.read("items", locked=False) as db:
+            private = ledger_module.generation(db, "items")
+        self.assertEqual(len(private), 32)
+        # The locked recovery persists a generation into the durable index.
+        with self.project.ledger.read("items", locked=True) as db:
+            durable = ledger_module.generation(db, "items")
+        self.assertEqual(len(durable), 32)
+        self.assertEqual(self.project.ledger.snapshot("items"), expected)
+
     def test_read_recomputes_usability_from_backed_up_generation(self):
         item = self.item()
         self.item("Other")

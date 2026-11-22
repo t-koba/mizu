@@ -21,6 +21,7 @@ from .admission import check_slot_exclusion
 from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, safe_read_managed, write_json, loads_finite, DIGEST, SCRIPT_MAX
+from .ledger import generation as _domain_generation
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, _digest, write_job
 
@@ -2003,17 +2004,34 @@ def _completion_high(db):
     return row[0] if row and row[0] is not None else 0
 
 
-def completion_high_water(project):
-    """Current completion-index position, or 0 when no change is indexed.
+@dataclasses.dataclass(frozen=True)
+class CompletionPosition:
+    """One completion-index position: sequence high-water plus domain generation."""
+    seq: int
+    generation: str
 
-    Schema: a non-negative integer seq shared by all roles. Bounds: one indexed
-    aggregate read. Trust: writer-maintained index only. Captured with the
-    opening prompt, this seals all earlier history for that unit's steer cursor
-    without acknowledging output or changing a wake. Failure: an unavailable
-    index fails the read, never a silent fallback to zero.
+
+def completion_position(project):
+    """Current completion-index position, or seq 0 when no change is indexed.
+
+    Schema: a non-negative integer seq shared by all roles, bound to the
+    ``check_jobs`` generation token of the index that produced it. Bounds: one
+    aggregate read in one index read transaction. Trust: writer-maintained
+    durable index only. Captured with the opening prompt, this seals earlier
+    history for that unit's steer cursor without acknowledging output or
+    changing a wake. A reader without a usable durable index builds a private
+    in-memory copy with its own token; such a position is rejected by the
+    durable index on the next read, so it can never become a stale resumable
+    position. Failure: an unavailable index fails the read, never a silent
+    fallback to zero.
     """
     with project.ledger.read('check_jobs', locked=False) as db:
-        return _completion_high(db)
+        return CompletionPosition(_completion_high(db), _domain_generation(db, 'check_jobs'))
+
+
+def completion_high_water(project):
+    """Seq-only compatibility view of :func:`completion_position`."""
+    return completion_position(project).seq
 
 
 @dataclasses.dataclass
@@ -2023,20 +2041,39 @@ class CheckSteerCursor:
     ``floor`` covers every seq already accounted for (the opening prompt's
     captured high-water at first); ``ceiling`` is the high-water of the active
     window; ``page_after`` is the exclusive (created_at, job_id) key of the
-    next page. Pages walk newest-first by job creation time with a job-id
-    tie-break through the whole window before it is sealed by moving ``floor``
-    to ``ceiling``, so older unread rows are never skipped and a new high
-    starts a fresh window. Buffered IDs drain before another page is read.
+    next page. ``generation`` binds the window to one index generation. Pages
+    walk newest-first by job creation time with a job-id tie-break through the
+    whole window before it is sealed by moving ``floor`` to ``ceiling``, so
+    older unread rows are never skipped and a new high starts a fresh window.
+    Buffered IDs drain before another page is read. A rebuilt index has a new
+    generation and re-enrolls the cursor from its start; the caller's
+    ``already`` set keeps IDs presented before the repair from repeating.
     """
     floor: int = 0
     ceiling: int = 0
     page_after: tuple[str, str] | None = None
     candidates: list = dataclasses.field(default_factory=list)
+    generation: str = ''
 
 
 def _steer_changes(project, role, cursor):
     """Read one bounded page of this role's creation-ordered completions."""
     with project.ledger.read('check_jobs', locked=False) as db:
+        generation = _domain_generation(db, 'check_jobs')
+        # A changed generation means the seq numbers were rebuilt. Re-enroll
+        # from the start and let `already` filter what this unit presented
+        # before, rather than trusting a floor from the discarded index. A
+        # legacy floor-only cursor has no token to prove its origin, so a
+        # non-zero position is re-enrolled too. A position taken from a private
+        # repair carries that copy's token and never matches this one.
+        stale = (bool(cursor.generation) and cursor.generation != generation) or (
+            not cursor.generation and bool(cursor.floor or cursor.ceiling or cursor.page_after))
+        if stale:
+            cursor.floor = 0
+            cursor.ceiling = 0
+            cursor.page_after = None
+            cursor.candidates = []
+        cursor.generation = generation
         if cursor.page_after is None:
             high = _completion_high(db)
             if high <= cursor.floor:

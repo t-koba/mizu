@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import secrets
 import sqlite3
 import stat
 from pathlib import Path
@@ -128,8 +129,18 @@ class Ledger:
         schema = values.get(f"{domain.name}.schema")
         return None if schema is None else (schema, values.get(f"{domain.name}.complete"))
 
+    @staticmethod
+    def _generation(db, name: str):
+        """Domain generation token, or None when meta is unavailable."""
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (f"{name}.generation",)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+
     def _usable(self, db, domain: Domain) -> bool:
-        return self._state(db, domain) == (domain.schema, 1)
+        return (self._state(db, domain) == (domain.schema, 1)
+                and self._generation(db, domain.name) is not None)
 
     def _pending(self, db, names):
         marks = ", ".join("?" * len(names))
@@ -156,7 +167,8 @@ class Ledger:
         """Create or resume one domain's index; restartable when resumable."""
         domain, source = self.domains[name]
         state = self._state(db, domain)
-        if state == (domain.schema, 1):
+        generation = self._generation(db, name)
+        if state == (domain.schema, 1) and generation is not None:
             return
         db.execute("BEGIN IMMEDIATE")
         if "domain" not in [row[1] for row in db.execute("PRAGMA table_info(intents)")] and \
@@ -175,8 +187,16 @@ class Ledger:
             for statement in filter(str.strip, domain.tables.split(";")):
                 db.execute(statement)
             db.execute("DELETE FROM intents WHERE domain=?", (name,))
-            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?), (?, 0)",
-                       (f"{name}.schema", domain.schema, f"{name}.complete"))
+            # The generation changes in the same transaction as the tables: a
+            # position captured against the old rows cannot resume here.
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?), (?, 0), (?, ?)",
+                       (f"{name}.schema", domain.schema, f"{name}.complete",
+                        f"{name}.generation", secrets.token_hex(16)))
+        elif generation is None:
+            # An already complete index from before generations still gets a
+            # durable token, so every reader can bind a position to one.
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                       (f"{name}.generation", secrets.token_hex(16)))
         if domain.resumable:
             db.execute("COMMIT")
             skip = domain.done(db)
@@ -301,6 +321,19 @@ class Ledger:
                 yield
             finally:
                 self._repair(db, [name], recover=True)
+
+
+def generation(db, name: str) -> str:
+    """One domain's generation token, or '' when the meta row is absent."""
+    try:
+        value = Ledger._generation(db, name)
+    except sqlite3.DatabaseError as exc:
+        raise Denied("Ledger index unreadable") from exc
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise Denied("Ledger index unreadable")
+    return value
 
 
 def rows(db, sql, params=()):

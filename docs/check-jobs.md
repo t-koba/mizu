@@ -183,12 +183,18 @@ pages: the cursor advances by an exclusive (creation time, job id) key through
 a covering index, so each boundary reads one page instead of sorting the whole
 window. Pages are ordered newest-first by job creation time with a job-id
 tie-break, walking older rows of each captured completion-sequence window
-before a new high opens a window. The captured sequence high-water only seals
-which window is eligible; this creation order gives the same first batch as
-full discovery; retained acknowledged completions are excluded before the page
-limit so they cannot hide an unread result. The captured position
-still covers a completion that races into the prompt; the seeded IDs filter it
-out instead of steering it twice. Unchanged boundaries touch no job records.
+before a new high opens a window. The captured position is the sequence high-water bound to the check-job
+index generation: the high-water only seals which window is eligible, while the
+generation changes when that index is recreated or rebuilt. A live cursor that
+sees a different generation re-enrolls from the start of the rebuilt index and
+relies on the unit's already-presented IDs to avoid repeats, so a reused
+sequence cannot suppress a fresh result. This creation order gives the same
+first batch as full discovery; retained acknowledged completions are excluded
+before the page limit so they cannot hide an unread result. The captured
+position still covers a completion that races into the prompt; the seeded IDs
+filter it out instead of steering it twice. A private in-memory repair carries
+its own generation and is rejected by the durable index, so it cannot become a
+stale resumable position. Unchanged boundaries touch no job records.
 The same `check_job` capability and `roles.<name>.check_result_wake` policy
 gate this path. Neither engine polls, sleeps, acknowledges output or needs a
 wake to keep the unit running; output stays behind `action=result`. Managed Pi
