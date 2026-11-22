@@ -421,11 +421,15 @@ class WaitResolutionTests(Fixture):
         with patch.object(Publication, 'receipt_for_key',
                           wraps=Publication.receipt_for_key) as lookups:
             self.reconcile()
-        # Advisory discovery and the locked transition each need one exact
-        # lookup, not a lookup for every older unpublished descendant.
-        self.assertEqual(lookups.call_count, 2)
+        # Advisory discovery, liveness and the locked transition each need one
+        # exact lookup, not a lookup for every older unpublished descendant.
+        self.assertEqual(lookups.call_count, 3)
+        # Advisory discovery and the locked transition observe the superseding
+        # head; liveness resolves the wait's own pinned publication.
+        self.assertEqual([call.args[2] for call in lookups.call_args_list[:2]],
+                         [newest['code_digest']] * 2)
+        self.assertEqual(lookups.call_args_list[2].args[2], item['wait']['code_digest'])
         for call in lookups.call_args_list:
-            self.assertEqual(call.args[2], newest['code_digest'])
             self.assertEqual(call.args[1], item['wait']['branch'])
         opened = self.store.get(item['id'])
         self.assertEqual(opened['status'], 'open')

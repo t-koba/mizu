@@ -706,12 +706,14 @@ a delivery event, an acknowledgement, or a ledger transition. A still-valid
 observation applies immediately to the same held wait. Missing evidence leaves
 ordinary blocked and terminal handling unchanged.
 
-A held `ci` or `publication_ci` wait whose pinned SHA is not any injected branch
-head, has no recorded CI request and no run in the bounded poll-state maps is
-`impossible` in blocked-work and ready-work liveness with reason code
-`ci_commit_unreachable`. Proof is local and exact: any current CI evidence, an
-unresolvable receipt route, an empty/unreadable/invalid ref inventory, an
-incomplete request ledger or malformed run maps leave the wait `pending`. This
+A held `ci` or `publication_ci` wait is `impossible` in blocked-work and
+ready-work liveness only when the operator's VCS adapter answers a bounded
+internal `ci_reachable` query for the exact pinned revision with `no` and a
+reason; that adapter reason is shown verbatim to the holder. `yes` and
+`unknown` answers, adapter failures, current CI evidence, an unresolvable
+receipt route and bounded read errors leave the wait `pending`. The adapter
+owns reachability: Mizu infers nothing from branch heads, CI requests, poll
+run maps or other local facts, and makes no coverage claim of its own. This
 is a holder-action replanning signal only; it never dispatches, polls,
 acknowledges or transitions work, and the holder must still append a reasoned
 `blocked` → `open` revision.

@@ -237,7 +237,10 @@ class CiChangesTests(CiWaitFixture):
             if request["op"] == "status":
                 self.store.transition(item["id"], expected_rev=item["rev"], status="open", actor="worker")
             return self.adapter(settings, request, **kwargs)
-        self.assertEqual(self.tick(adapter)["observed"], 0)
+        # Reachability is a separate adapter query, not part of this status race.
+        with patch("mizu.ci_waits.vcs.ci_reachable",
+                   return_value={"answer": "unknown", "reason": ""}):
+            self.assertEqual(self.tick(adapter)["observed"], 0)
         self.assertFalse(ci_waits._path(self.store, item).exists())
         self.tick()  # polling writer removes observations for the released wait
         self.assertEqual(list((self.project.root / "ci-wait-observations").iterdir()), [])

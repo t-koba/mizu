@@ -867,6 +867,59 @@ def check_ci_name(check) -> str:
     return check
 
 
+#: Internal liveness query for a pinned revision. It is deliberately absent
+#: from ``READ_OPS`` and the role ``vcs_read`` schema: only the host calls it.
+CI_REACHABILITY_OP = "ci_reachable"
+#: Maximum characters in an adapter reachability reason.
+CI_REACHABILITY_REASON_MAX = 256
+
+
+def parse_ci_reachability(data: dict, *, sha: str) -> dict:
+    """Validate one bounded adapter answer about a pinned revision.
+
+    Schema: ``{"sha", "answer", "reason"}``; ``reason`` may be absent only
+    for a non-``no`` answer and always normalizes to a string. ``sha`` must
+    echo the requested 40/64 lowercase hex revision exactly. ``answer`` is
+    ``yes``, ``no`` or ``unknown``. A ``no`` reason is 1-256 characters;
+    other answers may carry the same bounded reason or an empty one. Text
+    rejects newline/NUL, C0/DEL/C1/bidi controls. Trust: external-untrusted
+    adapter answer, never a local inference. Failure: ``Denied`` on any
+    other shape; no fallback or inferred answer.
+    """
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid CI reachability revision")
+    if (not isinstance(data, dict)
+            or set(data) not in ({"sha", "answer", "reason"}, {"sha", "answer"})):
+        raise Denied("Invalid CI reachability answer fields")
+    answer = data.get("answer")
+    if not isinstance(answer, str) or answer not in ("yes", "no", "unknown"):
+        raise Denied("Invalid CI reachability answer")
+    if data["sha"] != sha:
+        raise Denied("CI reachability must echo the requested revision")
+    reason = data.get("reason", "")
+    if not isinstance(reason, str) or len(reason) > CI_REACHABILITY_REASON_MAX:
+        raise Denied("Invalid CI reachability reason")
+    if answer == "no" and not reason:
+        raise Denied("Unreachable CI revision requires a reason")
+    _reject_terminal_controls(reason, "Invalid CI reachability reason")
+    return {"answer": answer, "reason": reason}
+
+
+def ci_reachable(settings: dict, sha: str) -> dict:
+    """Ask the configured adapter once whether a pinned revision is reachable.
+
+    The adapter owns the answer: Mizu infers nothing from refs, requests or
+    poll state, and the returned reason is external-untrusted text. One
+    ``{"op": "ci_reachable", "sha": sha}`` request under the operator-owned
+    ``timeout_seconds``/``max_bytes`` bounds; no retries. Failure: ``Denied``
+    on an invalid revision, an unconfigured adapter or a malformed reply.
+    """
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid CI reachability revision")
+    data = invoke(settings, {"op": CI_REACHABILITY_OP, "sha": sha})
+    return parse_ci_reachability(data, sha=sha)
+
+
 def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
              preserve_status_rows: bool = False) -> dict:
     """Invoke a read-only adapter operation from ``READ_OPS``.

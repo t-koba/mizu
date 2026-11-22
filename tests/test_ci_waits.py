@@ -1629,7 +1629,9 @@ class HolderOnlyCiWaitTests(CiWaitFixture):
         return self.block(), self.block("publication", wait=self.publication_wait)
 
     def test_exact_empty_inventory_makes_both_existing_waits_holder_ready(self):
-        with patch("mizu.vcs.invoke") as adapter:
+        with (patch("mizu.vcs.invoke") as adapter,
+              patch("mizu.ci_waits.vcs.ci_reachable",
+                    return_value={"answer": "yes", "reason": ""})):
             items = self.block_both()
             self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
             reader = Mock(return_value=self.empty_inventory())
@@ -1660,7 +1662,9 @@ class HolderOnlyCiWaitTests(CiWaitFixture):
     def test_same_live_wait_rewrite_is_immediately_ready_without_adapter_calls(self):
         items = self.block_both()
         self.observe()
-        with patch("mizu.vcs.invoke") as adapter:
+        with (patch("mizu.vcs.invoke") as adapter,
+              patch("mizu.ci_waits.vcs.ci_reachable",
+                    return_value={"answer": "yes", "reason": ""})):
             refreshed = []
             for item, wait in zip(items, (self.wait, self.publication_wait)):
                 record = self.store.transition(item["id"], expected_rev=item["rev"], status="blocked",

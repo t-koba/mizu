@@ -2309,6 +2309,12 @@ exact `code_digest`, `branch` or `published_sha` filters and returns one bounded
 `external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
 are named in tool responses.
 
+Held CI waits also use a host-only internal `ci_reachable` adapter query for
+the exact pinned revision; it is not a `vcs_read` op and is never offered in a
+role tool schema. The adapter owns that liveness answer; see the CI liveness
+response contract in the adapter response section below and
+[CI waits](scheduling.md#exact-sha-work-item-ci-waits).
+
 `[ci_requests]` owns the local evidence read budgets shared by the `ci_requests` daily listing and
 `ci_costs` view. Omission uses these defaults; unknown keys, booleans and
 non-integers are rejected.
@@ -2661,6 +2667,21 @@ that page (`namespace_conflict: true`, `namespace: null`); an absent namespace
 is also null, never inferred. The provider-specific `workflow_run_id`, `job_id`,
 `run_attempt`, and `repository` status fields are not accepted. Previously
 retained evidence is not rewritten.
+
+`ci_reachable` is the internal liveness query used only by held CI waits, not
+a role `vcs_read` op. The host sends exactly
+`{"op": "ci_reachable", "sha": <40- or 64-lowercase-hex pinned revision>}`
+under the existing `timeout_seconds` and `max_bytes` bounds, once and without
+retry. The adapter replies
+`{"sha": <the same requested revision>, "answer": "yes"|"no"|"unknown", "reason": <string>}`;
+`reason` may be omitted for `yes`/`unknown` (normalized to `""`) and is bounded
+to 256 characters without newline/NUL, C0/DEL/C1 or bidi controls. A `no`
+answer requires a nonempty reason. The adapter owns reachability: Mizu infers
+nothing from refs, dispatch records or poll state, and only a valid `no`
+answer makes a held wait liveness `impossible` with that exact reason. `yes`,
+`unknown`, malformed replies and adapter or transport failures leave the wait
+pending. The answer stays external-untrusted and is never served through a
+role tool.
 
 Costs join only a validated request and matching publication receipt/SHA, then
 status rows with that SHA and an exact execution `run` explicitly recorded in

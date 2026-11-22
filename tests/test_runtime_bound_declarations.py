@@ -757,6 +757,9 @@ DECLARATIONS = {
             'adapter startup / bounded host measurement-record read'),
     },
     'vcs.py': {
+        'CI_REACHABILITY_REASON_MAX': (
+            '256', 'format',
+            'VCS CI reachability / bounded adapter liveness reason characters'),
         'REF_CONTENT_MAX': (
             '4096', 'safety', 'vcs ref store / bounded local ref-content read'),
         'MAX_ARTIFACT_FIELD_NAMES': (
