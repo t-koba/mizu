@@ -119,6 +119,9 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 # the launch fence; handback requires a trusted live probe of child completion,
 # registered driver channels, their process groups and the pinned run directory.
 # A lost process leaves the job running forever; recovery never relaunches it.
+# Child edits are non-idempotent filesystem patches without per-edit durable
+# dedup identity, so a fresh owner cannot tell whether the last edit landed;
+# a fence alone cannot make a relaunch safe.
 inprocess_async = "Opt-in mizu_delegate async_mode=true plus mizu_delegate_join with the exact job id. Child roles are restricted to file edits (no exec/verify/materialize/MCP/native tools/delegation/consultation). External runner handback paths remain refused."
 
 # Inventory gaps that must be closed before runner integration or a pilot.

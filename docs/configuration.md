@@ -1619,6 +1619,10 @@ and returns the sealed child record (already carrying `run`) unchanged only
 after terminal execution and proven in-process handback. A missing `delegate_join` grant denies
 `async_mode=true` before any reservation. There is no external runner, fan-out
 or second concurrent child; external runner handback paths remain refused.
+A lost owner never relaunches the child: its edits are non-idempotent file
+patches without per-edit durable deduplication, so a successor cannot know
+whether the last edit landed. The durable reservation stays held rather
+than risk a duplicate patch.
 
 The private trusted-host API `DelegationJobs.workspace_start(project_root)` is a
 reservation-preparation critical section, not a runner or model tool. It takes
