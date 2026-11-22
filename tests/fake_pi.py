@@ -110,18 +110,14 @@ for raw in sys.stdin.buffer:
         # deliver it, then settle without a finish tool call (driver-level test).
         with (Path(effective["sessionDir"]).parent / "steers.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(command["message"] + "\n")
-        if scenario == "live-steer":
-            content = "LIVE " + command["message"]
-            turn_path = os.environ.get("MIZU_FAKE_PI_LIVE_TURN")
-            if turn_path:
-                with Path(turn_path).open("a", encoding="utf-8") as stream:
-                    stream.write(content + "\n")
-            emit({"type": "message_end", "message": {
-                "role": "assistant", "content": content,
-                "usage": {"input": 1, "output": 1}}})
+        content = "LIVE " + command["message"]
+        turn_path = os.environ.get("MIZU_FAKE_PI_LIVE_TURN")
+        if turn_path:
+            with Path(turn_path).open("a", encoding="utf-8") as stream:
+                stream.write(content + "\n")
+        emit({"type": "message_end", "message": {
+            "role": "assistant", "content": content,
+            "usage": {"input": 1, "output": 1}}})
         bridge("_request_done", {"sequence": 1})
-        if scenario == "live-steer":
-            emit({"type": "agent_settled"})
-            continue
-        emit({"type": "message_end", "message": {"role": "assistant", "content": "ok", "usage": {"input": 1, "output": 1}}})
         emit({"type": "agent_settled"})
+        continue
