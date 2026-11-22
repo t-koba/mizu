@@ -196,6 +196,56 @@ class UnreachableCiWaitTests(CiWaitFixture):
         self.assertEqual(scanned, [], "transition scanned the active index")
         self.assertEqual(plains, [(seed["id"], {"locked": False, "durable": True})])
 
+    def test_page_ready_hint_prescan_reads_only_the_blocked_ci_row(self):
+        seed = self.store.create(actor="worker", idempotency_key="scale-hints",
+                                 title="Scale hints")["record"]["work_item"]
+        extras = [{**seed, "id": f"wi_{i:032x}"} for i in range(1, 202)]
+        index_items(self.project.root, [self.item, seed, *extras], replace=True)
+        self.assertEqual(len(self.store.current_items(statuses=("open",))), 202)
+
+        in_hint = False
+        hint_rows = []
+        hint_scans = []
+        active_rows = self.store._active_rows
+        decode = self.store._decode
+        hints = self.store._ci_unreachable_hints
+
+        def counted_rows(*args, **kwargs):
+            if in_hint:
+                hint_scans.append((args, kwargs))
+            yield from active_rows(*args, **kwargs)
+
+        def counted_decode(*args, **kwargs):
+            item, since = decode(*args, **kwargs)
+            if in_hint:
+                hint_rows.append(item["id"])
+            return item, since
+
+        def counted_hints(**kwargs):
+            nonlocal in_hint
+            in_hint = True
+            try:
+                return hints(**kwargs)
+            finally:
+                in_hint = False
+
+        with (patch.object(self.store, "_active_rows", counted_rows),
+              patch.object(self.store, "_decode", counted_decode),
+              patch.object(self.store, "_ci_unreachable_hints", counted_hints),
+              self.answered("no", REASON) as query):
+            page = self.store.page_ready(role_name="worker")
+
+        self.assertEqual(hint_scans, [], "the hint pre-scan streamed the active index")
+        self.assertEqual(hint_rows, [self.item["id"]], "hints decoded unrelated rows")
+        query.assert_called_once_with(self.store.ci_wait_settings(), SHA)
+        blocked = [row for row in page["items"] if row["id"] == self.item["id"]]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual((blocked[0]["status"], blocked[0]["wait_liveness"]["state"],
+                          blocked[0]["wait_liveness"]["reason"]),
+                         ("blocked", "impossible", REASON))
+        open_ids = {row["id"] for row in page["items"] if row["status"] == "open"}
+        self.assertTrue(open_ids, "unrelated open work disappeared from the ready page")
+
     def test_pending_intent_denies_ci_reopen_without_verification(self):
         with contextlib.closing(sqlite3.connect(self.project.root / LEDGER_NAME)) as db, db:
             db.execute("INSERT INTO intents(domain, key) VALUES ('items', ?)", (self.item["id"],))
