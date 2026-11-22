@@ -1,8 +1,13 @@
 """Opt-in single-child async delegation: start, join and in-process handback."""
 import dataclasses
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from support import Fixture
@@ -11,6 +16,8 @@ from mizu.admission import role_exclusion
 from mizu.delegation_jobs import DelegationJobs, digest, canonical
 from mizu.errors import Busy, Denied
 from mizu.fs import lock
+from mizu.config import load
+from mizu.project import Project
 from mizu.protocol import tool_definitions
 from mizu.runtime import Engine
 
@@ -260,6 +267,110 @@ class AsyncDelegationTests(Fixture):
         # Handback releases the helper-role fence.
         with lock(role_exclusion(self.project.root, 'helper'), blocking=False):
             pass
+
+    def test_process_loss_keeps_reservation_and_never_relaunches(self):
+        """A killed owner leaves the durable claim held and join stays pending."""
+        source = self.file.read_text().splitlines()
+        in_worker = False
+        for index, line in enumerate(source):
+            if line.startswith('['):
+                in_worker = line.strip() == '[roles.worker]'
+            if in_worker and line.startswith('capabilities = '):
+                grants = json.loads(line.split('=', 1)[1].strip())
+                source[index] = 'capabilities = ' + json.dumps(
+                    [*grants, 'delegate', 'delegate_join'])
+            if in_worker and line.startswith('# tools_per_run'):
+                source[index] = 'tools_per_run = 2000'
+        config_file = self.root / 'config' / 'process-loss.toml'
+        config_file.write_text('\n'.join(source) + '''
+[roles.helper]
+profile = "alternate"
+policy = ["policies/shared.md", "policies/searcher.md"]
+workspace = "read"
+capabilities = ["files", "read", "finish"]
+''')
+        config = load(config_file)
+        project = Project(config, 'sample')
+        marker = self.root / 'process-loss-markers'
+        marker.mkdir()
+        child = '''
+import json, sys, time
+from pathlib import Path
+from mizu.config import load
+from mizu.delegation_jobs import canonical, digest
+from mizu.project import Project
+from mizu.runtime import Engine
+
+config_file, marker_dir = sys.argv[1], Path(sys.argv[2])
+config = load(Path(config_file))
+project = Project(config, 'sample')
+task = 'Implement the focused slice'
+
+class Driver:
+    requires_sandbox = False
+
+    def execute(self, ctx, prompt, *, profile=None):
+        if ctx.role.name == 'helper':
+            (marker_dir / 'child').write_text(ctx.run_dir.name)
+            time.sleep(30)
+            return
+        accepted = ctx.handle('delegate', {'role': 'helper', 'task': task,
+                                           'async_mode': True})
+        snap = ctx.snapshot
+        key = digest(canonical([ctx.run_dir.name, 'helper', task, snap['id']]))[:32]
+        (marker_dir / 'accepted').write_text(json.dumps({'accepted': accepted, 'key': key}))
+        time.sleep(30)
+
+Engine(config, driver=Driver()).run(project, 'worker')
+'''
+        environment = dict(os.environ)
+        source_root = Path(__file__).resolve().parents[1]
+        environment['PYTHONPATH'] = os.pathsep.join(
+            [str(source_root / 'tests'), str(source_root / 'src')])
+        process = subprocess.Popen([sys.executable, '-c', child, str(config_file), str(marker)],
+                                   env=environment, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE)
+        try:
+            for _ in range(250):
+                if (marker / 'accepted').exists() and (marker / 'child').exists():
+                    break
+                time.sleep(.02)
+            else:
+                self.fail('the owner process did not start an async child')
+            accepted_info = json.loads((marker / 'accepted').read_text())
+            accepted = accepted_info['accepted']
+            before = {path.name for path in (project.root / 'runs').iterdir()
+                      if (path / 'started.json').exists()}
+            process.kill()
+            process.wait(timeout=10)
+            store = DelegationJobs(project.root)
+            reservation = store.reservation()
+            self.assertIsNotNone(reservation)
+            self.assertEqual(reservation['id'], accepted['id'])
+            self.assertEqual(reservation['run_id'], accepted['run'])
+            self.assertEqual(reservation['status'], 'running')
+            after = {path.name for path in (project.root / 'runs').iterdir()
+                     if (path / 'started.json').exists()}
+            self.assertEqual(after, before)
+            fresh = self.context('worker', reservation_view=DelegationJobs.reservation_projection(
+                project.root))
+            retry = delegation_async.start(Engine(config), fresh, accepted_info['key'],
+                                           'helper', 'Implement the focused slice',
+                                           project.snapshots.get())
+            self.assertEqual(retry['id'], accepted['id'])
+            self.assertEqual(retry['run'], accepted['run'])
+            pending = delegation_async.join(fresh, accepted['id'])
+            self.assertFalse(pending.get('result_available', False))
+            self.assertEqual(pending['status'], 'running')
+            self.assertEqual(pending['run'], accepted['run'])
+            self.assertEqual(after, {path.name for path in (project.root / 'runs').iterdir()
+                                     if (path / 'started.json').exists()})
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if process.stderr is not None:
+                process.stderr.close()
 
     def test_missing_lease_and_wrong_owner_are_typed_refusals(self):
         engine = Engine(self.config)
