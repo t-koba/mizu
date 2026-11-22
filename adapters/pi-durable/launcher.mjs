@@ -370,9 +370,9 @@ export async function submitWithCurrentAgent(harness, agent, input, context, onR
 /** Present host-owned check notifications into the running durable session.
  *
  * `seen` is run-local: each id is submitted at most once in this unit. The
- * host's _check_steer already marked the automatic wake delivered; this helper
- * only presents the bounded notification and never acknowledges job output.
- * Malformed or oversized responses are refused before any submission.
+ * host keeps the automatic wake ready until _check_steer_delivered confirms a
+ * durable submission; this helper never acknowledges job output. Malformed or
+ * oversized responses are refused before any submission.
  */
 export async function deliverCheckSteer(bridge, root, context, seen = new Set(), { request: call = request } = {}) {
   const response = await call(bridge, '_check_steer', {});
@@ -390,6 +390,7 @@ export async function deliverCheckSteer(bridge, root, context, seen = new Set(),
     return { id: entry.id, message: entry.message };
   });
   const submitted = [];
+  const submittedIds = [];
   for (const { id, message } of notifications) {
     if (seen.has(id)) continue;
     const input = { type: 'input', content: message,
@@ -397,6 +398,12 @@ export async function deliverCheckSteer(bridge, root, context, seen = new Set(),
     await root.submit(input, context);
     seen.add(id);
     submitted.push(input);
+    submittedIds.push(id);
+  }
+  // Only a confirmed submission consumes the automatic wake. A failure here
+  // leaves the wake available; no acknowledgement is sent for unsubmitted IDs.
+  if (submittedIds.length) {
+    await call(bridge, '_check_steer_delivered', { ids: submittedIds });
   }
   return submitted;
 }
@@ -476,9 +483,9 @@ async function runOnce(cfg) {
   let activeRoot = null;
   const steerSeen = new Set();
   const observations = [];
-  // Steer lands at a model turn boundary. The host already recorded wake
-  // delivery, so a delivery failure only loses this notification: never fail
-  // the model unit or disturb the usage/admission accounting around it.
+  // Steer lands at a model turn boundary. The host records wake delivery only
+  // after a confirmed submission, so a delivery failure leaves the automatic
+  // wake ready: never fail the model unit or disturb usage/admission accounting.
   async function steerTurnBoundary() {
     if (!activeRoot) return;
     try {

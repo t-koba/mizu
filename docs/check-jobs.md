@@ -188,9 +188,11 @@ gate this path. Neither engine polls, sleeps, acknowledges output or needs a
 wake to keep the unit running; output stays behind `action=result`. Managed Pi
 presents the notification through its SDK steer channel and leaves the
 independent dispatch wake untouched. Managed pi-durable submits it as a durable
-steer input at a provider turn boundary and records that delivery as satisfying
-the automatic wake, so no redundant dispatch attempt follows it. Idle waking
-and `result` retrieval stay as before.
+steer input at a provider turn boundary and marks that result's automatic wake
+delivered only after the adapter confirms the durable submission to the host;
+that acknowledgement is wake bookkeeping, not output acknowledgement. A failed
+or unsubmitted steer leaves the automatic wake available. Idle waking and
+`result` retrieval stay as before.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
 The work unit ends and returns its model slot and workspace lock. The wait

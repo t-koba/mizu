@@ -488,7 +488,7 @@ class CheckSteerBridgeTests(SteerFixture):
         ids = [row['id'] for row in response['messages']]
         self.assertEqual(len(set(ids)), len(ids))
 
-    def test_bridge_marks_wake_delivered_once_without_acknowledging_output(self):
+    def test_bridge_keeps_wake_ready_until_durable_delivery_is_acknowledged(self):
         job = self.job()
         context = self.context()
         # The job completed after this unit's opening prompt was captured.
@@ -498,17 +498,50 @@ class CheckSteerBridgeTests(SteerFixture):
         self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
         first = context.handle('_check_steer', {})
         self.assertEqual([row['id'] for row in first['messages']], [job['id']])
-        self.assertTrue(wake.exists())
-        self.assertEqual(json.loads(wake.read_text())['run'], context.run_dir.name)
+        # Presentation alone leaves the automatic wake available.
+        self.assertFalse(wake.exists())
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
         self.assertIn(job['id'], context.check_steer_seen)
-        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
-        self.assertEqual(context.handle('_check_steer', {}), {'messages': []})
-        # Presentation consumed only the dispatch wake: result retrieval and
-        # explicit acknowledgement still own the unread output.
-        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(context._check_steer_pending, {job['id']})
+        # Result retrieval is independent of both the notification and the ack.
         result = check_jobs.result(context, job['id'])
         self.assertEqual(result['status'], 'completed')
         self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(context.handle('_check_steer_delivered', {'ids': [job['id']]}),
+                         {'recorded': True})
+        self.assertTrue(wake.exists())
+        self.assertEqual(json.loads(wake.read_text())['run'], context.run_dir.name)
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(context._check_steer_pending, set())
+        self.assertEqual(context.handle('_check_steer', {}), {'messages': []})
+        # The ack consumes only the dispatch wake: unread output still needs
+        # action=result and the ordinary successful-finish acknowledgement.
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+        self.assertEqual(check_jobs.result(context, job['id'])['status'], 'completed')
+        # Pending IDs are retired; a replayed ack cannot consume another wake.
+        with self.assertRaises(Denied):
+            context.handle('_check_steer_delivered', {'ids': [job['id']]})
+
+    def test_bridge_pending_ids_are_replaced_not_accumulated(self):
+        first = self.job()
+        context = self.context()
+        context.check_steer_seen = frozenset()
+        self.assertEqual([row['id'] for row in context.handle('_check_steer', {})['messages']],
+                         [first['id']])
+        self.assertEqual(context._check_steer_pending, {first['id']})
+        second = self.job('printf second')
+        self.assertEqual([row['id'] for row in context.handle('_check_steer', {})['messages']],
+                         [second['id']])
+        self.assertEqual(context._check_steer_pending, {second['id']})
+        self.assertEqual(context.handle('_check_steer_delivered', {'ids': [second['id']]}),
+                         {'recorded': True})
+        first_wake = check_jobs.root(self.project) / first['id'] / 'wake.json'
+        second_wake = check_jobs.root(self.project) / second['id'] / 'wake.json'
+        self.assertFalse(first_wake.exists())
+        self.assertTrue(second_wake.exists())
+        with self.assertRaises(Denied):
+            context.handle('_check_steer_delivered', {'ids': [first['id']]})
 
     def test_bridge_refuses_malformed_arguments(self):
         job = self.job()
@@ -517,6 +550,29 @@ class CheckSteerBridgeTests(SteerFixture):
             with self.assertRaises(Denied):
                 context.handle('_check_steer', args)
         self.assertFalse((check_jobs.root(self.project) / job['id'] / 'wake.json').exists())
+
+    def test_bridge_refuses_malformed_delivery_arguments(self):
+        job = self.job()
+        unknown = self.job('printf unknown', run=False)
+        context = self.context()
+        response = context.handle('_check_steer', {})
+        ids = [row['id'] for row in response['messages']]
+        self.assertEqual(ids, [job['id']])
+        wake = check_jobs.root(self.project) / job['id'] / 'wake.json'
+        oversized = [f'unknown-{index}' for index in range(check_jobs.MAX_CHECK_STEER_NOTIFICATIONS)]
+        for args in ({}, {'ids': []}, {'ids': job['id']}, {'ids': (job['id'],)},
+                     {'ids': ids + oversized}, {'ids': [1]}, {'ids': ['never-returned']},
+                     {'ids': [unknown['id']]}, {'ids': ids + [unknown['id']]},
+                     {'ids': ids, 'extra': True}):
+            with self.assertRaises(Denied):
+                context.handle('_check_steer_delivered', args)
+            self.assertFalse(wake.exists())
+            self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(context._check_steer_pending, set(ids))
+        # Every refusal left the pending acknowledgement usable.
+        self.assertEqual(context.handle('_check_steer_delivered', {'ids': ids}),
+                         {'recorded': True})
+        self.assertTrue(wake.exists())
 
 
 if __name__ == '__main__':

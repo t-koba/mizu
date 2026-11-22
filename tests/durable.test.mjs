@@ -1051,6 +1051,7 @@ test('launcher settles a model-admission failure from its process entrypoint', {
 test('launcher delivers a steer notification through the real reportUsage path', { timeout: LAUNCHER_TEST_TIMEOUT_MS }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-steer-launcher-'));
   const operations = [];
+  const ackCalls = [];
   const prompts = [];
   let steerCalls = 0;
   let providerCalls = 0;
@@ -1072,6 +1073,10 @@ test('launcher delivers a steer notification through the real reportUsage path',
           id: 'owned-job',
           message: 'MIZU CHECK RESULT (notification, not acceptance): job owned-job is completed (passed=true).',
         }] : [] };
+      }
+      if (request.operation === '_check_steer_delivered') {
+        ackCalls.push(request.arguments);
+        result = { recorded: true };
       }
       socket.end(JSON.stringify({ ok: true, result }) + '\n');
     });
@@ -1153,6 +1158,8 @@ test('launcher delivers a steer notification through the real reportUsage path',
     // The glue reaches _check_steer from reportUsage, and the durable steer
     // input is present in the next real model request, not just in a helper.
     assert.ok(operations.includes('_check_steer'), operations.join(','));
+    assert.ok(operations.includes('_check_steer_delivered'), operations.join(','));
+    assert.deepEqual(ackCalls, [{ ids: ['owned-job'] }]);
     assert.ok(prompts.some(body => body.includes('MIZU CHECK RESULT (notification, not acceptance): job owned-job is completed')),
       'the running model never saw the check notification');
   } finally {
@@ -1251,25 +1258,36 @@ test('submitWithCurrentAgent passes the live root to onRoot before any read or s
   assert.deepEqual(fake.inputs, [currentInput]);
 });
 
-function steerResponder(messages) {
+function steerResponder(messages, { failSubmit = false } = {}) {
   const calls = [];
+  const acks = [];
+  const events = [];
   const submissions = [];
   const bridge = { transport: 'test' };
   const root = {
     async submit(input, ctx) {
       assert.equal(ctx, context);
       submissions.push(input);
+      events.push('submit:' + input.requestId);
+      if (failSubmit) throw new Error('durable submit failed');
       return { id: 'steer-submission' };
     },
   };
   const call = async (config, operation, args) => {
     calls.push([config, operation, args]);
+    events.push(operation);
     assert.equal(config, bridge);
-    assert.equal(operation, '_check_steer');
-    assert.deepEqual(args, {});
-    return { messages };
+    if (operation === '_check_steer') {
+      assert.deepEqual(args, {});
+      return { messages };
+    }
+    if (operation === '_check_steer_delivered') {
+      acks.push(args);
+      return { recorded: true };
+    }
+    assert.fail(`unexpected bridge operation: ${operation}`);
   };
-  return { bridge, root, calls, submissions, call };
+  return { bridge, root, calls, acks, events, submissions, call };
 }
 
 test('check steer submits bounded inputs with a deterministic steer requestId and dedupes by id', async () => {
@@ -1287,6 +1305,13 @@ test('check steer submits bounded inputs with a deterministic steer requestId an
   assert.deepEqual(fixture.submissions[0], { type: 'input', content: messages[0].message,
     requestId: 'steer-' + firstId.slice(0, STEER_REQUEST_ID_CHARS), whenBusy: 'steer' });
   assert.deepEqual(fixture.calls[0], [fixture.bridge, '_check_steer', {}]);
+  const submittedIds = messages.map(entry => entry.id);
+  assert.deepEqual(fixture.acks, [{ ids: submittedIds }]);
+  assert.deepEqual(fixture.calls.at(-1),
+    [fixture.bridge, '_check_steer_delivered', { ids: submittedIds }]);
+  assert.deepEqual(fixture.events,
+    ['_check_steer', ...fixture.submissions.map(input => 'submit:' + input.requestId),
+      '_check_steer_delivered']);
   assert.deepEqual(fixture.submissions.map(input => input.requestId),
     messages.map(entry => 'steer-' + entry.id.slice(0, STEER_REQUEST_ID_CHARS)));
   assert.equal(fixture.submissions.every(input => input.whenBusy === 'steer'), true);
@@ -1295,6 +1320,22 @@ test('check steer submits bounded inputs with a deterministic steer requestId an
   const second = await deliverCheckSteer(later.bridge, later.root, context, seen, { request: later.call });
   assert.deepEqual(second.map(input => input.requestId), ['steer-' + 'c'.repeat(40).slice(0, STEER_REQUEST_ID_CHARS)]);
   assert.equal(later.submissions.length, 1);
+  assert.deepEqual(later.acks, [{ ids: ['c'.repeat(40)] }]);
+  assert.deepEqual(later.events, ['_check_steer', 'submit:steer-' + 'c'.repeat(40).slice(0, STEER_REQUEST_ID_CHARS),
+    '_check_steer_delivered']);
+});
+
+test('check steer does not acknowledge wake delivery when a durable submit fails', async () => {
+  const fixture = steerResponder([
+    { id: 'first', message: 'first notification' },
+    { id: 'second', message: 'second notification' },
+  ], { failSubmit: true });
+  await assert.rejects(
+    deliverCheckSteer(fixture.bridge, fixture.root, context, new Set(), { request: fixture.call }),
+    /durable submit failed/);
+  assert.equal(fixture.submissions.length, 1);
+  assert.deepEqual(fixture.acks, []);
+  assert.deepEqual(fixture.events, ['_check_steer', 'submit:steer-first']);
 });
 
 test('check steer refuses malformed or oversized responses before submitting anything', async () => {
@@ -1320,4 +1361,5 @@ test('check steer refuses malformed or oversized responses before submitting any
   const empty = steerResponder([]);
   assert.deepEqual(await deliverCheckSteer(empty.bridge, empty.root, context, new Set(), { request: empty.call }), []);
   assert.deepEqual(empty.submissions, []);
+  assert.deepEqual(empty.acks, []);
 });

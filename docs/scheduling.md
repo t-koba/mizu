@@ -1122,7 +1122,9 @@ is seeded as seen and filtered by that position, never steered twice. Managed
 Pi writes no wake marker, so the independent wake and the marker written by a
 later dispatch stay unchanged. Managed pi-durable submits the notification as a
 durable steer input and marks that result's automatic wake as delivered for the
-running unit, so no follow-up dispatch attempt is needed. An unread result
+running unit only after the adapter confirms the durable submission; a failed
+or unsubmitted steer leaves the wake available. That acknowledgement is dispatch
+bookkeeping, never output acknowledgement or acceptance. An unread result
 remains in ordinary job listings after its automatic attempt but cannot cause a
 scheduling spin. Existing `result` retrieval and successful-finish
 acknowledgement alone consume output; a wake marker never imports verification.

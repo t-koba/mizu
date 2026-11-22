@@ -336,6 +336,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         self.request_sequences: set[tuple[int, int]] = set()
         self.runtime_usage: dict[tuple[int, int], dict] = {}
         self.runtime_models: dict[tuple[int, int], dict] = {}
+        # IDs returned by _check_steer whose durable submission the adapter has
+        # not confirmed yet. Replaced per notification batch, never accumulated.
+        self._check_steer_pending: set[str] = set()
         # Adapter pre-send identities; never supplied by model tool arguments.
         self.engine_tool_invocations: dict[tuple[int, str], str] = {}
         # One conditional-close adapter dispatch per work unit prevents a
@@ -483,9 +486,10 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 # Host-owned bridge operation for the managed pi-durable lane.
                 # It is not a model capability and never exposes job output:
                 # only the bounded, host-written notification reaches the
-                # running unit. Delivery marks the automatic wake satisfied for
-                # this run, so no redundant dispatch attempt follows it; the
-                # unread result still needs action=result and acknowledgement.
+                # running unit. The automatic wake stays available until the
+                # adapter confirms durable submission with the separate
+                # acknowledgement; unread output still needs action=result and
+                # the normal successful-finish acknowledgement.
                 if arguments != {}:
                     raise Denied("Unsupported check steer request")
                 seen = getattr(self, 'check_steer_seen', ())
@@ -493,9 +497,22 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 messages = [{'id': job['id'], 'message': check_jobs.steer_message(job)}
                             for job in jobs[:check_jobs.MAX_CHECK_STEER_NOTIFICATIONS]]
                 ids = [message['id'] for message in messages]
-                check_jobs.mark_wake_delivered(self.project, self.role.name, ids, self.run_dir.name)
                 self.check_steer_seen = frozenset(set(seen) | set(ids))
+                self._check_steer_pending = set(ids)
                 return {'messages': messages}
+            if operation == "_check_steer_delivered":
+                # Host-owned second phase: consume a wake only after the
+                # adapter has durably submitted the notification. Never reads
+                # job output or touches result/usage retrieval.
+                ids = arguments.get("ids")
+                if (set(arguments) != {"ids"} or not isinstance(ids, list) or not ids
+                        or len(ids) > check_jobs.MAX_CHECK_STEER_NOTIFICATIONS
+                        or any(not isinstance(item, str) or item not in self._check_steer_pending
+                               for item in ids)):
+                    raise Denied("Invalid check steer delivery")
+                check_jobs.mark_wake_delivered(self.project, self.role.name, ids, self.run_dir.name)
+                self._check_steer_pending.difference_update(ids)
+                return {"recorded": True}
             if operation == "_engine_tool":
                 if self.bound_hit is not None:
                     raise Denied(self._bound_message())
