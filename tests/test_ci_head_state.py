@@ -40,12 +40,11 @@ class CiHeadStateTests(Fixture):
                 code_digest=code_digest, approval="approval", source_commit=SOURCE,
                 projection=public_source_identity({}))
 
-    def request(self, sha, receipt):
+    def request(self, sha, receipt, *, dispatched_at="2026-10-20T00:00:00+00:00"):
         identity = request_id(receipt["publication_id"], sha, ["ci"])
         CiRequests(self.project.root, self.config.ci_requests).mark_dispatch(identity, {
             "request_id": identity, "publication_id": receipt["publication_id"],
-            "sha": sha, "workflows": ["ci"],
-            "dispatched_at": "2026-10-20T00:00:00+00:00"})
+            "sha": sha, "workflows": ["ci"], "dispatched_at": dispatched_at})
         return identity
 
     def inject_ref(self, sha, branch="main"):
@@ -164,7 +163,7 @@ class CiHeadStateTests(Fixture):
         shared = "9" * 64
         identity = request_id(shared, SHA, ["ci"])
 
-        def receipts(project_root, *, branch, limit):
+        def receipts(project_root, *, branch, limit, published_sha=None):
             return {"publications": [{"publication_id": shared, "published_sha": SHA}],
                     "total": 1, "truncated": False, "scan_stopped": False,
                     "next_cursor": None}
@@ -209,7 +208,7 @@ class CiHeadStateTests(Fixture):
         self.assertTrue(row["may_be_incomplete"])
 
     def test_unreadable_or_truncated_evidence_is_incomplete_not_success(self):
-        self.receipt(SHA)
+        head = self.receipt(SHA)
         write_json(self.project.root / "vcs-poll.json", "[")
         row = self.facts()[0]
         self.assertEqual(row["revision"], SHA)
@@ -217,15 +216,40 @@ class CiHeadStateTests(Fixture):
         self.assertTrue(row["may_be_incomplete"])
 
         self.cache()
-        with patch("mizu.ci_head_state.CiRequests.daily",
-                   return_value=self.daily_page([], truncated=True)):
+        early = {"days": [{"date": "2026-09-30", "requests": 0,
+                           "covered_items": 0, "items": []}],
+                 "total": 101, "truncated": True, "scan_stopped": False}
+        with patch("mizu.ci_head_state.CiRequests.daily", return_value=early):
             self.assertTrue(self.facts()[0]["may_be_incomplete"])
         self.inject_ref(SHA)
         with patch("mizu.ci_head_state.read_ref", side_effect=OSError("unreadable")):
             self.assertTrue(self.facts()[0]["may_be_incomplete"])
         with patch("mizu.ci_head_state.Publication.list_receipts", return_value={
-                "publications": [{"publication_id": "1" * 64, "published_sha": SHA}],
+                "publications": [{"publication_id": head["publication_id"],
+                                  "published_sha": SHA}],
                 "total": 2, "truncated": True, "scan_stopped": False}):
+            self.assertTrue(self.facts()[0]["may_be_incomplete"])
+
+    def test_large_history_reports_the_new_head_without_incompleteness(self):
+        older = [self.receipt(OLDER, code_digest=f"{index:064x}") for index in range(101)]
+        for receipt in older:
+            self.request(OLDER, receipt)
+        head = self.receipt(SHA)
+        row = self.facts()[0]
+        self.assertEqual(row, ci_head_state._row("main", SHA))
+        self.assertTrue(row["no_evidence"])
+        self.assertFalse(row["may_be_incomplete"])
+
+        identity = self.request(SHA, head, dispatched_at="2026-10-01T12:00:00+00:00")
+        row = self.facts()[0]
+        self.assertEqual(row, ci_head_state._row("main", SHA, requests=[identity]))
+        self.assertFalse(row["may_be_incomplete"])
+
+    def test_unreadable_request_in_the_head_window_is_incomplete(self):
+        head = self.receipt(SHA)
+        page = self.daily_page([{"request_id": "bad", "publication_id": head["publication_id"]}],
+                               truncated=True)
+        with patch("mizu.ci_head_state.CiRequests.daily", return_value=page):
             self.assertTrue(self.facts()[0]["may_be_incomplete"])
 
     def test_invalid_run_identity_is_incomplete_and_not_a_run(self):

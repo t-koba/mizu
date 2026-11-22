@@ -15,14 +15,20 @@ each, never raw records. ``no_head`` marks a branch without a ref or receipt;
 passing/failing verdict, request state or later-revision coverage inference: a
 request belongs only to the branch whose receipt carries its publication ID at
 the exact head. Bounds: the configured branch set is already deduplicated and
-bounded; each evidence source is read once per branch within its own reader
-bound, and each projected identity array is capped at eight. Trust: local
-records and adapter-supplied cache rows are untrusted evidence. Failure: an
-unreadable or truncated source, a reached page or identity cap, or an
-unreadable ref raises ``may_be_incomplete`` and never turns missing evidence
-into a success claim.
+bounded; the newest head takes one receipt row, the exact head's publication
+IDs come from an exact-SHA/branch page, CI requests from one bounded daily page,
+and each projected identity array is capped at eight. Trust: local records and
+adapter-supplied cache rows are untrusted evidence. Failure: an unreadable ref
+or source, an invalid page, a stopped scan, an exact-head page truncated so
+another publication ID for that head could be hidden, a request page that stops
+before (or cannot establish) the head's publication window, or a reached
+identity cap sets ``may_be_incomplete``. Page fullness after that window or on
+unrelated records never flags the exact head, and missing evidence is never a
+passing verdict.
 """
 from __future__ import annotations
+
+import datetime as dt
 
 from . import ci_observation
 from .ci_observation import _valid_ci_run
@@ -54,14 +60,16 @@ def _identity_ids(values, cap):
     return kept, total > cap
 
 
-def _receipts(project_root, branch, limit):
+def _receipts(project_root, branch, limit, *, published_sha=None):
     """Return ``(pairs, truncated, scan_stopped)``; pairs are newest first.
 
     Each pair is ``(publication_id, published_sha)``: request attribution needs
-    the publication identity, not just the SHA.
+    the publication identity, not just the SHA. An exact-SHA query bounds one
+    head, so its truncation can hide another publication ID for that head.
     """
     try:
-        page = Publication.list_receipts(project_root, branch=branch, limit=limit)
+        page = Publication.list_receipts(project_root, branch=branch,
+                                         published_sha=published_sha, limit=limit)
     except Exception:
         return [], False, True
     if not isinstance(page, dict) or not isinstance(page.get("publications"), list):
@@ -84,6 +92,19 @@ def _ref_head(project, branch):
     except Exception:
         path = project.root / REF_STORE_NAME / branch
         return "", path.exists() or path.is_symlink()
+
+
+def _head_window(project, publication_ids):
+    """UTC day of the earliest head publication, plus incompleteness."""
+    dates, incomplete = [], False
+    for identity in publication_ids:
+        try:
+            record = Publication.read_receipt(project.root, identity)
+            dates.append(dt.datetime.fromisoformat(
+                record["recorded_at"]).astimezone(dt.timezone.utc).date().isoformat())
+        except Exception:
+            incomplete = True
+    return (min(dates) if dates else ""), incomplete
 
 
 def _poll_cache(project, config, branches):
@@ -150,32 +171,46 @@ def _poll_cache(project, config, branches):
 
 
 def _request_rows(project, config):
-    """``(publication_id, sha, request_id)`` triples from the bounded daily page."""
+    """``(triples, last_day, full, broken)`` from the bounded daily page.
+
+    Triples are ``(publication_id, sha, request_id)``. ``last_day`` is the
+    newest UTC day the page covers, ``full`` means it stops early, and
+    ``broken`` means the page cannot be trusted at all.
+    """
     try:
         daily = CiRequests(project.root, getattr(config, "ci_requests", None)).daily(limit=100)
     except Exception:
-        return [], True
+        return [], "", False, True
     if not isinstance(daily, dict) or not isinstance(daily.get("days"), list):
-        return [], True
-    incomplete = bool(daily.get("truncated") or daily.get("scan_stopped"))
-    rows = []
+        return [], "", False, True
+    full = bool(daily.get("truncated"))
+    broken = bool(daily.get("scan_stopped"))
+    rows, last_day = [], ""
     for day in daily["days"]:
-        items = day.get("items") if isinstance(day, dict) else None
+        if not isinstance(day, dict):
+            broken = True
+            continue
+        date = day.get("date")
+        if not isinstance(date, str) or not date:
+            broken = True
+        else:
+            last_day = max(last_day, date)
+        items = day.get("items")
         if not isinstance(items, list):
-            incomplete = True
+            broken = True
             continue
         for item in items:
             if not isinstance(item, dict):
-                incomplete = True
+                broken = True
                 continue
             identity, publication_id, sha = (item.get("request_id"),
                                              item.get("publication_id"), item.get("sha"))
             if not all(isinstance(value, str) and value for value in
                        (identity, publication_id, sha)):
-                incomplete = True
+                broken = True
                 continue
             rows.append((publication_id, sha, identity))
-    return rows, incomplete
+    return rows, last_day, full, broken
 
 
 def ci_head_state_facts(project, config=None) -> list:
@@ -194,25 +229,31 @@ def ci_head_state_facts(project, config=None) -> list:
             incomplete = bool(incomplete or head_scan_stopped)
             if page:
                 head = page[0][1]
-        receipts = []
+        publication_ids = []
         if head:
-            receipts, truncated, scan_stopped = _receipts(project.root, branch, 100)
+            page, truncated, scan_stopped = _receipts(
+                project.root, branch, 100, published_sha=head)
             incomplete = bool(incomplete or truncated or scan_stopped)
-        pages[branch] = (head, receipts, incomplete)
+            publication_ids = [identity for identity, sha in page if sha == head]
+        pages[branch] = (head, publication_ids, incomplete)
 
     runs, cache_incomplete, cache_branch_incomplete = _poll_cache(project, config, branches)
-    requests, requests_incomplete = _request_rows(project, config)
+    requests, last_day, request_full, request_broken = _request_rows(project, config)
 
     facts = []
     for branch in sorted(branches):
-        head, receipts, incomplete = pages[branch]
-        incomplete = bool(incomplete or cache_incomplete or requests_incomplete
+        head, publication_ids, incomplete = pages[branch]
+        incomplete = bool(incomplete or cache_incomplete or request_broken
                           or cache_branch_incomplete[branch])
+        if request_full and head:
+            window, window_incomplete = _head_window(project, publication_ids)
+            incomplete = bool(incomplete or window_incomplete
+                              or not window or last_day < window)
         if not head:
             facts.append(_row(branch, "", no_head=True, may_be_incomplete=incomplete))
             continue
         branch_runs, runs_capped = _identity_ids(runs[branch].get(head, ()), 8)
-        eligible = {publication_id for publication_id, sha in receipts if sha == head}
+        eligible = set(publication_ids)
         branch_requests, requests_capped = _identity_ids(
             (identity for publication_id, sha, identity in requests
              if sha == head and publication_id in eligible), 8)
