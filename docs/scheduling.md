@@ -1116,10 +1116,11 @@ already-running unit at its next model turn boundary, using the same capability
 and policy gate. That in-unit delivery is presentation only: no polling, no
 sleeping, no output acknowledgement and no model receipt; output stays behind
 `action=result`. Managed Pi captures the completion index position with the
-opening prompt and reads only later indexed changes in bounded pages ordered
-newest-first by job creation time with a job-id tie-break; the cursor advances
-by an exclusive (creation time, job id) key through a covering index, so each
-boundary reads one page instead of sorting the whole window. The captured
+opening prompt and reads only later indexed changes: a sequence-fenced window
+is sorted newest-first by job creation time with a job-id tie-break, and the
+cursor advances by an exclusive `(creation time, job id)` row-value key. Work
+stays proportional to the fenced window even beside older retained completions.
+The captured
 completion position binds the sequence high-water to the check-job index
 generation: the high-water seals which window is eligible, and each window
 drains before a new high opens another. A rebuilt index gets a new generation;
