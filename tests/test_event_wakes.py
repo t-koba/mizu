@@ -1,12 +1,14 @@
 """roles.<name>.event_wakes gates which wake kinds admit a standalone --event dispatch."""
 import contextlib
 import dataclasses
+import datetime as dt
 from pathlib import Path
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu.config import EVENT_WAKE_KINDS, load
 from mizu.errors import ConfigError
+from mizu.queue_facts import next_delivery_at
 from mizu.runtime import Engine
 from mizu.services import event_watches, render
 
@@ -150,3 +152,22 @@ class EventWakesGateTests(Fixture):
         self.project.set_control(wake_generation="")
         with patch("mizu.runtime.check_jobs.wake_ready", return_value=True):
             self.assertNotIn("skip", self._state("worker"))
+
+
+class QueueDeliveryFactsTests(Fixture):
+    def test_next_delivery_at_is_earliest_waking_deadline_only(self):
+        # A role wakes on proposals and questions here, not on notices/answers.
+        store = self.project.kernel_queues
+        base = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        def at(seconds):
+            return (base + dt.timedelta(seconds=seconds)).isoformat()
+        self.assertIsNone(next_delivery_at(self.project, "maintainer"))
+        store.append("proposals", {"title": "t", "body": "b"}, "operator", now=now,
+                     deliver_at=at(120))
+        expected = base + dt.timedelta(seconds=60)
+        store.append("questions", {"question": "q", "default": "d"}, "role:maintainer", now=now,
+                     deliver_at=at(60))
+        # An even earlier deadline on a non-waking queue must be ignored.
+        store.append("notices", {"body": "n"}, "operator", now=now, deliver_at=at(30))
+        self.assertEqual(next_delivery_at(self.project, "maintainer"), expected.timestamp())

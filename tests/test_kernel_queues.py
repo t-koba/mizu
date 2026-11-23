@@ -11,7 +11,7 @@ from support import Fixture
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.kernel import QueueStore, parse_queues
-from mizu.kernel.queues import MAX_REFS, PAGE_MAX
+from mizu.kernel.queues import MAX_REFS, PAGE_MAX, _instant
 from mizu.project import Project
 
 DECLARATIONS = tomllib.loads('''
@@ -48,6 +48,9 @@ read = ["role:alpha"]
 
 BODY = {"title": "hello"}
 OLD = "2020-01-01T00:00:00+00:00"
+NOW = "2026-01-01T00:00:00+00:00"
+SOONER = "2026-01-02T00:00:00+00:00"
+LATER = "2026-01-03T00:00:00+00:00"
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "development" / "queues.toml"
 
 
@@ -220,6 +223,37 @@ class QueueStoreTests(unittest.TestCase):
         self.assertTrue((self.root / "wake" / "alpha").exists())
         with self.assertRaises(Denied):
             self.store.append("tasks", BODY, "role:alpha", deliver_at="2020-01-01T00:00:00")
+
+    def test_next_delivery_none_and_future_deadline(self):
+        # Empty queue and a run of only undelayed messages have no deadline.
+        self.assertIsNone(self.store.next_delivery("tasks", "role:alpha", now=NOW))
+        self.store.append("tasks", BODY, "operator", now=NOW)
+        self.store.append("tasks", BODY, "operator", now=NOW)
+        self.assertIsNone(self.store.next_delivery("tasks", "role:alpha", now=NOW))
+        # A future delayed message yields the same parsed aware datetime as _instant.
+        self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=SOONER)
+        self.assertEqual(self.store.next_delivery("tasks", "role:alpha", now=NOW),
+                         _instant(SOONER, "deliver_at"))
+
+    def test_next_delivery_respects_head_of_line_and_woken(self):
+        store = QueueStore(self.root / "deadlines", parse_queues(DECLARATIONS))
+        # The earlier delayed message (later deadline) masks the one behind it
+        # with an earlier deadline: a due-scan cannot cross it.
+        store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        store.append("tasks", BODY, "operator", now=NOW, deliver_at=SOONER)
+        self.assertEqual(store.next_delivery("tasks", "role:alpha", now=NOW),
+                         _instant(LATER, "deliver_at"))
+        # Once the first message has woken the actor, the scan starts past it.
+        woken = QueueStore(self.root / "woken-deadlines", parse_queues(DECLARATIONS))
+        woken.append("tasks", BODY, "operator", now=NOW, deliver_at=SOONER)
+        woken.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        woken.mark_woken("tasks", "role:alpha", 1)
+        self.assertEqual(woken.next_delivery("tasks", "role:alpha", now=NOW),
+                         _instant(LATER, "deliver_at"))
+
+    def test_next_delivery_requires_read_grant(self):
+        with self.assertRaises(Denied):
+            self.store.next_delivery("notes", "role:beta", now=NOW)
 
     def test_own_immediate_message_does_not_wake_its_author(self):
         self.store.append("tasks", BODY, "role:alpha")

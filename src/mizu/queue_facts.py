@@ -46,6 +46,28 @@ def due(project, role_name: str) -> bool:
     return False
 
 
+def next_delivery_at(project, role_name: str) -> float | None:
+    """Epoch seconds of the earliest pending delayed message across the queues
+    that wake ``role_name``, or None when none of them has one.
+
+    Read-only and takes no acknowledgement: a future delivery still wakes the
+    role through the queue store, so this only bounds how long a caller sleeps.
+    A queue that cannot be read contributes no deadline; callers keep whatever
+    fallback wake they already had.
+    """
+    store = project.kernel_queues
+    actor = principal(role_name)
+    deadlines = []
+    for name in waking(project.config, role_name):
+        try:
+            delivery = store.next_delivery(name, actor)
+        except (Denied, OSError, ValueError):
+            continue
+        if delivery is not None:
+            deadlines.append(delivery.timestamp())
+    return min(deadlines) if deadlines else None
+
+
 def mark_woken(project, role_name: str, rows: list[dict]) -> None:
     """Record that the opening's due messages have woken the role."""
     store = project.kernel_queues

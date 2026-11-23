@@ -13,7 +13,7 @@ import signal
 import threading
 import time
 
-from . import ci_waits, editor
+from . import ci_waits, editor, queue_facts
 from .ci_observation import POLL_STATE_FILE, _clean_ci_failures, _clean_ci_successes
 from .ci_polling import _live_ci_branches, poll_ci
 from .config import DAEMON_POLICIES, Config, load, role_daemon_spacing_seconds
@@ -206,6 +206,12 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         probe_at = next_deadline(config, name)
                         if probe_at is not None:
                             delay = min(delay, max(0.1, probe_at - time.time()))
+                        try:
+                            delivery_at = queue_facts.next_delivery_at(project, role_name)
+                        except (MizuError, OSError, ValueError):
+                            delivery_at = None
+                        if delivery_at is not None:
+                            delay = min(delay, max(0.1, delivery_at - time.time()))
                         stop.wait(delay)
                         continue
                 except (MizuError, OSError, ValueError) as exc:
@@ -220,6 +226,15 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         delay = min(delay, max(0.1, probe_at - time.time()))
                 except (MizuError, OSError, ValueError):
                     pass
+                # `project` is still None when load/Project failed on the first
+                # pass; that block intentionally depends only on config.
+                if project is not None:
+                    try:
+                        delivery_at = queue_facts.next_delivery_at(project, role_name)
+                    except (MizuError, OSError, ValueError):
+                        delivery_at = None
+                    if delivery_at is not None:
+                        delay = min(delay, max(0.1, delivery_at - time.time()))
                 stop.wait(delay)
     finally:
         for sig, handler in old.items():

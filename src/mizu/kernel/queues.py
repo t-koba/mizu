@@ -646,6 +646,33 @@ class QueueStore:
                 return True
         return False
 
+    def next_delivery(self, queue: str, actor: str, *, now=None) -> dt.datetime | None:
+        """The aware ``deliver_at`` of the first not-yet-due message ``actor``'s
+        due-scan would hit, or None when the scan reaches the head first.
+
+        Schema: returns an aware ``datetime`` or None; ``now`` is an ISO time
+        used for the due comparison. Bounds: scans exactly the range ``due``
+        scans, from ``max(cursor, woken)`` to the head, skipping retention
+        gaps and stopping at the first not-due message (head-of-line). Trust:
+        ``deliver_at`` is validated through ``_instant`` and the read grant is
+        checked. Retry/cancellation: none. Evidence: the message's stored
+        ``deliver_at`` field. Failure: raises ``Denied`` for an undeclared
+        queue, an invalid actor, a missing read grant or a corrupt
+        ``deliver_at``. Read-only; takes no lock and acknowledges nothing.
+        """
+        declaration = self._grant(queue, actor, write=False)
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
+        head = self._head(declaration.name)
+        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor))
+        while seq < head:
+            seq += 1
+            message = self._message(declaration.name, seq)
+            if message is None:
+                continue
+            if not self._due(message, stamp):
+                return _instant(message["deliver_at"], "deliver_at")
+        return None
+
     def message(self, id: str, actor: str) -> dict:
         message_id = _id(id, "message id")
         actor = self._actor(actor)
