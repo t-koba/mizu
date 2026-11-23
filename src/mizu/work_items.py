@@ -1922,8 +1922,9 @@ class WorkItems:
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
+            self._publish_wake()
             index_terminal(self, record, terminal=False, marker=marker)
-            self._wake_terminal()
+            self._publish_wake()
             return record
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
@@ -2176,13 +2177,14 @@ class WorkItems:
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
+            self._publish_wake()
             if status in ("done", "dropped"):
                 from .work_item_events import index_terminal
                 index_terminal(self, record, marker=marker)
-                self._wake_terminal()
+                self._publish_wake()
             return record
 
-    def _wake_terminal(self):
+    def _publish_wake(self):
         # Non-authoritative hint for non-recursive directory watches. Admission
         # and event delivery always read committed state, never metadata.
         with contextlib.suppress(OSError, NotImplementedError):

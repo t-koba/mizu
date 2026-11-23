@@ -7,15 +7,16 @@ until that fingerprint changes, an explicit deadline passes, or the daemon is
 stopped.  A changed fingerprint is only a reason to look: admission still reads
 durable state and decides whether a role may run.
 
-The watched set covers every source that can change daemon readiness:
-queue wakes publish ``wake/<role>``; delayed appends carry a ``deliver_at``
-deadline supplied by the caller; and operator control, configuration, goal,
-check results, work items, waits, snapshots, CI observations and the editor
-outbox write beneath one of these paths.  Nothing here reads file contents.
+Detection relies on writer-published top-level hints plus exact deadlines,
+never traversal of retained state: writers bump a fixed watched directory when
+a nested revision is committed, and delayed appends carry a ``deliver_at``
+deadline supplied by the caller.  The fingerprint stats a fixed set of paths,
+including the project root, so its cost is independent of how many retained
+files or entity directories exist.  Nothing here reads file contents or
+enumerates directories.
 """
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 
@@ -36,12 +37,6 @@ WATCHED_DIRS = (
     "role-state", "routing", "selection", "observed", "shared-records",
 )
 
-# Stores that keep one subdirectory per entity. A new file inside an existing
-# entity directory does not change the parent's mtime, so those children are
-# fingerprinted explicitly. Files directly inside a watched directory already
-# change that directory's mtime and need no separate entry.
-NESTED_DIRS = ("work-items", "queues", "histories", "snapshots", "check-jobs", "spool")
-
 
 def fingerprint(root: Path | None) -> tuple:
     """Return a metadata-only fingerprint of the authoritative paths.
@@ -53,6 +48,11 @@ def fingerprint(root: Path | None) -> tuple:
     if root is None:
         return ()
     rows = []
+    try:
+        st = root.stat()
+        rows.append((".", (st.st_dev, st.st_ino, st.st_mtime_ns)))
+    except (OSError, TypeError, ValueError):
+        rows.append((".", None))
     for name in WATCHED_FILES:
         try:
             st = (root / name).stat()
@@ -65,14 +65,6 @@ def fingerprint(root: Path | None) -> tuple:
             rows.append((name, (st.st_dev, st.st_ino, st.st_mtime_ns)))
         except (OSError, TypeError, ValueError):
             rows.append((name, None))
-    for name in NESTED_DIRS:
-        try:
-            children = tuple(sorted(
-                (entry.name, entry.stat(follow_symlinks=False).st_mtime_ns)
-                for entry in os.scandir(root / name) if entry.is_dir(follow_symlinks=False)))
-            rows.append((name + "/*", children))
-        except (OSError, TypeError, ValueError):
-            rows.append((name + "/*", None))
     return tuple(rows)
 
 

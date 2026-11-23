@@ -62,6 +62,13 @@ class WorkItemTests(Fixture):
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
                 self.store.blocked_liveness_readonly, self.store.page_open_for_order)
 
+    def test_nonterminal_revision_bumps_watched_directory_mtime(self):
+        watched = self.project.root / "work-items"
+        old = watched.stat().st_mtime_ns - 1_000_000_000
+        os.utime(watched, ns=(old, old), follow_symlinks=False)
+        self.assertEqual(self.change("doing")["status"], "doing")
+        self.assertGreater(watched.stat().st_mtime_ns, old)
+
     def test_readonly_page_detects_changed_revision_file(self):
         self.change("doing")
         self.store.page_open_readonly(limit=100)

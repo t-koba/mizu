@@ -99,6 +99,6 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
             write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
         from .work_item_events import index_terminal
         index_terminal(store, projected, marker=marker)
-        store._wake_terminal()
+        store._publish_wake()
         return projected
     return project(current, record)

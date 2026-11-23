@@ -1,9 +1,11 @@
 """Portable daemon wake detection: metadata fingerprint and interruptible wait."""
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mizu import daemon_wake
 
@@ -33,15 +35,50 @@ class DaemonWakeTests(unittest.TestCase):
         (self.root / "wake" / "worker").write_text("")
         self.assertNotEqual(daemon_wake.fingerprint(self.root), after_dir)
 
-    def test_fingerprint_detects_nested_revision(self):
-        item = self.root / "work-items" / "item-1"
-        item.mkdir(parents=True)
-        (item / "1.json").write_text("{}")
-        base = daemon_wake.fingerprint(self.root)
-        # A new revision inside an existing entity dir does not change the
-        # parent directory mtime, but must still wake the daemon.
-        (item / "2.json").write_text("{}")
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), base)
+    def test_fingerprint_stat_count_is_independent_of_retained_inventory(self):
+        original_stat = Path.stat
+        calls = []
+
+        def counting_stat(path, *args, **kwargs):
+            calls.append(path)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", counting_stat):
+            empty = daemon_wake.fingerprint(self.root)
+        fixed_count = len(calls)
+        self.assertEqual(fixed_count,
+                         len(daemon_wake.WATCHED_FILES) + len(daemon_wake.WATCHED_DIRS) + 1)
+        for name in ("check-jobs", "histories"):
+            children = self.root / name
+            children.mkdir()
+            for number in range(250):
+                (children / f"item-{number}").mkdir()
+        calls.clear()
+        with patch.object(Path, "stat", counting_stat), \
+                patch("os.scandir", side_effect=AssertionError("scandir in wait path")):
+            populated = daemon_wake.fingerprint(self.root)
+            self.assertEqual(len(calls), fixed_count)
+            self.assertEqual(len(populated), len(empty))
+            # The wait path must never enumerate retained directories either.
+            stop = threading.Event()
+            self.assertEqual(
+                daemon_wake.wait(stop, self.root, populated,
+                                 time.monotonic() + 0.01, poll=0.005),
+                "deadline")
+
+    def test_fingerprint_detects_root_and_work_items_hints(self):
+        watched = self.root / "work-items"
+        watched.mkdir()
+        after_dir = daemon_wake.fingerprint(self.root)
+        st = self.root.stat()
+        os.utime(self.root, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
+                 follow_symlinks=False)
+        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_dir)
+        after_root = daemon_wake.fingerprint(self.root)
+        st = watched.stat()
+        os.utime(watched, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
+                 follow_symlinks=False)
+        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_root)
 
     def test_wait_returns_change_already_present(self):
         (self.root / "control.json").write_text("{}")

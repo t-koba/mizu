@@ -5,6 +5,7 @@ separate account with only the exported bundle and outbox mounted.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import re
@@ -249,6 +250,10 @@ class Capsule:
             raise Denied("Message exceeds outbox ingest byte bound")
         # The outbox is the only shared mount with the project.
         write_json(self.outbox / f"{message_id}.json", record, exclusive=True)
+        # Non-authoritative hint for the daemon's fixed-path watch, never
+        # admission evidence: ingest reads the committed outbox files.
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.utime(self.outbox.parent, None, follow_symlinks=False)
         return {"id": message_id, "status": "written_to_outbox"}
 
 

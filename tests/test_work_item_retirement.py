@@ -81,7 +81,7 @@ class RetirementTests(Fixture):
         with self.assertRaisesRegex(Denied, "slots full"):
             self.store.transition(other["id"], expected_rev=1, status="doing", actor="worker")
         before = self.tree()
-        with patch.object(self.store, "_wake_terminal", wraps=self.store._wake_terminal) as wake:
+        with patch.object(self.store, "_publish_wake", wraps=self.store._publish_wake) as wake:
             retired = self.change(reason="  Retire exhausted tracking; not completion  ")
         wake.assert_called_once_with()
         self.assertEqual(retired["status"], "dropped")
@@ -135,7 +135,7 @@ class RetirementTests(Fixture):
         frozen = self.tree()
         expected = self.store.get(self.item_id)
         with patch("mizu.work_item_retirement.write_json", side_effect=AssertionError("retry wrote")), \
-                patch.object(self.store, "_wake_terminal", side_effect=AssertionError("retry woke")):
+                patch.object(self.store, "_publish_wake", side_effect=AssertionError("retry woke")):
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
                 results = list(pool.map(lambda _: self.change(), range(3)))
         self.assertTrue(all(r == expected for r in results))
