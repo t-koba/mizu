@@ -70,9 +70,11 @@ class DaemonRuntimeOwnershipTests(Fixture):
             daemon_runtime.daemon(self.config, "sample", "worker")
         next_at.assert_any_call(self.project, "worker")
         delays = [call.args[0] for call in stop.wait.call_args_list]
-        # Only the ~2s delivery deadline can yield a wait this short; without
-        # the cap the two sites would sleep for 5s and 3600s respectively.
-        self.assertTrue(any(0 < d <= 2.5 for d in delays), delays)
+        # Both loop passes must be capped by the ~2s delivery deadline. Assert
+        # each site individually: removing either cap leaves that site at its
+        # ~5s role spacing / ordinary_after bound and must fail this test.
+        self.assertEqual(len(delays), 2, delays)
+        self.assertTrue(all(0 < d <= 2.5 for d in delays), delays)
 
     def test_daemon_survives_first_pass_config_failure(self):
         # A load failure before Project() is built leaves `project` as None at
