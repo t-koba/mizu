@@ -29,6 +29,11 @@ hold calls for reassessment, not automatic expiry or reassignment; same-status
 scope/delivery updates do not restart its age. Preserve legacy over-limit work
 and settle or release it without claiming additional slots.
 
+When a result depends on external CI, use an exact CI wake when the tool
+surface or work item supplies one. Otherwise finish with a native deadline and
+re-read receipt-pinned CI status; do not use a sandbox `sleep` check as CI
+evidence or capacity saving. The mechanism details stay in `docs/check-jobs.md`.
+
 Do not keep work blocked on a failure hypothesis whose trigger has not
 recurred across the policy's number of `ci_branch` runs: close it as
 not-reproduced and settle the item unless a fresh reproduction keeps the

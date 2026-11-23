@@ -14,6 +14,10 @@ class PolicyContractTests(unittest.TestCase):
         self.assertIn("mizu_verify", text)
         self.assertIn("Do not weaken tests", text)
         self.assertIn("never push, deploy, or promote", text)
+        self.assertIn("exact CI wake", text)
+        self.assertIn("native deadline", text)
+        self.assertIn("receipt-pinned CI status", text)
+        self.assertIn("sandbox `sleep` check", text)
 
     def test_worker_no_longer_carries_templates_or_work_item_manual(self):
         text = (ROOT / "policies/worker.md").read_text()
