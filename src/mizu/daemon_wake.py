@@ -26,15 +26,21 @@ from pathlib import Path
 # it to zero without changing the daemon's admission or deadline logic.
 POLL_SECONDS = 1.0
 
-# Only paths that a writer explicitly publishes a hint to, plus the two
-# pointers that switch what the daemon may run. Other facts are time-driven
-# (cooldown, delayed delivery, probes) and are covered by the exact deadline;
-# a change to anything else is picked up at the next safety deadline. Keeping
-# this set small is what makes an idle daemon cheap.
-WATCHED_FILES = ("control.json", "current.json")
+# Every top-level input that admission can read, plus the directories where
+# writers publish nested hints. A negative admission result is memoized until
+# this fingerprint changes or an actionable deadline lapses, so an unwatched
+# readiness input would keep a settled daemon asleep indefinitely. These are
+# fixed paths only: no traversal of retained state.
+WATCHED_FILES = (
+    "control.json", "current.json", "PROJECT.md", "goal.md", "project.toml",
+    "bridge.json", "ci-wait-absence-generation.json",
+)
 
 WATCHED_DIRS = (
-    "wake", "check-jobs", "waits", "work-items", "spool",
+    "wake", "queues", "histories", "snapshots", "check-jobs", "waits",
+    "work-items", "work-item-receipts", "work-order", "spool",
+    "ci-wait-observations", "ci-wait-absence", "active", "health",
+    "role-state", "routing", "selection", "observed", "shared-records",
 )
 
 
