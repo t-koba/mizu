@@ -39,7 +39,7 @@ from .completion_evidence import (VERIFIED_SNAPSHOT, HOLDER_ATTESTATION, recorde
                                   validate_attestation)
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
-                 safe_read, sync_dir, text_preview, write_json)
+                 safe_read, sync_dir, text_preview, touch_directory, write_json)
 from .platform import IS_WINDOWS
 from .ledger import rows as _rows
 from . import check_job_index
@@ -2185,5 +2185,4 @@ class WorkItems:
     def _publish_wake(self):
         # Non-authoritative hint for non-recursive directory watches. Admission
         # and event delivery always read committed state, never metadata.
-        with contextlib.suppress(OSError, NotImplementedError):
-            os.utime(self.root / "work-items", None, follow_symlinks=False)
+        touch_directory(self.root / "work-items")

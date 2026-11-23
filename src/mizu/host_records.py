@@ -6,11 +6,10 @@ bounded discriminated publisher payloads, with no executable policy. The
 records are the publication results that ``publication_ci`` waits read.
 """
 import contextlib
-import os
 from functools import partial
 
 from .errors import ConfigError, Denied
-from .fs import DIGEST, PREVIEW_BYTES, canonical, digest, lock, mkdir, now, sync_dir
+from .fs import DIGEST, PREVIEW_BYTES, canonical, digest, lock, mkdir, now, sync_dir, touch_directory
 from .shared_records import KindPolicy, RECORD_BYTES, SharedRecords, _name
 
 PUBLISHER = 'publisher.cli'
@@ -144,7 +143,7 @@ def _wake(project):
         directory = project.root / 'waits'
         _directory(directory)
         mkdir(directory)
-        os.utime(directory, None, follow_symlinks=False)
+        touch_directory(directory)
 
 
 def _sync(shared, record_id):

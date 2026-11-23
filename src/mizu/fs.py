@@ -126,8 +126,30 @@ def identifier(value: str) -> str:
     return value
 
 
+_MTIME_HINT_STEP_NS = 1_000_000_000  # exceeds coarse filesystem timestamp granularity
+
+
 def mkdir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
+def touch_directory(path: Path) -> None:
+    """Publish a best-effort mtime hint on a real directory for wake detection.
+
+    Never admission evidence: readers consult committed state. Refuses symlinks
+    so a hint cannot point outside the project mount. Uses the portable
+    default-follow_symlinks os.utime (follow_symlinks=False is unsupported for
+    directories on Windows); the forward step keeps the change observable even
+    with coarse filesystem timestamp granularity.
+    """
+    try:
+        if path.is_symlink():
+            return
+        st = path.stat()
+        target = max(time.time_ns(), st.st_mtime_ns + _MTIME_HINT_STEP_NS)
+        os.utime(path, ns=(st.st_atime_ns, target))
+    except (OSError, NotImplementedError, ValueError):
+        pass
 
 
 def sync_dir(path: Path) -> None:

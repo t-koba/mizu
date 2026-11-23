@@ -5,7 +5,6 @@ separate account with only the exported bundle and outbox mounted.
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import os
 import re
@@ -17,7 +16,7 @@ from pathlib import Path
 from .config import Editor, editor_settings
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import (MAX_FRAME, PREVIEW_BYTES, loads_finite, atomic_write, canonical,
-                 digest, mkdir, now, relative_parts, safe_read, write_json, page, lock)
+                 digest, mkdir, now, relative_parts, safe_read, touch_directory, write_json, page, lock)
 from .project import Project
 from .protocol import MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
@@ -252,8 +251,7 @@ class Capsule:
         write_json(self.outbox / f"{message_id}.json", record, exclusive=True)
         # Non-authoritative hint for the daemon's fixed-path watch, never
         # admission evidence: ingest reads the committed outbox files.
-        with contextlib.suppress(OSError, NotImplementedError):
-            os.utime(self.outbox.parent, None, follow_symlinks=False)
+        touch_directory(self.outbox.parent)
         return {"id": message_id, "status": "written_to_outbox"}
 
 

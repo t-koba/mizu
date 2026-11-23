@@ -1,4 +1,5 @@
 """Portable daemon wake detection: metadata fingerprint and interruptible wait."""
+import contextlib
 import os
 import tempfile
 import threading
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mizu import daemon_wake
+from mizu import daemon_wake, fs
 
 
 class DaemonWakeTests(unittest.TestCase):
@@ -83,6 +84,37 @@ class DaemonWakeTests(unittest.TestCase):
         # Windows directories, so use the default (follow_symlinks=True).
         st = directory.stat()
         os.utime(directory, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+
+    def test_touch_directory_publishes_portable_hint_and_refuses_symlinks(self):
+        watched = self.root / "work-items"
+        watched.mkdir()
+        before = watched.stat().st_mtime_ns
+        real_utime = os.utime
+
+        def portable_utime(path, *args, **kwargs):
+            if kwargs.get("follow_symlinks") is False:
+                raise NotImplementedError("unsupported for directories on Windows")
+            return real_utime(path, *args, **kwargs)
+
+        with patch("mizu.fs.os.utime", side_effect=portable_utime) as utime:
+            fs.touch_directory(watched)
+        self.assertGreater(watched.stat().st_mtime_ns, before)
+        utime.assert_called_once()
+        self.assertNotIn("follow_symlinks", utime.call_args.kwargs)
+
+        link = self.root / "work-items-link"
+        try:
+            link.symlink_to(watched, target_is_directory=True)
+        except OSError:  # Windows may require symlink privilege.
+            link = watched
+            guard = patch.object(Path, "is_symlink", return_value=True)
+        else:
+            guard = contextlib.nullcontext()
+        target_before = watched.stat().st_mtime_ns
+        with guard, patch("mizu.fs.os.utime", side_effect=portable_utime) as utime:
+            fs.touch_directory(link)
+        utime.assert_not_called()
+        self.assertEqual(watched.stat().st_mtime_ns, target_before)
 
     def test_fingerprint_detects_writer_hints_but_not_project_root(self):
         watched = self.root / "work-items"

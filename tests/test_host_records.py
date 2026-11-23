@@ -261,7 +261,7 @@ class HostRecordTests(CiWaitFixture):
         kinds = {KIND: {**self.config.record_kinds[KIND], 'wake': False}}
         with patch.object(self.project, 'config', dataclasses.replace(self.config, record_kinds=kinds)), \
                 patch.object(self.store, 'record_kinds', kinds), \
-                patch('mizu.host_records.os.utime') as wake_hint:
+                patch('mizu.host_records.touch_directory') as wake_hint:
             self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
             self.assertEqual(self.store.page_ready(role_name='worker')['total'], 0)
             self.write()

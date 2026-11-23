@@ -492,11 +492,15 @@ class WorkItemEventTests(Fixture):
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "reviewer"))
         with patch("mizu.work_items.os.utime") as hint:
             self.terminal()
-        hint.assert_called_once_with(self.project.root / "work-items", None, follow_symlinks=False)
+        hint.assert_called_once()
+        self.assertEqual(hint.call_args.args, (self.project.root / "work-items",))
+        self.assertNotIn("follow_symlinks", hint.call_args.kwargs)
         self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), "reviewer"))
         with patch("mizu.work_item_events.os.utime") as ack_hint:
             events.acknowledge(self.store, "reviewer", self.page()["events"])
-        ack_hint.assert_called_once_with(self.project.root / "work-items", None, follow_symlinks=False)
+        ack_hint.assert_called_once()
+        self.assertEqual(ack_hint.call_args.args, (self.project.root / "work-items",))
+        self.assertNotIn("follow_symlinks", ack_hint.call_args.kwargs)
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "reviewer"))
 
     def grouped_terminal_fixture(self, *, groups=4, unrelated=24):

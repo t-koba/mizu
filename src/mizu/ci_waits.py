@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import heapq
 import json
-import os
 import uuid
 from dataclasses import asdict
 from time import time
@@ -20,7 +19,7 @@ from . import lineage, vcs
 from .ci_requests import CiRequests
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, loads_finite, lock,
-                 mkdir, safe_read, sync_dir, write_json)
+                 mkdir, safe_read, sync_dir, touch_directory, write_json)
 from .fs import now as observed_now
 from .shared_records import RECORD_BYTES, RECEIPT_BYTES, KindPolicy, SharedRecords, _token
 from .publication import Publication
@@ -1329,7 +1328,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                         directory = project.root / "waits"
                         _directory(directory)
                         mkdir(directory)
-                        os.utime(directory, None, follow_symlinks=False)
+                        touch_directory(directory)
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
                 if not retry_ready and len(scan_errors) < limit:
                     scan_errors.append(_poll_error_code(exc))

@@ -16,7 +16,7 @@ import os
 
 from .completion_evidence import VERIFIED_SNAPSHOT, recorded_policy
 from .errors import Denied, LimitExceeded
-from .fs import canonical, digest, identifier, mkdir, now, safe_read, write_json
+from .fs import canonical, digest, identifier, mkdir, now, safe_read, touch_directory, write_json
 from .ledger import rows as _rows
 from .smoke_refs import record_lock
 from .work_item_seed import ITEM_ID
@@ -631,10 +631,7 @@ def acknowledge(store, role, events):
             if changed:
                 # Reuse the watched work-items parent as a non-authoritative
                 # drain hint; no role receipt directory is needed at install.
-                try:
-                    os.utime(store.root / "work-items", None, follow_symlinks=False)
-                except (OSError, NotImplementedError):
-                    pass
+                touch_directory(store.root / "work-items")
 
 
 def progress(store, roles, *, limit=100):
