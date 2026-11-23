@@ -671,8 +671,10 @@ class CiRequests:
         shared rows. Bounds: the shared reader's configured name and candidate
         limits apply before date filtering to scanned publications; if they
         end the scan before the window, only pages naming a scanned
-        publication are incomplete rather than evidence of absence. No state,
-        writes or new policy are added, and ``daily()`` keeps its own page and
+        publication are incomplete rather than evidence of absence. A fresh
+        publication's known emptiness may be recorded as a durable empty seek
+        index under the writer lock; a failed write leaves the read answer
+        intact. No new policy is added, and ``daily()`` keeps its own page and
         order.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. Failure: unreadable evidence,
