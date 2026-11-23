@@ -63,10 +63,12 @@ class DaemonProjectTests(Fixture):
         projects, _, _, _ = self.run_polls(
             [dataclasses.replace(self.config) for _ in range(3)], ready_side_effect=ready)
         self.assertEqual(len(projects), 1)
+        # The third pass reuses the memoized negative admission result: the
+        # project settings are still refreshed on every pass, but admission
+        # is not re-evaluated until state or configuration changes.
         self.assertEqual(observations, [
             (["worker", "searcher", "reviewer", "reporter", "consult"],
              ("python3 -m unittest",)),
-            (["searcher"], ("python3 -m unittest -q",)),
             (["searcher"], ("python3 -m unittest -q",)),
         ])
         self.assertEqual(projects[0].roles, ("searcher",))

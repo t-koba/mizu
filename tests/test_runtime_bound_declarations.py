@@ -258,7 +258,7 @@ POLICY_DEFAULTS = {
 DECLARATIONS = {
     'daemon_wake.py': {
         'POLL_SECONDS': (
-            '0.2', 'mechanism',
+            '1.0', 'mechanism',
             'daemon wake / portable change-detection granularity; a native '
             'notification backend can lower it without changing admission'),
     },
