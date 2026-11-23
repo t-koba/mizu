@@ -150,3 +150,21 @@ digests, non-mapping inputs, and inventories over the declared bound refuse
 rather than returning an empty report. This helper creates no workspace,
 starts no child, grants no capability, and does not enable concurrent launch;
 integration, admission and parent-only merge remain separate prerequisites.
+
+## Child admission decision (mechanism only)
+
+`mizu.child_admission.admit_children(...)` is a pure decision helper for a
+future fan-out. A caller supplies its configured child-slot ceiling and shared
+request/tool budgets, the usage already committed, and an ordered list of
+per-child `(requests, tools)` cost estimates. Those ceilings and budgets are
+caller-owned configuration; the helper defines no policy default. The decision
+admits only the leading prefix that fits every limit. The first refused child
+names every binding limit in a fixed order; later children record the earlier
+refusal that blocks them, so a child can never overtake an earlier one. Inconsistent usage,
+malformed counts, non-pair costs and oversized batches refuse rather than
+returning a partial admission.
+
+This helper acquires no slot, consumes no budget, starts no child, grants no
+capability and does not change the current synchronous or in-process async
+single-child delegation paths. Real admission, runner settlement and
+parent-only integration remain separate prerequisites; fan-out stays disabled.

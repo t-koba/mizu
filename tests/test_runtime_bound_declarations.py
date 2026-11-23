@@ -256,6 +256,16 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'child_admission.py': {
+        'MAX_CHILD_BATCH': (
+            '64', 'safety',
+            'child admission / fixed batch ceiling for a pure fan-out decision; '
+            'oversized batches fail closed before any child is considered'),
+        'MAX_BUDGET': (
+            '1000000', 'safety',
+            'child admission / fixed per-resource count ceiling for caller-supplied '
+            'slots, budgets, usage and child cost estimates'),
+    },
     'child_isolation.py': {
         'MAX_PATHS': (
             '10000', 'safety',
