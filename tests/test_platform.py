@@ -550,7 +550,7 @@ class ServiceRendererTests(unittest.TestCase):
         event = plistlib.loads(units["mizu-3-svc-reporter-event.plist"].encode())
         self.assertEqual(event["Label"], "mizu-3-svc-reporter-event")
         self.assertEqual(event["ProgramArguments"][-1], "--event")
-        self.assertTrue(any(entry.endswith("/wake") for entry in event["WatchPaths"]))
+        self.assertTrue(any(Path(entry).name == "wake" for entry in event["WatchPaths"]))
 
     def test_windows_render_is_valid_task_xml(self):
         import xml.etree.ElementTree as ET
