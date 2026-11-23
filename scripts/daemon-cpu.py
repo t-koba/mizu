@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import platform
-import resource
 import statistics
 import subprocess
 import sys
@@ -44,6 +43,11 @@ from mizu.project import Project, initialize
 
 
 def _cpu():
+    # Only the fallback measurement path needs this Unix-only module. Import it
+    # lazily so the harness's pure functions and argument checks stay testable
+    # on every platform; actual measurement remains Unix-only.
+    import resource
+
     r = resource.getrusage(resource.RUSAGE_CHILDREN)
     return r.ru_utime + r.ru_stime
 

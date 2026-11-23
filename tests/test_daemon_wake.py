@@ -66,20 +66,24 @@ class DaemonWakeTests(unittest.TestCase):
                                  time.monotonic() + 0.01, poll=0.005),
                 "deadline")
 
+    def _bump_directory(self, directory):
+        # Changing a directory's mtime by adding a direct child works on every
+        # supported platform; os.utime(follow_symlinks=False) raises
+        # NotImplementedError on Windows directories.
+        marker = directory / ".wake-probe"
+        marker.write_text("probe")
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+
     def test_fingerprint_detects_writer_hints_but_not_project_root(self):
         watched = self.root / "work-items"
         watched.mkdir()
         stable = daemon_wake.fingerprint(self.root)
         # The project root churns with ledger journal files. Watching it makes
         # the daemon wake itself on every pass, so its mtime must be ignored.
-        st = self.root.stat()
-        os.utime(self.root, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
-                 follow_symlinks=False)
+        self._bump_directory(self.root)
         self.assertEqual(daemon_wake.fingerprint(self.root), stable)
         # A writer's top-level hint is observed.
-        st = watched.stat()
-        os.utime(watched, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
-                 follow_symlinks=False)
+        self._bump_directory(watched)
         self.assertNotEqual(daemon_wake.fingerprint(self.root), stable)
 
     def test_wait_returns_change_already_present(self):
