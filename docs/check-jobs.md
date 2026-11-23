@@ -616,7 +616,13 @@ finish so their cancellation does not wake another model unit. It never selects
 obsolete work by source age or guesses its relevance.
 For a timed external wait, writable roles can use `finish` with `outcome=wait`
 and `wait_seconds`; the existing persisted wake deadline releases the unit and
-workspace rather than holding a command open.
+workspace rather than holding a command open. When the wait is on exact-head CI,
+prefer a work-item CI wait bound to the publication receipt and its exact check
+names, so a terminal CI result wakes the holder directly. If no exact CI wait is
+available, use a native finish deadline followed by a receipt-pinned status
+read. A sandbox sleep check is not CI evidence and occupies a check slot; it
+neither confirms an external run nor releases capacity the native deadline
+already frees.
 
 For `check_job` action `logs`, omitting `evidence_id` returns an index of up to 32 available recorded command IDs and ready-to-use `logs` requests for that same owned subscription. It lists only regular, nonsymlink UUID command records in the physical job's evidence directory, including when the subscription shares execution. No completion, acknowledgement or passing acceptance is inferred. Supplying an ID retains the existing paged, content-pinned evidence read and ownership checks.
 
