@@ -137,3 +137,16 @@ resolved inputs used at launch and close these gaps, or refuse launch:
 These are explicit integration prerequisites, not claims of complete effective
 runtime authority, process/container quiescence, or pilot readiness. The focused
 tests use synthetic values and local reviewed-content fixtures only.
+
+## Isolated-workspace conflict report (mechanism only)
+
+`mizu.child_isolation.report_conflicts(base, parent, child)` is a pure,
+fail-closed mechanism for a future fan-out. Callers supply bounded maps of
+workspace-relative path to exact SHA-256 digest (or `None` for absence) for a
+common base and for the parent and child outcomes. It returns a sorted,
+explicit conflict for every path both sides changed differently; identical
+convergent edits and one-sided changes are not conflicts. Malformed paths or
+digests, non-mapping inputs, and inventories over the declared bound refuse
+rather than returning an empty report. This helper creates no workspace,
+starts no child, grants no capability, and does not enable concurrent launch;
+integration, admission and parent-only merge remain separate prerequisites.

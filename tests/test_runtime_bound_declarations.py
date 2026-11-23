@@ -256,6 +256,12 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'child_isolation.py': {
+        'MAX_PATHS': (
+            '10000', 'safety',
+            'child isolation / fixed path-inventory ceiling for an explicit conflict report; '
+            'oversized inventories fail closed without scanning all stored data'),
+    },
     'protocol.py': {
         'KERNEL_FIELD_MAP_MAX': (
             '64', 'safety',
