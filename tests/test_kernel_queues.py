@@ -283,6 +283,25 @@ class QueueStoreTests(unittest.TestCase):
         self.assertEqual(self.store.ack("notes", "role:alpha", second["seq"], now=later), 2)
         self.assertEqual(self.store.read("notes", "role:alpha", now=later)["messages"], [])
 
+    def test_woken_due_run_does_not_consume_a_later_delayed_wake(self):
+        now = "2026-01-01T00:00:00+00:00"
+        later = "2026-01-02T00:00:00+00:00"
+        due = self.store.append("tasks", BODY, "operator", now=now)
+        delayed = self.store.append("tasks", BODY, "operator", now=now, deliver_at=later)
+        facts = self.store.pending("tasks", "role:alpha", now=now)
+        # A delayed message ends the run: it is neither counted nor marked woken,
+        # and `through` matches the position a read would reach.
+        self.assertEqual((facts["count"], facts["through"]), (1, due["seq"]))
+        self.assertEqual(self.store.read("tasks", "role:alpha", now=now)["next"],
+                         facts["through"])
+        self.store.mark_woken("tasks", "role:alpha", facts["through"])
+        self.store.ack("tasks", "role:alpha", due["seq"], now=now)
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=now))
+        self.assertTrue(self.store.due("tasks", "role:alpha", now=later))
+        # The delayed message itself can still be read and acked once due.
+        page = self.store.read("tasks", "role:alpha", now=later)
+        self.assertEqual([m["id"] for m in page["messages"]], [delayed["id"]])
+
     def test_cursors_and_acks_are_durable_and_monotonic(self):
         first = self.store.append("notes", {}, "role:alpha")
         page = self.store.read("notes", "role:alpha")

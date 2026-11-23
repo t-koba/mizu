@@ -604,20 +604,23 @@ class QueueStore:
         seq = self._cursor(declaration.name, actor)
         count, rows = 0, []
         while seq < head and count < PAGE_MAX:
-            seq += 1
-            message = self._message(declaration.name, seq)
+            candidate = seq + 1
+            message = self._message(declaration.name, candidate)
+            if message is not None and not self._due(message, stamp):
+                break  # head-of-line: a read stops here too, so do not cross it
+            seq = candidate
             if message is None:
                 continue
-            if not self._due(message, stamp):
-                break
             count += 1
             if newest:
                 rows.append(message)
                 del rows[:-newest]
         more = count == PAGE_MAX and seq < head
-        through = seq if count else self._cursor(declaration.name, actor)
+        # `seq` is the last position a read would reach without crossing a
+        # delayed message. Marking a not-yet-due sequence as woken would make
+        # due() scan past it when it later becomes due, losing its wake.
         return {"queue": declaration.name, "count": count, "more": more, "messages": rows,
-                "through": through}
+                "through": seq}
 
     def due(self, queue: str, actor: str, *, now=None) -> bool:
         """Whether a due message that has not yet woken ``actor`` is waiting for it.
