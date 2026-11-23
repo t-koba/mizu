@@ -24,18 +24,17 @@ from pathlib import Path
 # Wake latency of the portable detector.  This is the wait boundary's
 # granularity, not a scheduling policy: a native notification backend can lower
 # it to zero without changing the daemon's admission or deadline logic.
-POLL_SECONDS = 0.2
+POLL_SECONDS = 1.0
 
-WATCHED_FILES = (
-    "control.json", "current.json", "PROJECT.md", "goal.md", "project.toml",
-    "bridge.json", "ci-wait-absence-generation.json",
-)
+# Only paths that a writer explicitly publishes a hint to, plus the two
+# pointers that switch what the daemon may run. Other facts are time-driven
+# (cooldown, delayed delivery, probes) and are covered by the exact deadline;
+# a change to anything else is picked up at the next safety deadline. Keeping
+# this set small is what makes an idle daemon cheap.
+WATCHED_FILES = ("control.json", "current.json")
 
 WATCHED_DIRS = (
-    "wake", "queues", "histories", "snapshots", "check-jobs", "waits",
-    "work-items", "work-item-receipts", "work-order", "spool",
-    "ci-wait-observations", "ci-wait-absence", "active", "health",
-    "role-state", "routing", "selection", "observed", "shared-records",
+    "wake", "check-jobs", "waits", "work-items", "spool",
 )
 
 

@@ -120,7 +120,17 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
         return []
 
 
-def _wake_deadline(config, project, name, role_name, policy, ordinary_after) -> float | None:
+def _config_stamp(config) -> tuple:
+    """Cheap identity of the on-disk policy that can change admission."""
+    try:
+        st = config.file.stat()
+        return (st.st_dev, st.st_ino, st.st_mtime_ns)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return ()
+
+
+def _wake_deadline(config, project, name, role_name, policy, ordinary_after,
+                   baseline=(), delivery_cache=None) -> tuple[float | None, bool]:
     """Earliest monotonic instant at which a quiet daemon re-checks state.
 
     A fingerprint change can wake the daemon sooner. This bounds facts that
@@ -145,20 +155,40 @@ def _wake_deadline(config, project, name, role_name, policy, ordinary_after) -> 
             candidates.append(now_mono + max(0.1, probe_at - now_wall))
     except (MizuError, OSError, ValueError):
         pass
-    if project is not None:
+    if delivery_cache is not None:
+        cached = delivery_cache.get("baseline") == baseline
+        delivery_at = delivery_cache.get("at") if cached else None
+        if cached and delivery_at is not None and delivery_at <= now_wall:
+            cached = False  # lapsed: recompute for the next pending delivery
+    else:
+        cached = False
+    if not cached:
+        # Scanning queued messages is proportional to retained backlog. Reuse
+        # the result until a writer changes the state fingerprint; future
+        # delayed appends bump the wake directory so this is recomputed.
         try:
-            delivery_at = queue_facts.next_delivery_at(project, role_name)
-            if delivery_at is not None:
-                candidates.append(now_mono + max(0.1, delivery_at - now_wall))
+            delivery_at = (queue_facts.next_delivery_at(project, role_name)
+                           if project is not None else None)
         except (MizuError, OSError, ValueError):
-            pass
+            delivery_at = None
+        if delivery_cache is not None:
+            delivery_cache["baseline"] = baseline
+            delivery_cache["at"] = delivery_at
+    if delivery_at is not None:
+        candidates.append(now_mono + max(0.1, delivery_at - now_wall))
+    if project is not None:
         try:
             snapshot = project.snapshots.get()
             if snapshot.get("state") == "wait" and snapshot.get("wake_at") is not None:
                 candidates.append(now_mono + max(0.1, snapshot["wake_at"] - now_wall))
         except (MizuError, OSError, ValueError):
             pass
-    return min(candidates) if candidates else None
+    if not candidates:
+        return None, False
+    earliest = min(candidates)
+    # The safety observation is not a fact: a lapsed actionable deadline is the
+    # only time-driven reason to re-run admission without a state change.
+    return earliest, earliest < now_mono + config.limits.idle_seconds
 
 
 def daemon(config: Config, name: str, role_name: str) -> None:
@@ -176,6 +206,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             ordinary_after = 0.0
             project = None
             policy = None
+            delivery_cache: dict = {}
+            readiness_memo: dict = {}
             while not stop.is_set():
                 # Arm before the first state read: anything that changes during
                 # the read/render/pass leaves a fingerprint difference that ends
@@ -215,7 +247,20 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                                           now=time.time(), interval=interval):
                                 print(json.dumps(event, ensure_ascii=False), flush=True)
                         if policy == "signals":
-                            ready = should_run(project, project.snapshots.get(), role_name=role_name)
+                            # Admission reads may scan retained records. A
+                            # negative result is reused only while the state
+                            # fingerprint and configuration are unchanged and
+                            # no actionable deadline has lapsed: every wake
+                            # that could change readiness invalidates it.
+                            memo_key = (baseline, _config_stamp(config))
+                            if readiness_memo.get("key") == memo_key:
+                                ready = False
+                            else:
+                                ready = should_run(project, project.snapshots.get(),
+                                                   role_name=role_name)
+                                readiness_memo.clear()
+                                if not ready:
+                                    readiness_memo["key"] = memo_key
                         else:
                             ready = not control.get("draining")
                     if ready and time.monotonic() >= ordinary_after:
@@ -234,8 +279,11 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 # A single interruptible wait covers every idle path: a state
                 # change, an explicit deadline, or a stop request ends it.
                 root = project.root if project is not None else None
-                deadline = _wake_deadline(config, project, name, role_name, policy, ordinary_after)
-                daemon_wake.wait(stop, root, baseline, deadline)
+                deadline, actionable = _wake_deadline(config, project, name, role_name,
+                                                      policy, ordinary_after, baseline, delivery_cache)
+                reason = daemon_wake.wait(stop, root, baseline, deadline)
+                if reason == "change" or (reason == "deadline" and actionable):
+                    readiness_memo.clear()
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)

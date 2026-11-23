@@ -430,6 +430,13 @@ class QueueStore:
         if seq > self._stored_head(queue):
             atomic_write(self.root / self._relative(queue, "head.json"), canonical({"seq": seq}))
         declaration = self.queues.get(queue)
+        if not self._due(message, stamp):
+            # A future delivery writes no role wake, so a daemon caching its
+            # next deadline would otherwise sleep through it. Bump the wake
+            # directory to invalidate that cache; admission stays authoritative.
+            pending = self.root / "wake" / "delivery-pending"
+            mkdir(pending.parent)
+            atomic_write(pending, canonical({"at": clock()}))
         if self._due(message, stamp) and declaration is not None:
             woken = [principal for principal in declaration.wake
                      if self._wakes(declaration, message, principal)]

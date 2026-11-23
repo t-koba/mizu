@@ -207,6 +207,16 @@ class QueueStoreTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.append("notes", {"large": "x" * (1024 * 1024 + 1)}, "role:alpha")
 
+    def test_future_delivery_publishes_a_wake_hint(self):
+        # A future delivery writes no role wake. The watched wake directory
+        # must still change so a daemon caching its next deadline recomputes.
+        before = (self.root / "wake").stat().st_mtime_ns if (self.root / "wake").exists() else None
+        self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(1))
+        self.assertFalse((self.root / "wake" / "alpha").exists())
+        self.assertTrue((self.root / "wake" / "delivery-pending").exists())
+        after = (self.root / "wake").stat().st_mtime_ns
+        self.assertNotEqual(after, before)
+
     def test_delayed_delivery_and_wake_files(self):
         self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(1))
         self.assertFalse((self.root / "wake" / "alpha").exists())
