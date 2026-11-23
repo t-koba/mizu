@@ -2,17 +2,20 @@
 
 Offline only: the adapter is a local double, no provider, no publication.
 """
+import contextlib
 import dataclasses
 import datetime as dt
 import json
 import shutil
+import stat
 import sys
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu import ci_requests
-from mizu.ci_requests import (CI_DIAGNOSTIC_RECORD_BYTES, RECORD_BYTES,
+from mizu.ci_requests import (ACTIVITY, CI_DIAGNOSTIC_RECORD_BYTES, RECORD_BYTES,
                               CiRequests, _summary, _unresolved_summary, request_id)
 from mizu.config import CiRequestEvidence
 from mizu.errors import Denied, LimitExceeded
@@ -929,6 +932,160 @@ class CiRequestTests(Fixture):
         with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
             pages = store.matching_many({"head": ([publication], dt.date(2026, 10, 1))})
         self.assertEqual(pages, {"head": {"items": [fresh], "incomplete": False}})
+
+    def write_activity(self):
+        path = self.project.root / ACTIVITY
+        mkdir(path.parent)
+        write_json(path, uuid.uuid4().hex)
+        return path
+
+    def fresh_receipt(self, recorded_at="2036-10-22T12:00:00+00:00"):
+        with patch("mizu.publication.now", return_value=recorded_at):
+            return Publication.record_external(
+                self.project.root, branch="main", published_sha=SHA,
+                code_digest="1" * 64, approval="approval", source_commit="d" * 40,
+                projection=public_source_identity({}))
+
+    def unrelated_marker(self, store, sha, publication="f" * 64):
+        identity = request_id(publication, sha, ["ci"])
+        mkdir(store.root)
+        write_json(store.root / f"{identity}.dispatch.json", {
+            "request_id": identity, "publication_id": publication, "sha": sha,
+            "workflows": ["ci"], "dispatched_at": "2026-01-01T00:00:00+00:00"})
+        return identity
+
+    def activity_stat_patch(self, *, mode=None, mtime_ns=None, ctime_ns=None, error=None):
+        path = self.project.root / ACTIVITY
+        real_lstat = Path.lstat
+
+        class Info:
+            def __init__(self, source):
+                self.st_mode = source.st_mode if mode is None else mode
+                self.st_mtime_ns = source.st_mtime_ns if mtime_ns is None else mtime_ns
+                self.st_ctime_ns = source.st_ctime_ns if ctime_ns is None else ctime_ns
+
+        def lstat(target, *args, **kwargs):
+            if target != path:
+                return real_lstat(target, *args, **kwargs)
+            if error is not None:
+                raise error
+            return Info(real_lstat(target, *args, **kwargs))
+
+        return patch.object(Path, "lstat", lstat)
+
+    def test_fresh_publication_without_index_needs_no_shared_scan(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        receipt = self.fresh_receipt()
+        publication = receipt["publication_id"]
+        self.assertFalse(store._seek_path(publication).exists())
+        for number in range(3):
+            self.unrelated_marker(store, f"{number:040x}")
+        # A controlled over-cap name list proves the shared reader would be
+        # stopped and capped here without fabricating 1000 real markers.
+        names = [f"{request_id('f' * 64, f'{number:040x}', ['ci'])}.dispatch.json"
+                 for number in range(1001)]
+        with patch("mizu.ci_requests.os.listdir", return_value=names):
+            self.assertTrue(store._rows()[1])
+        instant = dt.datetime.fromisoformat(receipt["recorded_at"])
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")) as scan, \
+                patch.object(store, "_read", side_effect=AssertionError("dispatch read used")) as read:
+            pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+        scan.assert_not_called()
+        read.assert_not_called()
+        # Date-based callers use midnight UTC; a non-UTC instant converts to it.
+        for window in (instant.date(), instant.astimezone(dt.timezone(dt.timedelta(hours=9)))):
+            with self.subTest(window=window), \
+                    patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+                self.assertEqual(store.matching([publication], not_before=window),
+                                 {"items": [], "incomplete": False})
+
+    def test_first_dispatch_is_found_from_its_index_without_a_scan(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        receipt = self.fresh_receipt()
+        publication = receipt["publication_id"]
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": receipt["recorded_at"]})
+        self.assertTrue(store._seek_path(publication).exists())
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            pages = store.matching_many({
+                "head": ([publication], dt.datetime.fromisoformat(receipt["recorded_at"]))})
+        self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
+
+    def test_activity_boundary_uses_the_exact_instant_not_its_date(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        publication = self.fresh_receipt()["publication_id"]
+        stamp = dt.datetime(2036, 10, 22, 12, tzinfo=dt.timezone.utc)
+        epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        delta = stamp - epoch
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            with patch.object(store, "_rows", return_value=([], True)) as scan:
+                page = store.matching([publication], not_before=stamp)
+            self.assertTrue(page["incomplete"])
+            self.assertEqual(scan.call_count, 1)
+            with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+                self.assertEqual(store.matching(
+                    [publication], not_before=stamp + dt.timedelta(microseconds=1)),
+                    {"items": [], "incomplete": False})
+
+    def test_uncertain_activity_stays_on_the_conservative_scan(self):
+        policy = dataclasses.replace(CiRequestEvidence(), record_limit=1)
+        store = CiRequests(self.project.root, policy)
+        publication = "f" * 64
+        for sha in (SHA, OTHER_SHA):
+            self.unrelated_marker(store, sha, publication)
+        token = self.write_activity()
+        past = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        future = dt.datetime(2036, 1, 1, tzinfo=dt.timezone.utc)
+        cutoff_ns = 1_577_836_800_000_000_000
+        for case in ("newer", "equal", "only-change-equal", "missing",
+                     "unreadable", "nonregular"):
+            with self.subTest(case=case), contextlib.ExitStack() as stack:
+                window = past if case in ("newer", "equal", "only-change-equal") else future
+                if case == "equal":
+                    stack.enter_context(self.activity_stat_patch(
+                        mtime_ns=cutoff_ns, ctime_ns=cutoff_ns))
+                elif case == "only-change-equal":
+                    stack.enter_context(self.activity_stat_patch(
+                        mtime_ns=cutoff_ns - 1, ctime_ns=cutoff_ns))
+                elif case == "unreadable":
+                    stack.enter_context(self.activity_stat_patch(error=OSError("unreadable")))
+                elif case == "nonregular":
+                    stack.enter_context(self.activity_stat_patch(mode=stat.S_IFDIR | 0o700))
+                if case == "missing":
+                    token.unlink()
+                with patch.object(store, "_rows", wraps=store._rows) as scan:
+                    page = store.matching([publication], not_before=window)
+                self.assertEqual(scan.call_count, 1)
+                self.assertTrue(page["incomplete"])
+                if case == "missing":
+                    self.write_activity()
+
+    def test_known_empty_page_is_not_marked_incomplete_by_an_unrelated_scan(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        fresh = self.fresh_receipt()["publication_id"]
+        legacy = "not-a-publication-id"  # No index or freshness proof is possible.
+        window = dt.datetime(2036, 1, 1, tzinfo=dt.timezone.utc)
+        rows = [{"date": "2036-01-02", "request_id": "legacy-request",
+                 "publication_id": legacy}]
+        with patch.object(store, "_rows", return_value=(rows, True)) as scan:
+            pages = store.matching_many({
+                "fresh": ([fresh], window), "legacy": ([legacy], window),
+                "both": ([fresh, legacy], window)})
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(pages["fresh"], {"items": [], "incomplete": False})
+        self.assertEqual(pages["legacy"], {"items": ["legacy-request"],
+                                           "incomplete": True})
+        self.assertEqual(pages["both"], {"items": ["legacy-request"],
+                                         "incomplete": True})
 
     def test_malformed_index_or_candidate_fails_closed(self):
         store = CiRequests(self.project.root, self.config.ci_requests)

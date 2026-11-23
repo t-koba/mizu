@@ -169,7 +169,7 @@ class CiHeadStateTests(Fixture):
         page = self.matching_page([identity])
         with patch("mizu.ci_head_state.Publication.list_receipts", side_effect=receipts), \
                 patch("mizu.ci_head_state._head_window",
-                      return_value=(dt.date(2026, 10, 1), False)), \
+                      return_value=(dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc), False)), \
                 patch("mizu.ci_head_state.CiRequests.matching_many",
                       return_value={"main": page, "release": page}):
             rows = {row["subject"]: row for row in self.facts(self.two_branches())}
@@ -283,6 +283,29 @@ class CiHeadStateTests(Fixture):
         self.assertEqual(row, ci_head_state._row("main", SHA, requests=[identity]))
         self.assertFalse(row["no_evidence"])
         self.assertFalse(row["may_be_incomplete"])
+
+    def test_fresh_head_with_long_history_passes_exact_instant_and_skips_scan(self):
+        self.base_time = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+        older = [self.receipt(OLDER, code_digest=f"{index:064x}") for index in range(101)]
+        for receipt in older:
+            self.request(OLDER, receipt, dispatched_at="2026-09-02T00:00:00+00:00")
+        self.base_time = dt.datetime(2036, 10, 1, tzinfo=dt.timezone.utc)
+        head = self.receipt(SHA)
+        recorded = dt.datetime.fromisoformat(head["recorded_at"])
+        observed = {}
+        real_matching = CiRequests.matching_many
+
+        def matching(store, queries):
+            observed["query"] = queries["main"]
+            return real_matching(store, queries)
+
+        with patch.object(CiRequests, "matching_many", matching), \
+                patch.object(CiRequests, "_rows", side_effect=AssertionError("shared scan used")):
+            rows = self.facts()
+        self.assertEqual(rows, [ci_head_state._row("main", SHA)])
+        self.assertEqual(observed["query"][0], [head["publication_id"]])
+        self.assertIsInstance(observed["query"][1], dt.datetime)
+        self.assertEqual(observed["query"][1], recorded)
 
     def test_stopped_or_unreadable_head_request_scan_is_incomplete(self):
         self.receipt(SHA)

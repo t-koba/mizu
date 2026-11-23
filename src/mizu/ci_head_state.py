@@ -11,7 +11,9 @@ Schema: one row per configured CI branch, sorted by subject, with exactly
 ``{subject, revision, runs, requests, no_head, no_evidence, may_be_incomplete}``.
 ``runs`` and ``requests`` are arrays of at most eight opaque identity strings
 each, never raw records. ``no_head`` marks a branch without a ref or receipt;
-``no_evidence`` marks a revision with no runs and no requests. There is no
+``no_evidence`` marks a revision with no runs and no requests. The request
+window is the exact UTC publication instant, so a fresh publication whose
+activity token predates it needs no ledger scan. There is no
 passing/failing verdict, request state or later-revision coverage inference: a
 request belongs only to the branch whose receipt carries its publication ID at
 the exact head. Bounds: the configured branch set is already deduplicated and
@@ -99,16 +101,16 @@ def _ref_head(project, branch):
 
 
 def _head_window(project, publication_ids):
-    """UTC date of the earliest head publication, plus incompleteness."""
-    dates, incomplete = [], False
+    """Exact UTC instant of the earliest head publication, plus incompleteness."""
+    instants, incomplete = [], False
     for identity in publication_ids:
         try:
             record = Publication.read_receipt(project.root, identity)
-            dates.append(dt.datetime.fromisoformat(
-                record["recorded_at"]).astimezone(dt.timezone.utc).date())
+            instants.append(dt.datetime.fromisoformat(
+                record["recorded_at"]).astimezone(dt.timezone.utc))
         except Exception:
             incomplete = True
-    return (min(dates) if dates else None), incomplete
+    return (min(instants) if instants else None), incomplete
 
 
 def _poll_cache(project, config, branches):

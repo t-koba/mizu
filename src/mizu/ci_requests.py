@@ -396,6 +396,31 @@ class CiRequests:
         return digest(canonical([generation, info.st_dev, info.st_ino,
                                  info.st_mtime_ns, info.st_ctime_ns]))
 
+    def _fresh_activity(self, instant: dt.datetime) -> bool:
+        """A durable activity token predating ``instant`` proves quiet publication.
+
+        Every request write rotates ``ACTIVITY`` under the writer lock before
+        any dispatch, outcome or resolution record exists. Both modification
+        and change timestamps must predate the exact window instant: a
+        missing, special, unreadable or malformed token cannot prove absence.
+        """
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            return False
+        try:
+            info = (self.project_root / ACTIVITY).lstat()
+            mtime, ctime = info.st_mtime_ns, info.st_ctime_ns
+            regular = stat.S_ISREG(info.st_mode)
+            epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+            delta = instant - epoch
+        except (OSError, AttributeError, ValueError, TypeError, OverflowError):
+            return False
+        if (not regular
+                or any(type(value) is not int or value < 0 for value in (mtime, ctime))):
+            return False
+        cutoff_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                     + delta.microseconds * 1000)
+        return mtime < cutoff_ns and ctime < cutoff_ns
+
     def revoke_quiet_activity(self) -> bool:
         """Rotate the durable quiet-observation token without recording a request."""
         try:
@@ -485,8 +510,11 @@ class CiRequests:
         The shared reader's configured name and candidate limits apply before
         date filtering, so a candidate cap reached before that window makes
         only pages naming a scanned publication incomplete instead of proving
-        absence. A query naming both indexed and legacy publications receives
-        the indexed items plus the conservative legacy result.
+        absence. A publication with no index is known empty when its activity
+        token predates the exact query instant: it needs neither a shared scan
+        nor an incomplete page. A query naming both indexed and legacy
+        publications receives the indexed items plus the conservative legacy
+        result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. An index is only created for a
         publication whose ledger was certified free of legacy markers under
@@ -496,18 +524,20 @@ class CiRequests:
         pages naming a scanned publication incomplete. Invalid dates or filters
         raise ``Denied``.
         """
-        prepared = {}
+        prepared, instants = {}, {}
         for key, query in queries.items():
             try:
                 publication_ids, not_before = query
             except (TypeError, ValueError) as exc:
                 raise Denied("Invalid CI request query") from exc
             if isinstance(not_before, dt.datetime):
-                if not_before.tzinfo is None:
+                if not_before.tzinfo is None or not_before.utcoffset() is None:
                     raise Denied("Invalid CI request publication window")
-                cutoff = not_before.astimezone(dt.timezone.utc).date()
+                instant = not_before.astimezone(dt.timezone.utc)
+                cutoff = instant.date()
             elif isinstance(not_before, dt.date):
                 cutoff = not_before
+                instant = dt.datetime.combine(cutoff, dt.time.min, tzinfo=dt.timezone.utc)
             else:
                 raise Denied("Invalid CI request publication window")
             try:
@@ -517,10 +547,19 @@ class CiRequests:
             if any(not isinstance(value, str) or not value for value in wanted):
                 raise Denied("Invalid CI request publication filter")
             prepared[key] = (wanted, cutoff.isoformat())
+            instants[key] = instant
         if not prepared:
             return {}
         earliest = min(cutoff for _, cutoff in prepared.values())
-        publications = set().union(*(wanted for wanted, _ in prepared.values()))
+        # One publication can appear in several windows; the earliest exact
+        # instant decides whether its quiet token can prove absence for all.
+        publication_instants = {}
+        for key, (wanted, _) in prepared.items():
+            for publication_id in wanted:
+                previous = publication_instants.get(publication_id)
+                if previous is None or instants[key] < previous:
+                    publication_instants[publication_id] = instants[key]
+        publications = frozenset(publication_instants)
         indexed, invalid_publications, legacy = {}, set(), set()
         for publication_id in publications:
             entries, invalid = self._seek_read(publication_id)
@@ -528,6 +567,11 @@ class CiRequests:
                 invalid_publications.add(publication_id)
             elif entries is not None:
                 indexed[publication_id] = entries
+            elif (_HEX64.fullmatch(publication_id)
+                  and self._fresh_activity(publication_instants[publication_id])):
+                # Known empty: no request write has happened since the
+                # publication, so this publication needs no ledger scan.
+                continue
             else:
                 legacy.add(publication_id)
         indexed_rows: list = []
@@ -550,11 +594,11 @@ class CiRequests:
         combined = indexed_rows + shared_rows
         combined.sort(key=lambda row: (row["date"], row["request_id"]))
         return self._pages(combined, prepared, earliest, invalid_publications,
-                           shared_stopped, legacy)
+                           shared_stopped, publications, legacy)
 
     @staticmethod
     def _pages(rows, prepared, earliest, invalid_publications, stopped=False,
-               legacy_publications=None):
+               served_publications=frozenset(), scanned_publications=None):
         items = {key: [] for key in prepared}
         for row in reversed(rows):
             if row["date"] < earliest:
@@ -566,9 +610,9 @@ class CiRequests:
         def _incomplete(wanted) -> bool:
             if wanted & invalid_publications:
                 return True
-            if legacy_publications is None:
-                return bool(stopped)
-            return bool(stopped and (wanted & legacy_publications))
+            uncertain = (served_publications if scanned_publications is None
+                         else served_publications & scanned_publications)
+            return bool(stopped and (wanted & uncertain))
 
         return {key: {"items": page,
                       "incomplete": _incomplete(prepared[key][0])}
