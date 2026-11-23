@@ -536,15 +536,21 @@ class ServiceRendererTests(unittest.TestCase):
         import plistlib
         from mizu.services import render
         units = render(self.config, self.project, ROOT / "bin/mizu", system="macos")
-        self.assertEqual(sorted(units), ["mizu-3-svc-reporter.plist",
+        self.assertEqual(sorted(units), ["mizu-3-svc-reporter-event.plist",
+                                         "mizu-3-svc-reporter.plist",
                                          "mizu-3-svc-worker.plist"])
-        self.assertFalse(any(name.endswith("-event.plist") for name in units))
         worker = plistlib.loads(units["mizu-3-svc-worker.plist"].encode())
         self.assertEqual(worker["Label"], "mizu-3-svc-worker")
         self.assertTrue(worker["KeepAlive"])
         self.assertIn("daemon", worker["ProgramArguments"])
         reporter = plistlib.loads(units["mizu-3-svc-reporter.plist"].encode())
         self.assertTrue(any("Hour" in entry for entry in reporter["StartCalendarInterval"]))
+        # The reporter may write and read a queue, so a reply to it wakes via
+        # the wake directory; its event trigger watches that directory.
+        event = plistlib.loads(units["mizu-3-svc-reporter-event.plist"].encode())
+        self.assertEqual(event["Label"], "mizu-3-svc-reporter-event")
+        self.assertEqual(event["ProgramArguments"][-1], "--event")
+        self.assertTrue(any(entry.endswith("/wake") for entry in event["WatchPaths"]))
 
     def test_windows_render_is_valid_task_xml(self):
         import xml.etree.ElementTree as ET
