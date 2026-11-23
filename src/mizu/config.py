@@ -109,6 +109,10 @@ DOCTOR_TIMEOUT_MAX_SECONDS = 86400
 #: Free-text state changes are supported as an explicit progress signal but
 #: do not qualify by default because paraphrasing alone is not substantive work.
 DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "message", "input")
+#: Snapshot/cursor outcome values that may count as progress for daemon
+#: readiness; configuration may narrow the set per project or role.
+DEFAULT_PROGRESS_OUTCOMES = ("continue", "bounded", "wait")
+ALLOWED_PROGRESS_OUTCOMES = frozenset({"continue", "bounded", "wait", "blocked", "done"})
 #: Shared-fragment `include` bounds (fixed mechanism, not knobs per ADR-006).
 MAX_INCLUDE_DEPTH = 8
 MAX_INCLUDE_FILES = 32
@@ -455,6 +459,7 @@ class Limits:
     readiness_recheck_seconds: int = 0
     cooldown_seconds: int = 5
     progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
+    progress_outcomes: tuple[str, ...] = DEFAULT_PROGRESS_OUTCOMES
     no_progress_continuations: int = 0
     no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
@@ -811,6 +816,11 @@ class Role:
     #: qualification for that role) must hold unique supported signal
     #: names like the project bound.
     progress_signals: tuple[str, ...] | None = None
+    #: Per-role progress-outcome override. None inherits the project
+    #: `[limits]` value; a set value (including empty, which disables all
+    #: progress self-admission for that role) must hold unique supported
+    #: outcome names like the project bound.
+    progress_outcomes: tuple[str, ...] | None = None
     #: Per-role event-only recovery poll override. None keeps the fixed
     #: 60-second default; a set value must lie in 60-2678400 like the
     #: Task Scheduler repetition bound. Only unscheduled watched roles use
@@ -1013,6 +1023,34 @@ def role_progress_signals(config, role):
         return tuple(config.limits.progress_signals)
     except Exception:
         return DEFAULT_PROGRESS_SIGNALS
+
+
+def role_progress_outcomes(config, role):
+    """Effective progress-outcome list for one role for one daemon check.
+
+    Schema: role override when set (including empty, which disables progress
+    self-admission for that role), else project `[limits]` progress_outcomes.
+    Trust: configuration. Failure: never raises; malformed values read as the
+    built-in default (load already refuses them fail-closed).
+    """
+    try:
+        value = getattr(role, "progress_outcomes", None)
+    except Exception:
+        value = None
+    if value is not None:
+        if (isinstance(value, (tuple, list))
+                and all(isinstance(v, str) and v in ALLOWED_PROGRESS_OUTCOMES for v in value)
+                and len(value) == len(set(value))):
+            return tuple(value)
+        return DEFAULT_PROGRESS_OUTCOMES
+    try:
+        values = tuple(config.limits.progress_outcomes)
+    except Exception:
+        return DEFAULT_PROGRESS_OUTCOMES
+    if (all(isinstance(v, str) and v in ALLOWED_PROGRESS_OUTCOMES for v in values)
+            and len(values) == len(set(values))):
+        return values
+    return DEFAULT_PROGRESS_OUTCOMES
 
 
 def role_event_poll_seconds(role: "Role") -> int:
@@ -1520,6 +1558,7 @@ def load(file: Path) -> Config:
     lim = data.get("limits", {})
     keys(lim, {f.name for f in dataclasses.fields(Limits)}, "limits")
     allowed_progress_signals = ALLOWED_PROGRESS_SIGNALS
+    allowed_progress_outcomes = ALLOWED_PROGRESS_OUTCOMES
     for k, v in lim.items():
         if k == "session_delta_details":
             if not isinstance(v, str) or v not in ("full", "elide"):
@@ -1529,6 +1568,12 @@ def load(file: Path) -> Config:
             values = strings(v, "limits.progress_signals")
             if len(values) != len(set(values)) or any(value not in allowed_progress_signals for value in values):
                 raise ConfigError("limits.progress_signals must contain unique supported signal names")
+            lim[k] = values
+            continue
+        if k == "progress_outcomes":
+            values = strings(v, "limits.progress_outcomes")
+            if len(values) != len(set(values)) or any(value not in allowed_progress_outcomes for value in values):
+                raise ConfigError("limits.progress_outcomes must contain unique supported outcome names")
             lim[k] = values
             continue
         if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics"):
@@ -1733,7 +1778,7 @@ def load(file: Path) -> Config:
             raise ConfigError("Invalid role name")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "finish_outcomes", "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "work_item_events", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
+                    "work_item_events", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "progress_outcomes", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1866,6 +1911,14 @@ def load(file: Path) -> Config:
             role_progress = values
         else:
             role_progress = None
+        role_outcomes = role.get("progress_outcomes")
+        if role_outcomes is not None:
+            values = strings(role_outcomes, f"roles.{name}.progress_outcomes")
+            if len(values) != len(set(values)) or any(value not in ALLOWED_PROGRESS_OUTCOMES for value in values):
+                raise ConfigError(f"roles.{name}.progress_outcomes must contain unique supported outcome names")
+            role_outcomes = values
+        else:
+            role_outcomes = None
         role_event_poll = role.get("event_poll_seconds")
         if role_event_poll is not None:
             number(role_event_poll, f"roles.{name}.event_poll_seconds",
@@ -1916,6 +1969,7 @@ def load(file: Path) -> Config:
                            no_progress_backoff_seconds=role_backoff,
                            cooldown_seconds=role_cooldown,
                            progress_signals=role_progress,
+                           progress_outcomes=role_outcomes,
                            event_poll_seconds=role_event_poll,
                            event_batch_seconds=role_event_batch,
                            event_wakes=event_wakes,

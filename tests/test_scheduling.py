@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
+from mizu.config import DEFAULT_PROGRESS_OUTCOMES
 from mizu.runtime import Engine, should_run
 from mizu.scheduling import (
     DaemonFacts,
@@ -78,6 +79,20 @@ class DaemonEvaluatorTests(unittest.TestCase):
         for outcome in ("wait", "continue"):
             decision = evaluate_daemon(dataclasses.replace(facts, outcome=outcome))
             self.assertEqual((decision.ready, decision.needed), (None, "progress_admits"))
+
+    def test_progress_outcomes_gate_comes_from_facts(self):
+        self.assertEqual(DEFAULT_PROGRESS_OUTCOMES, ("continue", "bounded", "wait"))
+        admitted = _daemon(outcome="wait")
+        self.assertEqual(admitted.progress_outcomes, DEFAULT_PROGRESS_OUTCOMES)
+        self.assertEqual((evaluate_daemon(admitted).ready, evaluate_daemon(admitted).reason),
+                         (True, "progress"))
+        for facts in (
+                dataclasses.replace(admitted, progress_outcomes=("continue",)),
+                dataclasses.replace(_daemon(outcome="continue"), progress_outcomes=("wait",)),
+                dataclasses.replace(admitted, progress_outcomes=())):
+            with self.subTest(outcome=facts.outcome, outcomes=facts.progress_outcomes):
+                decision = evaluate_daemon(facts)
+                self.assertEqual((decision.ready, decision.reason), (False, "outcome"))
 
     def test_ready_work_changed_precedes_outcomes_but_not_control_or_explicit_wakes(self):
         for outcome in ("done", "wait", "continue", "bounded"):

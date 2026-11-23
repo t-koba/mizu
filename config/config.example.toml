@@ -175,6 +175,7 @@ idle_seconds = 15
 readiness_recheck_seconds = 0 # Resident signals daemon: reuse a negative readiness result while the state tree is unchanged, for at most this long (0-86400; 0 evaluates every idle tick).
 cooldown_seconds = 5
 progress_signals = ["tool", "code", "message", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.
+# progress_outcomes = ["continue", "bounded", "wait"] # Outcomes whose daemon may self-admit on progress evidence; unset keeps the default.
 no_progress_continuations = 0 # Read-only no-progress self-admissions (0-100); writer ready work needs disposition or a next_step handoff.
 no_progress_recovery_after = 2 # Consecutive unchanged-input no-progress wait, blocked, continue or bounded writer snapshots before next persistent-session dispatch starts fresh (1-100).
 no_progress_backoff_seconds = 0 # Read-only on-change timer default; per-role override also applies to writers.
@@ -502,6 +503,10 @@ daemon = true
 # as [limits].progress_signals; unset inherits the project list, explicit []
 # disables qualification for this role).
 # progress_signals = ["tool", "code", "message", "input"]
+# Per-role progress-outcome override (optional, same unique supported outcome
+# names as [limits].progress_outcomes; unset inherits the project list,
+# explicit [] disables progress self-admission for this role).
+# progress_outcomes = ["continue", "bounded", "wait"]
 # Per-role event-only recovery poll override (optional, 60-2678400 seconds,
 # default 60; the Task Scheduler minimum/bounds). Applies to unscheduled watched
 # roles on all platforms: Linux/macOS recheck pending event inputs alongside

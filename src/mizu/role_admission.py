@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from . import check_jobs, ci_waits, proposal_waits, queue_facts, reviews, work_item_events
 from . import scheduling as _scheduling
+from .config import role_progress_outcomes
 from .ci_observation import wake_ci_failures
 from .ci_wake import _ci_due_for, _ci_wake_enabled
 from .errors import Denied, LimitExceeded, MizuError
@@ -165,6 +166,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         paused=bool(control.get("paused")),
         draining=bool(control.get("draining")),
         messages_due=None,
+        progress_outcomes=role_progress_outcomes(effective, role),
     )
     decision = _scheduling.evaluate(facts)
     if (decision.ready is None and role_name in project.roles and role is not None

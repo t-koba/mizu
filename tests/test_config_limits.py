@@ -2,17 +2,18 @@
 import dataclasses
 import json
 import threading
+import types
 from pathlib import Path
 import re
 import unittest
 
 from support import Fixture
-from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES,
+from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES, DEFAULT_PROGRESS_OUTCOMES,
                          MAX_HISTORY_TEMPORARIES,
                          MAX_QUEUE_OBSERVATIONS,
                          MAX_PROJECT_GOAL_BYTES, MAX_CHECK_INPUT_BOUND, TOML_INTEGER_MAX,
                          MAX_STORAGE_RUN_ENTRIES,
-                         Limits, ROOT_KEYS, _LIMIT_RANGES, load)
+                         Limits, ROOT_KEYS, _LIMIT_RANGES, load, role_progress_outcomes)
 from mizu.errors import ConfigError
 from mizu.project import Project
 from mizu import fs, platform
@@ -172,10 +173,10 @@ class ProbeExecutableLimitConfigTests(Fixture):
 
 class LimitsCoverageTests(unittest.TestCase):
     def test_every_field_has_explicit_validation(self):
-        # These fields use the boolean, progress-signal or finite-cost validators
+        # These fields use the boolean, progress-list or finite-cost validators
         # in load(), rather than the integer range table.
         special = {"lock_diagnostics", "drain_yield", "missing_finish_counts_as_failure",
-                   "progress_signals", "session_max_cost_usd",
+                   "progress_signals", "progress_outcomes", "session_max_cost_usd",
                    "session_delta_details"}
         fields = {field.name for field in dataclasses.fields(Limits)}
         self.assertFalse(set(_LIMIT_RANGES) & special)
@@ -188,6 +189,65 @@ class LimitsCoverageTests(unittest.TestCase):
         documented = {key for row in table.splitlines()
                       for key in re.findall(r"`([a-z_]+)`", row.split("|")[1])}
         self.assertEqual({field.name for field in dataclasses.fields(Limits)}, documented)
+
+
+class ProgressOutcomesConfigTests(Fixture):
+    def _reload_with(self, section, line):
+        raw = self.file.read_text()
+        anchor = f"[{section}]\n"
+        self.assertIn(anchor, raw)
+        self.file.write_text(raw.replace(anchor, anchor + line + "\n", 1))
+        try:
+            return load(self.file)
+        finally:
+            self.file.write_text(raw)
+
+    def test_limits_default_and_valid_overrides(self):
+        self.assertEqual(Limits().progress_outcomes, DEFAULT_PROGRESS_OUTCOMES)
+        self.assertEqual(self.config.limits.progress_outcomes, DEFAULT_PROGRESS_OUTCOMES)
+        config = self._reload_with("limits", 'progress_outcomes = ["wait", "bounded"]')
+        self.assertEqual(config.limits.progress_outcomes, ("wait", "bounded"))
+        empty = self._reload_with("limits", "progress_outcomes = []")
+        self.assertEqual(empty.limits.progress_outcomes, ())
+
+    def test_limits_reject_duplicate_unsupported_and_wrong_type(self):
+        for line in ('progress_outcomes = ["wait", "wait"]',
+                     'progress_outcomes = ["unknown"]',
+                     'progress_outcomes = "wait"'):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ConfigError, "limits.progress_outcomes"):
+                    self._reload_with("limits", line)
+
+    def test_role_override_loads_and_invalid_override_fails(self):
+        self.assertIsNone(self.config.roles["worker"].progress_outcomes)
+        config = self._reload_with("roles.worker", 'progress_outcomes = ["blocked", "done"]')
+        self.assertEqual(config.roles["worker"].progress_outcomes, ("blocked", "done"))
+        self.assertIsNone(config.roles["searcher"].progress_outcomes)
+        empty = self._reload_with("roles.worker", "progress_outcomes = []")
+        self.assertEqual(empty.roles["worker"].progress_outcomes, ())
+        for line in ('progress_outcomes = ["wait", "wait"]',
+                     'progress_outcomes = ["unknown"]',
+                     'progress_outcomes = "wait"'):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ConfigError, r"roles\.worker\.progress_outcomes"):
+                    self._reload_with("roles.worker", line)
+
+    def test_helper_resolves_override_project_default_and_malformed_values(self):
+        role = self.config.roles["worker"]
+        self.assertEqual(role_progress_outcomes(self.config, role), DEFAULT_PROGRESS_OUTCOMES)
+        project = self._reload_with("limits", 'progress_outcomes = ["wait"]')
+        self.assertEqual(role_progress_outcomes(project, project.roles["worker"]), ("wait",))
+        override = dataclasses.replace(role, progress_outcomes=("blocked",))
+        self.assertEqual(role_progress_outcomes(self.config, override), ("blocked",))
+        self.assertEqual(role_progress_outcomes(self.config, dataclasses.replace(role, progress_outcomes=())), ())
+        self.assertEqual(role_progress_outcomes(None, role), DEFAULT_PROGRESS_OUTCOMES)
+        self.assertEqual(role_progress_outcomes(self.config, None), DEFAULT_PROGRESS_OUTCOMES)
+        malformed_project = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(project.limits, progress_outcomes=("wait", "wait")))
+        self.assertEqual(role_progress_outcomes(malformed_project, role), DEFAULT_PROGRESS_OUTCOMES)
+        malformed_role = types.SimpleNamespace(progress_outcomes="wait")
+        self.assertEqual(role_progress_outcomes(self.config, malformed_role), DEFAULT_PROGRESS_OUTCOMES)
 
 
 class LockTimeoutConfigTests(Fixture):

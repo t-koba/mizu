@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-
-#: Outcomes whose daemon may self-admit on progress evidence.
-_PROGRESS_OUTCOMES = ("continue", "bounded", "wait")
+from .config import DEFAULT_PROGRESS_OUTCOMES
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,6 +46,8 @@ class DaemonFacts:
     # Runtime resolves writer next-step readiness or the observer progress policy.
     # Unscoped diagnostic callers retain the legacy permissive behavior.
     progress_admits: bool | None = None
+    # Supplied from configuration by the caller; gates progress self-admission.
+    progress_outcomes: tuple[str, ...] = DEFAULT_PROGRESS_OUTCOMES
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,7 +156,7 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
         return DaemonDecision(ready=None, reason="collecting", needed="wait_expired")
     if facts.wait_expired:
         return DaemonDecision(ready=True, reason="wait")
-    if facts.outcome not in _PROGRESS_OUTCOMES:
+    if facts.outcome not in facts.progress_outcomes:
         return DaemonDecision(ready=False, reason="outcome")
     if facts.progress_admits is None:
         return DaemonDecision(ready=None, reason="collecting", needed="progress_admits")

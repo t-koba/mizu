@@ -355,6 +355,14 @@ class ProgressAdmissionTests(Fixture):
         self.assertFalse(should_run(self.project, backoff_snapshot, current_time=epoch + 61,
                                    role_name="worker", config=backoff_config))
 
+    def test_configured_progress_outcomes_gate_daemon_readiness(self):
+        parked = self._parked_snapshot(count=1, outcome="continue")
+        self.assertTrue(should_run(self.project, parked))
+        narrowed = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, progress_outcomes=("wait",)))
+        self.assertFalse(should_run(self.project, parked, config=narrowed))
+
     def test_configured_backoff_does_not_dispatch_empty_writer(self):
         old_stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=120)).isoformat(timespec="microseconds")
         parked = self._parked_snapshot(count=1, stamp=old_stamp)
