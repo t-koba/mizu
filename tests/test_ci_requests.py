@@ -6,7 +6,6 @@ import contextlib
 import dataclasses
 import datetime as dt
 import json
-import os
 import shutil
 import stat
 import sys
@@ -1149,19 +1148,33 @@ class CiRequestTests(Fixture):
                     self.assertEqual(scan.call_count, 1)
                     self.assertIn(marker, page["items"])
 
-    def test_malformed_activity_file_on_disk_stays_on_the_conservative_scan(self):
-        store = CiRequests(self.project.root, CiRequestEvidence())
-        publication = "f" * 64
-        marker = self.unrelated_marker(store, SHA, publication)
-        token = self.write_activity()
-        # A genuinely malformed regular file, backdated so only its content
-        # can disqualify the quiet proof (no mocked stat/content observation).
-        token.write_bytes(b"not JSON")
-        os.utime(token, ns=(0, 0))
-        with patch.object(store, "_rows", wraps=store._rows) as scan:
-            page = store.matching([publication], not_before=dt.date(2026, 1, 1))
-        self.assertEqual(scan.call_count, 1)
-        self.assertIn(marker, page["items"])
+    def test_activity_file_on_disk_discriminates_on_content_not_ctime(self):
+        # POSIX ctime cannot be backdated with os.utime, so a real file made to
+        # look old fails the quiet proof on ctime alone and never tests its
+        # content. Read real bytes from disk but pin only the stat observation
+        # to old timestamps: the on-disk content becomes the sole discriminator.
+        # Each case uses its own publication so a valid token's durable empty
+        # seek index cannot mask the malformed cases that follow.
+        cases = (("valid", "1" * 64, json.dumps(uuid.uuid4().hex).encode("utf-8")),
+                 ("not-json", "2" * 64, b"not JSON"),
+                 ("wrong-hex", "3" * 64, b'"' + b"z" * 32 + b'"'))
+        for case, publication, content in cases:
+            with self.subTest(case=case):
+                store = CiRequests(self.project.root, CiRequestEvidence())
+                marker = self.unrelated_marker(store, SHA, publication)
+                token = self.write_activity()
+                token.write_bytes(content)
+                # content=None keeps the real safe_read_info byte read; only
+                # mtime/ctime come from the patched stat observation.
+                with self.activity_stat_patch(mtime_ns=0, ctime_ns=0), \
+                        patch.object(store, "_rows", wraps=store._rows) as scan:
+                    page = store.matching([publication], not_before=dt.date(2026, 1, 1))
+                if case == "valid":
+                    scan.assert_not_called()
+                    self.assertEqual(page, {"items": [], "incomplete": False})
+                else:
+                    self.assertEqual(scan.call_count, 1)
+                    self.assertIn(marker, page["items"])
 
     def test_known_empty_page_is_not_marked_incomplete_by_an_unrelated_scan(self):
         store = CiRequests(self.project.root, CiRequestEvidence())
