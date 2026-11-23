@@ -132,6 +132,7 @@ class EditorSearchTests(Fixture):
         write_json(bundle / 'editor-search.json', dataclasses.asdict(policy))
         return Capsule(bundle, self.root / 'outbox')
 
+    @unittest.skipUnless(os.name == "posix", "directory mtime wake hint is best-effort and suppressed off POSIX")
     def test_write_message_bumps_watched_spool_directory_mtime(self):
         capsule = self.capsule({'a': b'needle\n'}, Editor())
         watched = capsule.outbox.parent
