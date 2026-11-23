@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from . import check_jobs, ci_waits, proposal_waits, reviews, work_item_events
+from . import check_jobs, ci_waits, proposal_waits, queue_facts, reviews, work_item_events
 from .config import role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
 from .fs import DIGEST, canonical, digest, now, write_json
@@ -333,4 +333,7 @@ class ContextFinishMixin:
             finished["review"] = review
         write_json(self.run_dir / "finish-intent.json", finished)
         self.finished = finished
+        # The unit saw its opening's messages and finished: they have woken the
+        # role. An interrupted unit never gets here, so its messages wake again.
+        queue_facts.mark_woken(self.project, self.role.name, self.queues)
         return {"sealed": True}

@@ -3,7 +3,8 @@
 The facts are counts and the newest messages of each declared queue the role
 may read; nothing here interprets a message, names a queue or acknowledges
 anything. Readiness admits a role when a queue that wakes it has a due
-unacknowledged message for it.
+message that has not woken it yet; a finished unit records that its opening's
+messages have woken the role.
 """
 from __future__ import annotations
 
@@ -41,6 +42,15 @@ def due(project, role_name: str) -> bool:
         except (Denied, OSError, ValueError):
             return True
     return False
+
+
+def mark_woken(project, role_name: str, rows: list[dict]) -> None:
+    """Record that the opening's due messages have woken the role (waking queues only)."""
+    store = project.kernel_queues
+    wakes = set(waking(project.config, role_name))
+    for row in rows:
+        if row.get("queue") in wakes and type(row.get("through")) is int:
+            store.mark_woken(row["queue"], principal(role_name), row["through"])
 
 
 def opening(project, role_name: str) -> list[dict]:

@@ -217,6 +217,34 @@ class QueueStoreTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.append("tasks", BODY, "role:alpha", deliver_at="2020-01-01T00:00:00")
 
+    def test_own_immediate_message_does_not_wake_its_author(self):
+        self.store.append("tasks", BODY, "role:alpha")
+        self.assertFalse((self.root / "wake" / "alpha").exists())
+        self.assertFalse(self.store.due("tasks", "role:alpha"))
+        self.assertEqual(self.store.pending("tasks", "role:alpha")["count"], 1)  # still readable
+        self.store.append("tasks", BODY, "role:beta")
+        self.assertTrue((self.root / "wake" / "alpha").exists())
+        self.assertTrue(self.store.due("tasks", "role:alpha"))
+
+    def test_own_delayed_message_wakes_its_author_when_due(self):
+        self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(-1))
+        self.assertTrue((self.root / "wake" / "alpha").exists())
+        self.assertTrue(self.store.due("tasks", "role:alpha"))
+
+    def test_a_message_wakes_a_reader_once(self):
+        self.store.append("tasks", BODY, "operator")
+        self.assertTrue(self.store.due("tasks", "role:alpha"))
+        through = self.store.pending("tasks", "role:alpha")["through"]
+        self.assertEqual(self.store.mark_woken("tasks", "role:alpha", through), 1)
+        self.assertFalse(self.store.due("tasks", "role:alpha"))  # unacknowledged, not a standing wake
+        self.assertEqual(self.store.pending("tasks", "role:alpha")["count"], 1)
+        self.assertEqual(self.store.mark_woken("tasks", "role:alpha", 0), 1)  # monotonic
+        self.assertEqual(self.store.mark_woken("tasks", "role:alpha", 99), 1)  # bounded by head
+        self.store.append("tasks", BODY, "operator")
+        self.assertTrue(self.store.due("tasks", "role:alpha"))
+        with self.assertRaises(Denied):
+            self.store.mark_woken("notes", "role:beta", 1)
+
     def test_read_and_ack_never_cross_an_undelivered_delayed_message(self):
         now = "2026-01-01T00:00:00+00:00"
         later = "2026-01-02T00:00:00+00:00"

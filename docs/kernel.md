@@ -104,7 +104,12 @@ body = {type = "string", max = 65536}
   again. Messages already removed by retention leave a gap that acknowledgement
   skips, matching the reads that crossed it.
 - Appending a due message, or a delayed message becoming due, touches
-  `wake/<role>` for each role in the queue's `wake` list. The service manager
+  `wake/<role>` for each role in the queue's `wake` list. A message wakes each
+  reader once: a unit's durable finish records, per reader, the last message its
+  opening delivered (`woken/<principal>.json`), and only a later due message
+  wakes that reader again. Unacknowledged messages stay pending and readable
+  but are not a standing wake. A reader is not woken by its own message,
+  except a delayed one, which is a wake its author asked for. The service manager
   watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's
   own watch). The scheduler sleeps until the next wake or the earliest
   `deliver_at`.

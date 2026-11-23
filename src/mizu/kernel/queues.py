@@ -4,6 +4,7 @@ Layout under the project root:
   queues/<queue>/messages/<seq:020d>.json  immutable messages, create-only
   queues/<queue>/head.json                 last assigned sequence (derived)
   queues/<queue>/cursors/<principal>.json  one durable cursor per reader principal
+  queues/<queue>/woken/<principal>.json    last sequence that has already woken the principal
   queues/<queue>/retain.json               first sequence not yet considered for removal
   queues/ids/<id>.json                     global id -> (queue, seq), kept as a tombstone
   queues/refs/<id>/to.json                 bounded pointers to messages referring to <id>
@@ -409,6 +410,8 @@ class QueueStore:
         declaration = self.queues.get(queue)
         if self._due(message, stamp) and declaration is not None:
             for principal in declaration.wake:
+                if principal == message.get("author") and message.get("deliver_at") is None:
+                    continue  # a reader is not woken by its own message
                 role = identifier(principal[5:])
                 wake = self.root / "wake" / role
                 mkdir(wake.parent)
@@ -480,6 +483,31 @@ class QueueStore:
         stored = self._optional_json(self._relative(queue, "cursors", actor.replace(":", "_") + ".json"))
         value = stored.get("seq") if isinstance(stored, Mapping) else None
         return value if type(value) is int and value >= 0 else 0  # corrupt cursors license no removal
+
+    def _woken_path(self, queue: str, actor: str) -> Path:
+        return self.root / self._relative(queue, "woken", actor.replace(":", "_") + ".json")
+
+    def _woken(self, queue: str, actor: str) -> int:
+        stored = self._optional_json(self._relative(queue, "woken", actor.replace(":", "_") + ".json"))
+        value = stored.get("seq") if isinstance(stored, Mapping) else None
+        return value if type(value) is int and value >= 0 else 0
+
+    def mark_woken(self, queue: str, actor: str, seq: int) -> int:
+        """Record that messages through ``seq`` have woken ``actor``; monotonic.
+
+        A message wakes each reader once, when it is due. Later wakes need a
+        later message; the unacknowledged ones stay pending and readable.
+        """
+        declaration = self._grant(queue, actor, write=False)
+        if type(seq) is not int or seq < 0:
+            raise Denied("woken sequence must be nonnegative")
+        with self._locked():
+            seq = min(seq, self._head(declaration.name))
+            current = self._woken(declaration.name, actor)
+            if seq > current:
+                atomic_write(self._woken_path(declaration.name, actor), canonical({"seq": seq}))
+                return seq
+            return current
 
     def read(self, queue: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT,
              now=None) -> dict:
@@ -558,19 +586,32 @@ class QueueStore:
                 rows.append(message)
                 del rows[:-newest]
         more = count == PAGE_MAX and seq < head
-        return {"queue": declaration.name, "count": count, "more": more, "messages": rows}
+        through = seq if count else self._cursor(declaration.name, actor)
+        return {"queue": declaration.name, "count": count, "more": more, "messages": rows,
+                "through": through}
 
     def due(self, queue: str, actor: str, *, now=None) -> bool:
-        """Whether a read by ``actor`` would deliver at least one message now."""
+        """Whether a due message that has not yet woken ``actor`` is waiting for it.
+
+        Wakes are edges, not levels: a message wakes a reader once (see
+        ``mark_woken``), and an unacknowledged message does not wake it again.
+        A reader's own message does not wake it, unless it is delayed: a
+        delayed message is a wake its author asked for.
+        """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = self._cursor(declaration.name, actor)
+        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor))
         while seq < head:
             seq += 1
             message = self._message(declaration.name, seq)
-            if message is not None:
-                return self._due(message, stamp)
+            if message is None:
+                continue
+            if not self._due(message, stamp):
+                return False  # head-of-line: a read stops here too
+            if message.get("author") == actor and message.get("deliver_at") is None:
+                continue
+            return True
         return False
 
     def message(self, id: str, actor: str) -> dict:

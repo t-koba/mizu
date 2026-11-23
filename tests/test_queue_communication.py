@@ -166,7 +166,7 @@ class QueueFactsTests(QueueFixture):
         self.assertEqual(queues[0]["queue"], "notes")
         self.assertEqual(queues[0]["count"], 1)
         self.assertEqual(queues[0]["messages"][0]["body"]["title"], "Observed upstream release")
-        self.assertEqual(set(queues[0]), {"queue", "count", "more", "messages"})
+        self.assertEqual(set(queues[0]), {"queue", "count", "more", "messages", "through"})
 
     def test_waking_message_stays_due_after_interrupted_finish_until_acked(self):
         """A finish interrupted before its intent is durable leaves the queue due for retry."""
@@ -223,6 +223,29 @@ class QueueFactsTests(QueueFixture):
         # The granted queue_ack in the retrying unit is what clears the source.
         self.assertFalse(queue_facts.due(self.project, "worker"))
         self.assertEqual(queue_facts.opening(self.project, "worker"), [])
+
+    def test_finished_unit_is_not_rewoken_by_messages_it_left_unacknowledged(self):
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
+        self.write("Observed upstream release")
+        self.assertTrue(queue_facts.due(self.project, "worker"))
+        prompts = []
+
+        def reader(ctx, prompt, profile=None):
+            prompts.append(json.loads(prompt))
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read, not acknowledged",
+                                  "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        self.assertEqual(prompts[0]["queues"][0]["count"], 1)
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        # Still pending and stated in the next opening, but no longer a wake.
+        self.assertEqual(queue_facts.opening(self.project, "worker")[0]["count"], 1)
+        self.write("Another release")
+        self.assertTrue(queue_facts.due(self.project, "worker"))
 
     def test_readiness_admits_on_due_message_in_a_waking_queue(self):
         snapshot = self.project.snapshots.get()
