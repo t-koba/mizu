@@ -129,7 +129,7 @@ def _config_stamp(config) -> tuple:
         return ()
 
 
-def _wake_deadline(config, project, name, role_name, policy, ordinary_after,
+def _wake_deadline(config, project, name, role_name, ordinary_after,
                    baseline=(), delivery_cache=None) -> tuple[float | None, bool]:
     """Earliest monotonic instant at which a quiet daemon re-checks state.
 
@@ -221,7 +221,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     config = updated
                     lock_scope.close()
                     lock_scope.enter_context(config.runtime_policy())
-                    from .probes import service_due, next_deadline
+                    from .probes import service_due
                     # Retain process-local history caches across unchanged reloads,
                     # but revalidate mutable project settings on every pass.
                     if project is None or project.config != config:
@@ -280,7 +280,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 # change, an explicit deadline, or a stop request ends it.
                 root = project.root if project is not None else None
                 deadline, actionable = _wake_deadline(config, project, name, role_name,
-                                                      policy, ordinary_after, baseline, delivery_cache)
+                                                      ordinary_after, baseline, delivery_cache)
                 reason = daemon_wake.wait(stop, root, baseline, deadline)
                 if reason == "change" or (reason == "deadline" and actionable):
                     readiness_memo.clear()
