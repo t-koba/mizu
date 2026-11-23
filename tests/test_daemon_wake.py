@@ -16,24 +16,33 @@ class DaemonWakeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def _eventually_changed(self, baseline, timeout=3.0):
+        # Some filesystems expose directory and same-size file mtime only after
+        # a short delay. A wake hint is a reason to look, so the test waits for
+        # the metadata observation to catch up instead of assuming one tick.
+        deadline = time.monotonic() + timeout
+        while daemon_wake.fingerprint(self.root) == baseline and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertNotEqual(daemon_wake.fingerprint(self.root), baseline)
+
     def test_fingerprint_stable_and_identity_aware(self):
         self.assertEqual(daemon_wake.fingerprint(None), ())
         base = daemon_wake.fingerprint(self.root)
         self.assertEqual(daemon_wake.fingerprint(self.root), base)
         # A watched file appearing changes the fingerprint.
         (self.root / "control.json").write_text("{}")
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), base)
+        self._eventually_changed(base)
         after_file = daemon_wake.fingerprint(self.root)
         # Rewriting the same-size content still changes mtime/inode.
         (self.root / "control.json").write_text("[]")
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_file)
+        self._eventually_changed(after_file)
         after_rewrite = daemon_wake.fingerprint(self.root)
         # A watched directory gaining a child changes the fingerprint.
         (self.root / "wake").mkdir()
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_rewrite)
+        self._eventually_changed(after_rewrite)
         after_dir = daemon_wake.fingerprint(self.root)
         (self.root / "wake" / "worker").write_text("")
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_dir)
+        self._eventually_changed(after_dir)
 
     def test_fingerprint_stat_count_is_independent_of_retained_inventory(self):
         original_stat = Path.stat
@@ -70,9 +79,15 @@ class DaemonWakeTests(unittest.TestCase):
         # Changing a directory's mtime by adding a direct child works on every
         # supported platform; os.utime(follow_symlinks=False) raises
         # NotImplementedError on Windows directories.
+        before = directory.stat().st_mtime_ns
         marker = directory / ".wake-probe"
         marker.write_text("probe")
         self.addCleanup(lambda: marker.unlink(missing_ok=True))
+        if directory == self.root:
+            return
+        deadline = time.monotonic() + 3.0
+        while directory.stat().st_mtime_ns == before and time.monotonic() < deadline:
+            time.sleep(0.02)
 
     def test_fingerprint_detects_writer_hints_but_not_project_root(self):
         watched = self.root / "work-items"
@@ -90,6 +105,7 @@ class DaemonWakeTests(unittest.TestCase):
         (self.root / "control.json").write_text("{}")
         baseline = daemon_wake.fingerprint(self.root)
         (self.root / "control.json").write_text("[]")
+        self._eventually_changed(baseline)
         stop = threading.Event()
         self.assertEqual(daemon_wake.wait(stop, self.root, baseline, None, poll=0.01), "change")
 
