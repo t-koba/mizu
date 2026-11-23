@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import json
+import os
 import shutil
 import stat
 import sys
@@ -954,24 +955,26 @@ class CiRequestTests(Fixture):
             "workflows": ["ci"], "dispatched_at": "2026-01-01T00:00:00+00:00"})
         return identity
 
-    def activity_stat_patch(self, *, mode=None, mtime_ns=None, ctime_ns=None, error=None):
-        path = self.project.root / ACTIVITY
-        real_lstat = Path.lstat
+    def activity_stat_patch(self, *, mode=None, mtime_ns=None, ctime_ns=None, error=None,
+                            content=None):
+        """Control the single pinned read that ``_fresh_activity`` observes."""
+        real_read = ci_requests.safe_read_info
 
         class Info:
-            def __init__(self, source):
-                self.st_mode = source.st_mode if mode is None else mode
-                self.st_mtime_ns = source.st_mtime_ns if mtime_ns is None else mtime_ns
-                self.st_ctime_ns = source.st_ctime_ns if ctime_ns is None else ctime_ns
+            st_mtime_ns = mtime_ns if mtime_ns is not None else 0
+            st_ctime_ns = ctime_ns if ctime_ns is not None else 0
 
-        def lstat(target, *args, **kwargs):
-            if target != path:
-                return real_lstat(target, *args, **kwargs)
+        def read(root, name, maximum):
+            if name != ACTIVITY:
+                return real_read(root, name, maximum)
             if error is not None:
                 raise error
-            return Info(real_lstat(target, *args, **kwargs))
+            if mode is not None and not stat.S_ISREG(mode):
+                raise Denied("Only regular, non-hardlinked files are readable")
+            raw = real_read(root, name, maximum)[0] if content is None else content
+            return raw, Info()
 
-        return patch.object(Path, "lstat", lstat)
+        return patch.object(ci_requests, "safe_read_info", read)
 
     def test_fresh_publication_without_index_needs_no_shared_scan(self):
         store = CiRequests(self.project.root, CiRequestEvidence())
@@ -1067,6 +1070,44 @@ class CiRequestTests(Fixture):
                 self.assertTrue(page["incomplete"])
                 if case == "missing":
                     self.write_activity()
+
+    def test_malformed_activity_token_cannot_prove_quiet_and_hide_a_marker(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        publication = "f" * 64
+        marker = self.unrelated_marker(store, SHA, publication)
+        self.write_activity()
+        # The marker is dated 2026-01-01; query from that day so a real scan
+        # returns it. Old token timestamps alone used to prove "known empty"
+        # and skip the scan, hiding the marker as a complete-empty page.
+        window = dt.date(2026, 1, 1)
+        valid = json.dumps(uuid.uuid4().hex).encode("utf-8")
+        for case, content in (("valid", valid), ("not-json", b"not JSON"),
+                              ("wrong-hex", b'"' + b"z" * 32 + b'"'),
+                              ("integer", b"123"), ("null", b"null")):
+            with self.subTest(case=case), \
+                    self.activity_stat_patch(content=content, mtime_ns=0, ctime_ns=0):
+                with patch.object(store, "_rows", wraps=store._rows) as scan:
+                    page = store.matching([publication], not_before=window)
+                if case == "valid":
+                    scan.assert_not_called()
+                    self.assertEqual(page, {"items": [], "incomplete": False})
+                else:
+                    self.assertEqual(scan.call_count, 1)
+                    self.assertIn(marker, page["items"])
+
+    def test_malformed_activity_file_on_disk_stays_on_the_conservative_scan(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        publication = "f" * 64
+        marker = self.unrelated_marker(store, SHA, publication)
+        token = self.write_activity()
+        # A genuinely malformed regular file, backdated so only its content
+        # can disqualify the quiet proof (no mocked stat/content observation).
+        token.write_bytes(b"not JSON")
+        os.utime(token, ns=(0, 0))
+        with patch.object(store, "_rows", wraps=store._rows) as scan:
+            page = store.matching([publication], not_before=dt.date(2026, 1, 1))
+        self.assertEqual(scan.call_count, 1)
+        self.assertIn(marker, page["items"])
 
     def test_known_empty_page_is_not_marked_incomplete_by_an_unrelated_scan(self):
         store = CiRequests(self.project.root, CiRequestEvidence())

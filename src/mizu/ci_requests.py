@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .config import CiRequestEvidence, TOML_INTEGER_MAX
 from .errors import Denied, LimitExceeded, MizuError
-from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, write_json
+from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, safe_read_info, write_json
 from .process import ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
@@ -36,6 +36,7 @@ MAX_CI_DIAGNOSTIC_BYTES = ADAPTER_DIAGNOSTIC_BYTES_MAX + 128
 UNKNOWN_REASON = "dispatch_outcome_timeout"
 ATTEMPT_FILE = re.compile(r"([0-9a-f]{64})\.(?:dispatch|request|resolution)\.json\Z")
 ACTIVITY = "evidence/ci-request-activity.json"
+_ACTIVITY_TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 #: Single-key sentinel used when ``matching()`` delegates to the shared scan.
 _MATCHING_KEY = object()
 #: Seek indexes live in a dedicated subdirectory beside the ledger, so index
@@ -391,30 +392,34 @@ class CiRequests:
         except FileNotFoundError:
             generation = None  # Legacy records predate the invalidation token.
         else:
-            if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{32}", generation):
+            if not isinstance(generation, str) or not _ACTIVITY_TOKEN.fullmatch(generation):
                 raise Denied("Invalid CI request activity token")
         return digest(canonical([generation, info.st_dev, info.st_ino,
                                  info.st_mtime_ns, info.st_ctime_ns]))
 
     def _fresh_activity(self, instant: dt.datetime) -> bool:
-        """A durable activity token predating ``instant`` proves quiet publication.
+        """A validated activity token predating ``instant`` proves quiet publication.
 
         Every request write rotates ``ACTIVITY`` under the writer lock before
-        any dispatch, outcome or resolution record exists. Both modification
-        and change timestamps must predate the exact window instant: a
-        missing, special, unreadable or malformed token cannot prove absence.
+        any dispatch, outcome or resolution record exists. Read the token's
+        bytes and timestamps from one pinned regular-file observation: a valid
+        32-hex generation whose modification and change timestamps both predate
+        the exact window instant proves no request write has happened since. A
+        missing, special, unreadable, malformed or unstable token cannot prove
+        absence and leaves the publication on the conservative scan.
         """
         if instant.tzinfo is None or instant.utcoffset() is None:
             return False
         try:
-            info = (self.project_root / ACTIVITY).lstat()
+            raw, info = safe_read_info(self.project_root, ACTIVITY, 64)
+            generation = loads_finite(raw)
             mtime, ctime = info.st_mtime_ns, info.st_ctime_ns
-            regular = stat.S_ISREG(info.st_mode)
             epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
             delta = instant - epoch
-        except (OSError, AttributeError, ValueError, TypeError, OverflowError):
+        except (MizuError, OSError, ValueError, UnicodeError, RecursionError,
+                AttributeError, TypeError, OverflowError):
             return False
-        if (not regular
+        if (not isinstance(generation, str) or not _ACTIVITY_TOKEN.fullmatch(generation)
                 or any(type(value) is not int or value < 0 for value in (mtime, ctime))):
             return False
         cutoff_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
@@ -510,9 +515,9 @@ class CiRequests:
         The shared reader's configured name and candidate limits apply before
         date filtering, so a candidate cap reached before that window makes
         only pages naming a scanned publication incomplete instead of proving
-        absence. A publication with no index is known empty when its activity
-        token predates the exact query instant: it needs neither a shared scan
-        nor an incomplete page. A query naming both indexed and legacy
+        absence. A publication with no index is known empty when a validated
+        activity token predates the exact query instant: it needs neither a
+        shared scan nor an incomplete page. A query naming both indexed and legacy
         publications receives the indexed items plus the conservative legacy
         result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
