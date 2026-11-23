@@ -47,7 +47,7 @@ class DaemonWakeTests(unittest.TestCase):
             empty = daemon_wake.fingerprint(self.root)
         fixed_count = len(calls)
         self.assertEqual(fixed_count,
-                         len(daemon_wake.WATCHED_FILES) + len(daemon_wake.WATCHED_DIRS) + 1)
+                         len(daemon_wake.WATCHED_FILES) + len(daemon_wake.WATCHED_DIRS))
         for name in ("check-jobs", "histories"):
             children = self.root / name
             children.mkdir()
@@ -66,19 +66,21 @@ class DaemonWakeTests(unittest.TestCase):
                                  time.monotonic() + 0.01, poll=0.005),
                 "deadline")
 
-    def test_fingerprint_detects_root_and_work_items_hints(self):
+    def test_fingerprint_detects_writer_hints_but_not_project_root(self):
         watched = self.root / "work-items"
         watched.mkdir()
-        after_dir = daemon_wake.fingerprint(self.root)
+        stable = daemon_wake.fingerprint(self.root)
+        # The project root churns with ledger journal files. Watching it makes
+        # the daemon wake itself on every pass, so its mtime must be ignored.
         st = self.root.stat()
         os.utime(self.root, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
                  follow_symlinks=False)
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_dir)
-        after_root = daemon_wake.fingerprint(self.root)
+        self.assertEqual(daemon_wake.fingerprint(self.root), stable)
+        # A writer's top-level hint is observed.
         st = watched.stat()
         os.utime(watched, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
                  follow_symlinks=False)
-        self.assertNotEqual(daemon_wake.fingerprint(self.root), after_root)
+        self.assertNotEqual(daemon_wake.fingerprint(self.root), stable)
 
     def test_wait_returns_change_already_present(self):
         (self.root / "control.json").write_text("{}")

@@ -11,8 +11,9 @@ Detection relies on writer-published top-level hints plus exact deadlines,
 never traversal of retained state: writers bump a fixed watched directory when
 a nested revision is committed, and delayed appends carry a ``deliver_at``
 deadline supplied by the caller.  The fingerprint stats a fixed set of paths,
-including the project root, so its cost is independent of how many retained
-files or entity directories exist.  Nothing here reads file contents or
+so its cost is independent of how many retained files or entity
+directories exist. The project root itself is deliberately not watched: its
+mtime churns with ledger journal files and would wake the daemon on every pass.  Nothing here reads file contents or
 enumerates directories.
 """
 from __future__ import annotations
@@ -48,11 +49,6 @@ def fingerprint(root: Path | None) -> tuple:
     if root is None:
         return ()
     rows = []
-    try:
-        st = root.stat()
-        rows.append((".", (st.st_dev, st.st_ino, st.st_mtime_ns)))
-    except (OSError, TypeError, ValueError):
-        rows.append((".", None))
     for name in WATCHED_FILES:
         try:
             st = (root / name).stat()
