@@ -5,7 +5,7 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import Mock, call, patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, deadline_wait, ScriptDriver
 from mizu.config import load, role_cooldown_seconds, role_daemon_spacing_seconds
 from mizu.errors import ConfigError, ModelFailure
 from mizu.runtime import Engine, daemon
@@ -170,6 +170,8 @@ class RoleCooldownRuntimeTests(Fixture):
                       patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
                       patch("mizu.probes.service_due", return_value=None),
                       patch("mizu.probes.next_deadline", return_value=None),
+                      patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
+                      patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=deadline_wait),
                       patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
                       patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
                       patch("mizu.runtime.Engine") as engine,
@@ -334,6 +336,8 @@ capabilities = ["files", "read", "finish"]
               patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
               patch("mizu.probes.service_due", return_value=None),
               patch("mizu.probes.next_deadline", return_value=None),
+              patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
+              patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=deadline_wait),
               patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
               patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
               patch("mizu.runtime.Engine") as engine,
@@ -430,6 +434,8 @@ capabilities = ["files", "read", "finish"]
               patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
               patch("mizu.probes.service_due", return_value=None),
               patch("mizu.probes.next_deadline", return_value=None),
+              patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
+              patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=deadline_wait),
               patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
               patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
               patch("mizu.runtime.Engine") as engine,

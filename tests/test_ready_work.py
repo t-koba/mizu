@@ -8,7 +8,7 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, index_items
+from support import Fixture, deadline_wait, ScriptDriver, index_items
 from mizu import work_items as work_items_module
 from mizu.errors import Denied
 from mizu.config import role_no_progress_backoff_seconds
@@ -279,7 +279,8 @@ class ReadyWorkTests(Fixture):
             return {"status": "completed"}
         config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, idle_seconds=10, cooldown_seconds=100))
-        with patch("mizu.runtime.threading.Event", return_value=event), \
+        with patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=deadline_wait), \
+             patch("mizu.runtime.threading.Event", return_value=event), \
              patch("mizu.daemon_runtime.load", return_value=config), \
              patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False), \
              patch("mizu.probes.service_due", return_value=None), \

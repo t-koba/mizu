@@ -1310,18 +1310,20 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_daemon_wait_uses_earlier_probe_deadline(self):
         from threading import Event
+        from support import deadline_wait
         event = Event()
         waits = []
         def wait(seconds):
             waits.append(seconds)
             event.set()
         event.wait = wait
-        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=self.config), \
+        with patch('mizu.daemon_runtime.daemon_wake.wait', side_effect=deadline_wait), patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=self.config), \
              patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None), \
              patch('mizu.daemon_runtime.should_run', return_value=False), patch('mizu.runtime.time.time', return_value=1000), \
              patch('mizu.probes.next_deadline', return_value=1000.5), patch('builtins.print'):
             daemon(self.config, 'sample', 'worker')
-        self.assertEqual(waits, [0.5])
+        self.assertEqual(len(waits), 1)
+        self.assertAlmostEqual(waits[0], 0.5, places=2)
 
     def test_recreated_sponsor_with_same_name_is_not_authorized(self):
         import shutil
@@ -1355,6 +1357,7 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_daemon_probe_ticks_do_not_accelerate_ordinary_cooldown(self):
         from threading import Event
+        from support import deadline_wait
         event = Event()
         ticks = [1000.0]
         waits = []
@@ -1366,7 +1369,7 @@ class RecoveryProbeTests(SelectionFixture):
         event.wait = wait
         config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
                                      idle_seconds=10, cooldown_seconds=100))
-        with patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=config), \
+        with patch('mizu.daemon_runtime.daemon_wake.wait', side_effect=deadline_wait), patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=config), \
              patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None) as service, \
              patch('mizu.daemon_runtime.should_run', return_value=True), patch('mizu.runtime.time.monotonic', side_effect=lambda: ticks[0]), \
              patch('mizu.probes.next_deadline', return_value=None), patch('builtins.print'), \

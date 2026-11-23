@@ -13,7 +13,7 @@ import signal
 import threading
 import time
 
-from . import ci_waits, editor, queue_facts
+from . import ci_waits, daemon_wake, editor, queue_facts
 from .ci_observation import POLL_STATE_FILE, _clean_ci_failures, _clean_ci_successes
 from .ci_polling import _live_ci_branches, poll_ci
 from .config import DAEMON_POLICIES, Config, load, role_daemon_spacing_seconds
@@ -120,6 +120,47 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
         return []
 
 
+def _wake_deadline(config, project, name, role_name, policy, ordinary_after) -> float | None:
+    """Earliest monotonic instant at which a quiet daemon re-checks state.
+
+    A fingerprint change can wake the daemon sooner. This bounds facts that
+    change no watched file: cooldown, a lapsed delayed delivery, probe
+    eligibility, a lapsed wait, and the safety observation for a host with no
+    notification support. Time-driven candidates are converted from the wall
+    clock to the monotonic clock exactly once, at computation time.
+    """
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    candidates: list[float] = []
+    if ordinary_after > now_mono:
+        candidates.append(ordinary_after)
+    # One bounded safety observation for time-driven facts that write no
+    # watched file (backoff, lapsed wait, CI, probe eligibility). The state
+    # fingerprint wakes the daemon far sooner on any actual change.
+    candidates.append(now_mono + config.limits.idle_seconds)
+    try:
+        from .probes import next_deadline
+        probe_at = next_deadline(config, name)
+        if probe_at is not None:
+            candidates.append(now_mono + max(0.1, probe_at - now_wall))
+    except (MizuError, OSError, ValueError):
+        pass
+    if project is not None:
+        try:
+            delivery_at = queue_facts.next_delivery_at(project, role_name)
+            if delivery_at is not None:
+                candidates.append(now_mono + max(0.1, delivery_at - now_wall))
+        except (MizuError, OSError, ValueError):
+            pass
+        try:
+            snapshot = project.snapshots.get()
+            if snapshot.get("state") == "wait" and snapshot.get("wake_at") is not None:
+                candidates.append(now_mono + max(0.1, snapshot["wake_at"] - now_wall))
+        except (MizuError, OSError, ValueError):
+            pass
+    return min(candidates) if candidates else None
+
+
 def daemon(config: Config, name: str, role_name: str) -> None:
     from .runtime import Engine  # runtime seam: patched Engine still takes effect
     stop = threading.Event()
@@ -134,7 +175,13 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             upstream_state: dict = {"last_fetch": None}
             ordinary_after = 0.0
             project = None
+            policy = None
             while not stop.is_set():
+                # Arm before the first state read: anything that changes during
+                # the read/render/pass leaves a fingerprint difference that ends
+                # the wait immediately, so no wake is lost between look and sleep.
+                root = project.root if project is not None else None
+                baseline = daemon_wake.fingerprint(root)
                 try:
                     updated = load(config.file)
                     if updated.data != config.data:
@@ -144,7 +191,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     lock_scope.enter_context(config.runtime_policy())
                     from .probes import service_due, next_deadline
                     # Retain process-local history caches across unchanged reloads,
-                    # but revalidate mutable project settings on every daemon poll.
+                    # but revalidate mutable project settings on every pass.
                     if project is None or project.config != config:
                         project = Project(config, name)
                     else:
@@ -178,43 +225,17 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         delay = role_daemon_spacing_seconds(config, role)
                         if result.get("status") in ("waiting", "deferred"):
                             # Poll at idle cadence as well, to observe operator fact/config updates.
-                            delay = min(config.limits.idle_seconds, max(0.1, result["next_evaluation_at"] - time.time()))
-                        # Probe polling must not accelerate ordinary cooldowns.
+                            delay = min(config.limits.idle_seconds,
+                                        max(0.1, result["next_evaluation_at"] - time.time()))
+                        # Cooldown gates dispatch, never just a state read.
                         ordinary_after = time.monotonic() + delay
-                        delay = min(delay, config.limits.idle_seconds)
-                        probe_at = next_deadline(config, name)
-                        if probe_at is not None:
-                            delay = min(delay, max(0.1, probe_at - time.time()))
-                        try:
-                            delivery_at = queue_facts.next_delivery_at(project, role_name)
-                        except (MizuError, OSError, ValueError):
-                            delivery_at = None
-                        if delivery_at is not None:
-                            delay = min(delay, max(0.1, delivery_at - time.time()))
-                        stop.wait(delay)
-                        continue
                 except (MizuError, OSError, ValueError) as exc:
                     print(json.dumps({"event": "run_deferred", "error": str(exc), "time": now()}), flush=True)
-                from .probes import next_deadline
-                delay = config.limits.idle_seconds
-                if ordinary_after > time.monotonic():
-                    delay = min(delay, ordinary_after - time.monotonic())
-                try:
-                    probe_at = next_deadline(config, name)
-                    if probe_at is not None:
-                        delay = min(delay, max(0.1, probe_at - time.time()))
-                except (MizuError, OSError, ValueError):
-                    pass
-                # `project` is still None when load/Project failed on the first
-                # pass; that block intentionally depends only on config.
-                if project is not None:
-                    try:
-                        delivery_at = queue_facts.next_delivery_at(project, role_name)
-                    except (MizuError, OSError, ValueError):
-                        delivery_at = None
-                    if delivery_at is not None:
-                        delay = min(delay, max(0.1, delivery_at - time.time()))
-                stop.wait(delay)
+                # A single interruptible wait covers every idle path: a state
+                # change, an explicit deadline, or a stop request ends it.
+                root = project.root if project is not None else None
+                deadline = _wake_deadline(config, project, name, role_name, policy, ordinary_after)
+                daemon_wake.wait(stop, root, baseline, deadline)
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)

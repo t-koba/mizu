@@ -32,6 +32,18 @@ from mizu.project import initialize
 from mizu.runtime import Context
 
 
+def deadline_wait(stop, root, baseline, deadline, poll=None):
+    """Stand-in for daemon_wake.wait that sleeps once to the deadline.
+
+    Timing tests drive a fake clock through ``stop.wait`` and assert exact
+    delays. This keeps that contract while the detector's finer-grained polling
+    is covered in test_daemon_wake.py.
+    """
+    now = time.monotonic()
+    stop.wait(max(0.0, deadline - now) if deadline is not None else 0.1)
+    return "stop" if stop.is_set() else "deadline"
+
+
 def write_fixture_json(path: Path, value: object) -> None:
     """Write an exclusive JSON fixture without exercising production durability."""
     with path.open("xb") as stream:

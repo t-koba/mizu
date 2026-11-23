@@ -33,10 +33,11 @@ class DaemonProjectTests(Fixture):
               patch("mizu.probes.service_due", return_value=None),
               patch("mizu.probes.next_deadline", return_value=None),
               patch("mizu.runtime.Engine") as engine,
+              patch("mizu.daemon_runtime.daemon_wake.wait") as wake_wait,
               patch("builtins.print") as output):
             daemon(self.config, "sample", "worker")
         engine.assert_not_called()
-        self.assertEqual(stop.wait.call_count, len(configs))
+        self.assertEqual(wake_wait.call_count, len(configs))
         return projects, ready, poll, output
 
     def test_equal_reload_refreshes_project_settings_without_rebuilding_stores(self):

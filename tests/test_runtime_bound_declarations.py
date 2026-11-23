@@ -256,6 +256,12 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'daemon_wake.py': {
+        'POLL_SECONDS': (
+            '0.2', 'mechanism',
+            'daemon wake / portable change-detection granularity; a native '
+            'notification backend can lower it without changing admission'),
+    },
     'child_admission.py': {
         'MAX_CHILD_BATCH': (
             '64', 'safety',

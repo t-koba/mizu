@@ -53,6 +53,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
         stop = Mock()
         stop.is_set.side_effect = [False, False, True]
         deadline = time.time() + 2.0
+        started = time.monotonic()
         with (patch.object(daemon_runtime.threading, "Event", return_value=stop),
               patch.object(daemon_runtime.signal, "signal"),
               patch.object(daemon_runtime, "lock", return_value=nullcontext()),
@@ -64,17 +65,18 @@ class DaemonRuntimeOwnershipTests(Fixture):
               patch("mizu.probes.next_deadline", return_value=None),
               patch.object(daemon_runtime.queue_facts, "next_delivery_at",
                            return_value=deadline) as next_at,
+              patch.object(daemon_runtime.daemon_wake, "wait") as wake_wait,
               patch("mizu.runtime.Engine") as engine,
               patch("builtins.print")):
             engine.return_value.run.return_value = {"status": "done", "next_evaluation_at": 0.0}
             daemon_runtime.daemon(self.config, "sample", "worker")
         next_at.assert_any_call(self.project, "worker")
-        delays = [call.args[0] for call in stop.wait.call_args_list]
-        # Both loop passes must be capped by the ~2s delivery deadline. Assert
-        # each site individually: removing either cap leaves that site at its
-        # ~5s role spacing / ordinary_after bound and must fail this test.
-        self.assertEqual(len(delays), 2, delays)
-        self.assertTrue(all(0 < d <= 2.5 for d in delays), delays)
+        deadlines = [call.args[3] for call in wake_wait.call_args_list]
+        # Both loop passes must be capped by the ~2s delivery deadline. The
+        # daemon now funnels every idle path through one wait: removing the cap
+        # leaves each deadline at its ~5s role spacing bound and fails this test.
+        self.assertEqual(len(deadlines), 2, deadlines)
+        self.assertTrue(all(started < d <= started + 2.5 for d in deadlines), deadlines)
 
     def test_daemon_survives_first_pass_config_failure(self):
         # A load failure before Project() is built leaves `project` as None at
@@ -87,10 +89,12 @@ class DaemonRuntimeOwnershipTests(Fixture):
               patch.object(daemon_runtime, "load", side_effect=ValueError("bad config")),
               patch("mizu.probes.next_deadline", return_value=None),
               patch.object(daemon_runtime.queue_facts, "next_delivery_at") as next_at,
+              patch.object(daemon_runtime.daemon_wake, "wait") as wake_wait,
               patch("builtins.print")):
             daemon_runtime.daemon(self.config, "sample", "worker")
         next_at.assert_not_called()
-        self.assertEqual(stop.wait.call_count, 1)
+        self.assertEqual(wake_wait.call_count, 1)
+        self.assertIsNone(wake_wait.call_args.args[1])
 
     def test_daemon_invokes_engine_via_runtime_seam(self):
         # daemon_runtime owns no module-scope Engine; daemon reads it from runtime.
@@ -106,6 +110,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
               patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False),
               patch("mizu.probes.service_due", return_value=None),
               patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.daemon_wake, "wait"),
               patch("mizu.runtime.Engine") as engine,
               patch("builtins.print")):
             engine.return_value.run.return_value = {"status": "done", "next_evaluation_at": 0.0}
