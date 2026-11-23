@@ -42,6 +42,26 @@ class RoleAdmissionOwnerTests(unittest.TestCase):
                           side_effect=AssertionError('no progress read')):
             self.assertFalse(role_admission._progress_self_admits(done, None, 'writer'))
 
+    def test_progress_self_admits_only_on_explicit_self_admit_disposition(self):
+        record = {'outcome': 'continue', 'progress': _progress('writer')}
+        # Any evidence-gap or non-self-admitting disposition must fail closed:
+        # a reevaluate is an evidence gap, never proof of progress.
+        for disposition in ('reevaluate', 'not_applicable', 'writer_requires_work_signal',
+                            'progress_requires_next', 'parked_no_progress'):
+            with self.subTest(disposition=disposition):
+                with patch.object(role_admission, 'progress_disposition',
+                                  return_value=disposition):
+                    self.assertFalse(
+                        role_admission._progress_self_admits(record, None, 'writer'))
+        # Only an explicit self_admit_* disposition may admit the run.
+        for disposition in ('self_admit_progress', 'self_admit_allowance',
+                            'self_admit_backoff'):
+            with self.subTest(disposition=disposition):
+                with patch.object(role_admission, 'progress_disposition',
+                                  return_value=disposition):
+                    self.assertTrue(
+                        role_admission._progress_self_admits(record, None, 'writer'))
+
     def test_reconcile_skips_read_only_roles(self):
         observer = types.SimpleNamespace(name='searcher', workspace='read', capabilities=())
         project = types.SimpleNamespace(roles={'searcher': observer})
