@@ -11,10 +11,12 @@ import uuid
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
+from mizu import ci_requests
 from mizu.ci_requests import (CI_DIAGNOSTIC_RECORD_BYTES, RECORD_BYTES,
                               CiRequests, _summary, _unresolved_summary, request_id)
+from mizu.config import CiRequestEvidence
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import canonical, digest, mkdir, read_json
+from mizu.fs import canonical, digest, mkdir, read_json, write_json
 from mizu.protocol import tool_definitions
 from mizu.project import Project
 from mizu.publication import Publication
@@ -357,7 +359,10 @@ class CiRequestTests(Fixture):
                 no_spend.update(outcome="not_dispatched", reason_code="provider_rejected",
                                 runs=[], requested_at="2026-10-21T00:00:00+00:00")
                 store.record_outcome(second_id, no_spend)
-                historical = {path: path.read_bytes() for path in store.root.iterdir()}
+                # Seek indexes are rewritten with each dispatch; markers and
+                # outcomes stay immutable.
+                historical = {path: path.read_bytes() for path in store.root.iterdir()
+                              if path.name != ci_requests.SEEK_DIR}
 
                 third_id = request_id(self.receipt["publication_id"], SHA, ["ci"], 3)
                 payload = {"outcome": "not_dispatched", "request_id": third_id,
@@ -397,7 +402,12 @@ class CiRequestTests(Fixture):
                 # Later knowledge never rewrites the risk recorded at dispatch time.
                 self.assertTrue(store.outcome(third_id)["possibly_duplicate_spend"])
                 for path in store.root.iterdir():
-                    path.unlink()
+                    if path.is_dir():
+                        for child in path.iterdir():
+                            child.unlink()
+                        path.rmdir()
+                    else:
+                        path.unlink()
 
     def test_incomplete_unreadable_or_bounded_prior_history_never_clears_risk(self):
         store, first_id, first = self.pending_marker()
@@ -878,6 +888,256 @@ class CiRequestTests(Fixture):
             with self.subTest(read=read), self.assertRaises(Denied):
                 read()
 
+    def test_seek_index_is_created_updated_and_read_without_a_shared_scan(self):
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        publication = self.receipt["publication_id"]
+        first = request_id(publication, SHA, ["ci"])
+        second = request_id(publication, SHA, ["ci"], 2)
+        for identity, day, attempt in ((first, "2026-10-20", 1), (second, "2026-10-21", 2)):
+            store.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": publication, "sha": SHA,
+                "workflows": ["ci"], "dispatched_at": f"{day}T00:00:00+00:00",
+                "attempt": attempt, "possibly_duplicate_spend": attempt == 2})
+        index = read_json(store._seek_path(publication))
+        self.assertEqual(index["publication_id"], publication)
+        self.assertEqual(index["entries"], [
+            {"request_id": first, "date": "2026-10-20"},
+            {"request_id": second, "date": "2026-10-21"}])
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            self.assertEqual(store.matching([publication], not_before=dt.date(2026, 10, 20)),
+                             {"items": [second, first], "incomplete": False})
+
+    def test_seek_matching_at_default_cap_with_older_unrelated_markers(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.assertEqual(store.policy.record_limit, 1000)
+        mkdir(store.root)
+        other = "f" * 64
+        for number in range(1001):
+            sha = f"{number:040x}"
+            identity = request_id(other, sha, ["ci"])
+            write_json(store.root / f"{identity}.dispatch.json", {
+                "request_id": identity, "publication_id": other, "sha": sha,
+                "workflows": ["ci"], "dispatched_at": "2020-01-01T00:00:00+00:00"})
+        publication = self.receipt["publication_id"]
+        fresh = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(fresh, {
+            "request_id": fresh, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        # The shared scan really is capped in this fixture, but the seek path
+        # never touches it and so never reports an incomplete page.
+        self.assertTrue(store._rows()[1])
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            pages = store.matching_many({"head": ([publication], dt.date(2026, 10, 1))})
+        self.assertEqual(pages, {"head": {"items": [fresh], "incomplete": False}})
+
+    def test_malformed_index_or_candidate_fails_closed(self):
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        publication = self.receipt["publication_id"]
+        identity = request_id(publication, SHA, ["ci"])
+        marker = {"request_id": identity, "publication_id": publication, "sha": SHA,
+                  "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"}
+        store.mark_dispatch(identity, marker)
+        path = store._seek_path(publication)
+        good = read_json(path)
+        query = {"head": ([publication], dt.date(2026, 10, 1))}
+        path.write_text("{not-json", encoding="utf-8")
+        self.assertTrue(store.matching_many(query)["head"]["incomplete"])
+        write_json(path, {**good, "entries": good["entries"] * 2})
+        self.assertTrue(store.matching_many(query)["head"]["incomplete"])
+        # A well-formed index whose candidate no longer agrees with its marker
+        # is stale; it must not be returned as a complete absence or identity.
+        write_json(path, {**good, "entries": [{**good["entries"][0], "date": "2026-10-21"}]})
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            self.assertEqual(store.matching_many(query),
+                             {"head": {"items": [], "incomplete": True}})
+        write_json(path, good)
+        store._path(identity, "dispatch").unlink()
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            self.assertEqual(store.matching_many(query),
+                             {"head": {"items": [], "incomplete": True}})
+
+    def test_malformed_index_marks_only_affected_pages_incomplete(self):
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        first, second = self.receipt["publication_id"], "f" * 64
+        for publication, sha in ((first, SHA), (second, OTHER_SHA)):
+            identity = request_id(publication, sha, ["ci"])
+            store.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": publication, "sha": sha,
+                "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        store._seek_path(first).write_text("{not-json", encoding="utf-8")
+        window = dt.date(2026, 10, 1)
+        pages = store.matching_many({"one": ([first], window), "two": ([second], window),
+                                     "both": ([first, second], window)})
+        self.assertTrue(pages["one"]["incomplete"])
+        self.assertTrue(pages["both"]["incomplete"])
+        self.assertFalse(pages["two"]["incomplete"])
+
+    def test_many_seek_indexes_do_not_crowd_legacy_marker(self):
+        policy = dataclasses.replace(self.config.ci_requests,
+                                     name_processing_limit=100, record_limit=100)
+        store = CiRequests(self.project.root, policy)
+        target = self.receipt["publication_id"]
+        legacy_identity = request_id(target, OTHER_SHA, ["ci"])
+        mkdir(store.root)
+        write_json(store.root / f"{legacy_identity}.dispatch.json", {
+            "request_id": legacy_identity, "publication_id": target,
+            "sha": OTHER_SHA, "workflows": ["ci"],
+            "dispatched_at": "2026-09-01T00:00:00+00:00"})
+        for number in range(20):
+            other = f"{number:064x}"
+            if other == target:
+                continue
+            identity = request_id(other, SHA, ["ci"])
+            store.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": other, "sha": SHA,
+                "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        self.assertTrue((store.root / ci_requests.SEEK_DIR).is_dir())
+        self.assertEqual(store._seek_path(target).parent.name, ci_requests.SEEK_DIR)
+        ledger_names = sorted(path.name for path in store.root.iterdir())
+        self.assertIn(ci_requests.SEEK_DIR, ledger_names)
+        self.assertFalse(any(name.startswith("seek-") for name in ledger_names))
+        self.assertFalse(store._seek_certifiable(target))
+        fresh = request_id(target, SHA, ["ci"])
+        store.mark_dispatch(fresh, {
+            "request_id": fresh, "publication_id": target, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-21T00:00:00+00:00"})
+        self.assertFalse(store._seek_path(target).exists())
+        found = store.matching([target], not_before=dt.date(2026, 9, 1))
+        self.assertIn(legacy_identity, found["items"])
+        self.assertIn(fresh, found["items"])
+        rows, _ = store._rows(strict=True)
+        self.assertIn(legacy_identity, {row["request_id"] for row in rows})
+
+    def test_malformed_index_does_not_force_indexed_pages_onto_capped_scan(self):
+        policy = dataclasses.replace(self.config.ci_requests,
+                                     name_processing_limit=100, record_limit=5)
+        store = CiRequests(self.project.root, policy)
+        good, bad, legacy_pub = self.receipt["publication_id"], "f" * 64, "e" * 64
+        good_identity = request_id(good, SHA, ["ci"])
+        store.mark_dispatch(good_identity, {
+            "request_id": good_identity, "publication_id": good, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        bad_identity = request_id(bad, OTHER_SHA, ["ci"])
+        store.mark_dispatch(bad_identity, {
+            "request_id": bad_identity, "publication_id": bad, "sha": OTHER_SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        store._seek_path(bad).write_text("{not-json", encoding="utf-8")
+        for number in range(6):
+            sha = f"{number:040x}"
+            identity = request_id(legacy_pub, sha, ["ci"])
+            write_json(store.root / f"{identity}.dispatch.json", {
+                "request_id": identity, "publication_id": legacy_pub, "sha": sha,
+                "workflows": ["ci"], "dispatched_at": "2020-01-01T00:00:00+00:00"})
+        self.assertTrue(store._rows()[1])
+        window = dt.date(2026, 10, 1)
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            good_only = store.matching_many({"good": ([good], window)})["good"]
+        self.assertEqual(good_only, {"items": [good_identity], "incomplete": False})
+        pages = store.matching_many({
+            "good": ([good], window),
+            "bad": ([bad], window),
+            "mixed": ([good, legacy_pub], window)})
+        self.assertEqual(pages["good"], {"items": [good_identity], "incomplete": False})
+        self.assertTrue(pages["bad"]["incomplete"])
+        self.assertIn(good_identity, pages["mixed"]["items"])
+        self.assertTrue(pages["mixed"]["incomplete"])
+
+    def test_legacy_publication_without_index_stays_on_the_conservative_scan(self):
+        policy = dataclasses.replace(self.config.ci_requests, record_limit=1)
+        store = CiRequests(self.project.root, policy)
+        publication = self.receipt["publication_id"]
+        mkdir(store.root)
+        for sha in (SHA, OTHER_SHA):
+            identity = request_id(publication, sha, ["ci"])
+            write_json(store.root / f"{identity}.dispatch.json", {
+                "request_id": identity, "publication_id": publication, "sha": sha,
+                "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        self.assertFalse(store._seek_path(publication).exists())
+        with patch.object(store, "_rows", wraps=store._rows) as scan:
+            found = store.matching([publication], not_before=dt.date(2026, 10, 1))
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(set(scan.call_args.kwargs), {"dropped"})
+        self.assertTrue(found["incomplete"])
+        third = request_id(publication, "c" * 40, ["ci"])
+        store.mark_dispatch(third, {
+            "request_id": third, "publication_id": publication, "sha": "c" * 40,
+            "workflows": ["ci"], "dispatched_at": "2026-10-21T00:00:00+00:00"})
+        self.assertFalse(store._seek_path(publication).exists())
+
+    def test_quiet_certification_accepts_a_never_created_ledger(self):
+        store = CiRequests(self.project.root / "never-dispatched", self.config.ci_requests)
+        self.assertFalse(store.root.exists())
+        self.assertEqual(store.quiet_activity(), store.activity())
+
+    def test_idle_ledger_cleans_superseded_flat_seek_for_quiet_certification(self):
+        store, identity, marker = self.pending_marker()
+        no_spend = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        no_spend.update(outcome="not_dispatched", reason_code="provider_rejected",
+                        runs=[], requested_at="2026-10-21T00:00:00+00:00")
+        store.record_outcome(identity, no_spend)
+        for path in (store.root / "seek").glob("*.json"):
+            path.unlink()
+        publication = self.receipt["publication_id"]
+        legacy_path = store.root / f"seek-{publication}.json"
+        write_json(legacy_path, {"version": 1, "publication_id": publication,
+                                 "entries": [{"request_id": identity,
+                                              "date": "2026-10-20"}]})
+        first = store.quiet_activity()
+        self.assertIsNotNone(first)
+        self.assertFalse(legacy_path.exists())
+        self.assertIsNotNone(store.quiet_activity())
+
+    def test_superseded_flat_seek_index_is_removed_before_new_seek(self):
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        old_publication = self.receipt["publication_id"]
+        old_identity = request_id(old_publication, SHA, ["ci"])
+        mkdir(store.root)
+        write_json(store.root / f"{old_identity}.dispatch.json", {
+            "request_id": old_identity, "publication_id": old_publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        legacy_path = store.root / f"seek-{old_publication}.json"
+        write_json(legacy_path, {"version": 1, "publication_id": old_publication,
+                                 "entries": [{"request_id": old_identity,
+                                              "date": "2026-10-20"}]})
+        fresh_publication = "f" * 64
+        fresh = request_id(fresh_publication, SHA, ["ci"])
+        store.mark_dispatch(fresh, {
+            "request_id": fresh, "publication_id": fresh_publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-21T00:00:00+00:00"})
+        self.assertFalse(legacy_path.exists())
+        self.assertTrue(store._seek_path(fresh_publication).exists())
+        rows, stopped = store._rows(strict=True)
+        self.assertFalse(stopped)
+        self.assertIn(old_identity, {row["request_id"] for row in rows})
+        self.assertEqual(store.matching([fresh_publication],
+                                        not_before=dt.date(2026, 10, 1)),
+                         {"items": [fresh], "incomplete": False})
+
+    def test_dispatch_does_not_proceed_when_its_index_cannot_be_written(self):
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        publication = self.receipt["publication_id"]
+        first = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(first, {
+            "request_id": first, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        index = read_json(store._seek_path(publication))
+        second = request_id(publication, SHA, ["ci"], 2)
+        marker = {"request_id": second, "publication_id": publication, "sha": SHA,
+                  "workflows": ["ci"], "dispatched_at": "2026-10-21T00:00:00+00:00",
+                  "attempt": 2, "possibly_duplicate_spend": True}
+        original = ci_requests.write_json
+
+        def fail_index(path, value, **kwargs):
+            if path == store._seek_path(publication):
+                raise OSError("index is not writable")
+            return original(path, value, **kwargs)
+
+        with patch("mizu.ci_requests.write_json", fail_index):
+            with self.assertRaises(OSError):
+                store.mark_dispatch(second, marker)
+        self.assertIsNone(store.dispatched(second))
+        self.assertEqual(read_json(store._seek_path(publication)), index)
+
     def test_matching_scans_newest_first_and_stops_at_the_window(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]
@@ -928,6 +1188,13 @@ class CiRequestTests(Fixture):
                              {"items": [], "incomplete": True})
         with self.assertRaises(Denied):
             store.matching([publication_id], not_before=dt.datetime(2026, 10, 1))
+        # A filter value that cannot name an index is not malformed evidence.
+        opaque = "not-a-publication-id"
+        with patch.object(store, "_rows", return_value=(
+                [{"date": "2026-10-02", "request_id": "match", "publication_id": opaque}],
+                False)):
+            self.assertEqual(store.matching([opaque], not_before=dt.date(2026, 10, 1)),
+                             {"items": ["match"], "incomplete": False})
 
     def test_matching_distinguishes_missing_ledger_from_unreadable_path(self):
         store = CiRequests(self.project.root)

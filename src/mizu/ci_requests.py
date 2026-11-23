@@ -38,6 +38,15 @@ ATTEMPT_FILE = re.compile(r"([0-9a-f]{64})\.(?:dispatch|request|resolution)\.jso
 ACTIVITY = "evidence/ci-request-activity.json"
 #: Single-key sentinel used when ``matching()`` delegates to the shared scan.
 _MATCHING_KEY = object()
+#: Seek indexes live in a dedicated subdirectory beside the ledger, so index
+#: files cannot crowd attempt markers out of a bounded scandir window. A
+#: single directory entry cannot displace attempt markers.
+SEEK_DIR = "seek"
+SEEK_VERSION = 1
+SEEK_BYTES = CI_DIAGNOSTIC_RECORD_BYTES
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+#: Superseded flat index layout; removed under the writer lock before seek use.
+LEGACY_SEEK_FILE = re.compile(r"seek-[0-9a-f]{64}\.json\Z")
 
 
 def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int = 1) -> str:
@@ -170,14 +179,18 @@ class CiRequests:
         return self._read(identity, "dispatch")
 
     def mark_dispatch(self, identity: str, record: dict) -> None:
-        """Write the point of no return before the provider is called."""
-        self._write(identity, "dispatch", record)
+        """Write the point of no return before the provider is called.
+
+        A publication certified free of legacy markers gets a bounded seek
+        index, updated in the same lock generation as its dispatch marker.
+        """
+        self._write(identity, "dispatch", record, before=self._seek_update)
 
     def record_outcome(self, identity: str, record: dict) -> None:
         """Write an immutable adapter outcome for a marked attempt."""
         self._write(identity, "request", record)
 
-    def _write(self, identity: str, kind: str, record: dict) -> None:
+    def _write(self, identity: str, kind: str, record: dict, *, before=None) -> None:
         maximum = (CI_DIAGNOSTIC_RECORD_BYTES
                    if self._has_diagnostic_outcome(record, kind) else RECORD_BYTES)
         if len(canonical(record)) > maximum:
@@ -187,7 +200,183 @@ class CiRequests:
             # Revoke prior quiet observations durably before any evidence
             # change (in particular before a dispatch reaches the adapter).
             write_json(self.project_root / ACTIVITY, uuid.uuid4().hex)
+            if before is not None:
+                before(identity, record)
             write_json(self._path(identity, kind), record, exclusive=True)
+
+    def _seek_path(self, publication_id: str) -> Path:
+        return self.root / SEEK_DIR / f"{publication_id}.json"
+
+    def _seek_retire(self, publication_id: str) -> None:
+        try:
+            self._seek_path(publication_id).unlink()
+        except OSError:
+            pass
+
+    def _seek_read(self, publication_id: str) -> tuple[list | None, bool]:
+        """Validated (identity, UTC date) pairs, or (None, invalid)."""
+        if not isinstance(publication_id, str) or not _HEX64.fullmatch(publication_id):
+            return None, False  # No index can exist for this filter value.
+        if not self._seek_path(publication_id).is_file():
+            return None, False
+        try:
+            raw = safe_read(self.root, f"{SEEK_DIR}/{publication_id}.json", SEEK_BYTES)
+        except FileNotFoundError:
+            return None, False
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError):
+            return None, True
+        try:
+            record = loads_finite(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            return None, True
+        if (not isinstance(record, dict)
+                or set(record) != {"version", "publication_id", "entries"}
+                or record["version"] != SEEK_VERSION
+                or record["publication_id"] != publication_id
+                or not isinstance(record["entries"], list)
+                or len(record["entries"]) > self.policy.record_limit):
+            return None, True
+        entries = []
+        for entry in record["entries"]:
+            if (not isinstance(entry, dict) or set(entry) != {"request_id", "date"}
+                    or not isinstance(entry["request_id"], str)
+                    or not _HEX64.fullmatch(entry["request_id"])
+                    or not isinstance(entry["date"], str) or len(entry["date"]) != 10):
+                return None, True
+            try:
+                date = dt.date.fromisoformat(entry["date"])
+            except ValueError:
+                return None, True
+            if date.isoformat() != entry["date"]:
+                return None, True
+            entries.append((entry["request_id"], entry["date"]))
+        if (entries != sorted(entries, key=lambda pair: (pair[1], pair[0]))
+                or len({identity for identity, _ in entries}) != len(entries)):
+            return None, True
+        return entries, False
+
+    def _seek_certifiable(self, publication_id: str) -> bool:
+        """Under the writer lock, certify that no legacy marker can hide here."""
+        maximum = self.policy.name_processing_limit
+        try:
+            with os.scandir(self.root) as entries:
+                raw = list(islice(entries, maximum + 2))
+            if len(raw) > maximum + 1:
+                return False
+            names = []
+            for entry in raw:
+                if entry.name == SEEK_DIR:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        return False
+                names.append(entry.name)
+            if len(names) > maximum:
+                return False
+            for name in names:
+                match = ATTEMPT_FILE.fullmatch(name)
+                if match is None:
+                    return False
+                identity = match.group(1)
+                try:
+                    marker = loads_finite(safe_read(
+                        self.root, f"{identity}.dispatch.json", RECORD_BYTES))
+                except FileNotFoundError:
+                    continue
+                if not isinstance(marker, dict):
+                    return False
+                if (marker.get("publication_id") == publication_id
+                        or _unresolved_summary(marker, identity) is None):
+                    return False
+        except (OSError, Denied, LimitExceeded, ValueError, TypeError):
+            return False
+        return True
+
+    def _seek_update(self, identity: str, marker: dict) -> None:
+        """Update one publication's index inside the dispatch lock."""
+        row = None if not isinstance(marker, dict) else _unresolved_summary(marker, identity)
+        publication = (row["publication_id"] if row is not None else
+                       marker.get("publication_id") if isinstance(marker, dict) else None)
+        entries = None
+        if isinstance(publication, str) and _HEX64.fullmatch(publication):
+            entries, invalid = self._seek_read(publication)
+            if invalid:
+                # A corrupt or over-budget index cannot be extended. Retire it
+                # under this lock so readers keep using the conservative scan.
+                self._seek_retire(publication)
+                entries, invalid = None, False
+        if row is None:
+            # An unindexable marker is legacy evidence for its publication.
+            # Retire any index so readers fall back to the full, conservative
+            # scan rather than trusting an index that cannot describe it.
+            if entries is not None:
+                self._seek_retire(publication)
+            return
+        if entries is None:
+            if not self._retire_legacy_seeks():
+                return
+            if not self._seek_certifiable(publication):
+                return
+            entries = []
+        if any(value == identity for value, _ in entries):
+            if (identity, row["date"]) not in entries:
+                raise Denied("Conflicting CI request seek entry")
+            return
+        entries = sorted([*entries, (identity, row["date"])],
+                         key=lambda pair: (pair[1], pair[0]))
+        index = {"version": SEEK_VERSION, "publication_id": publication,
+                 "entries": [{"request_id": value, "date": date} for value, date in entries]}
+        if len(entries) > self.policy.record_limit or len(canonical(index)) > SEEK_BYTES:
+            # The index cannot describe this ledger within the read budget;
+            # retire it rather than leave an incomplete index behind.
+            try:
+                self._seek_path(publication).unlink()
+            except OSError:
+                pass
+            return
+        mkdir(self.root / SEEK_DIR)
+        write_json(self._seek_path(publication), index)
+
+    def _retire_legacy_seeks(self) -> bool:
+        """Remove superseded flat index files before first seek certification."""
+        maximum = self.policy.name_processing_limit
+        try:
+            with os.scandir(self.root) as entries:
+                names = [entry.name for entry in islice(entries, maximum + 1)]
+            if len(names) > maximum:
+                return False
+            for name in names:
+                if LEGACY_SEEK_FILE.fullmatch(name):
+                    (self.root / name).unlink()
+            return True
+        except FileNotFoundError:
+            return True  # A ledger that was never created has nothing to retire.
+        except (OSError, Denied, LimitExceeded, ValueError, TypeError):
+            return False
+
+    def _indexed_rows(self, publication_id: str, entries: list) -> tuple[list, bool]:
+        """Revalidate each indexed candidate against its marker and outcome."""
+        rows, invalid = [], False
+        for identity, date in entries:
+            try:
+                marker = self._read(identity, "dispatch")
+                row = None if marker is None else _unresolved_summary(marker, identity)
+                if (row is None or row["publication_id"] != publication_id
+                        or row["date"] != date):
+                    invalid = True
+                    continue
+                outcome = self.outcome(identity)
+                if outcome is not None:
+                    row = _validated_outcome(outcome, identity, marker, row)
+                    if (row is None or row["publication_id"] != publication_id
+                            or row["date"] != date):
+                        invalid = True
+                        continue
+                rows.append(row)
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError):
+                invalid = True
+        return rows, invalid
 
     def activity(self) -> str:
         """Cheap local identity, not proof the ledger was read or is quiet."""
@@ -221,6 +410,8 @@ class CiRequests:
     def quiet_activity(self) -> str | None:
         """Certify one complete, quiescent ledger generation under the writer lock."""
         with lock(self.lock, blocking=False):
+            if not self._retire_legacy_seeks():
+                return None
             activity = self.activity()
             rows, incomplete = self._rows(strict=True)
             if (not incomplete and all(row["state"] in ("resolved", "not_dispatched") for row in rows)
@@ -287,15 +478,23 @@ class CiRequests:
         ``{"items": [request_id, ...], "incomplete": bool}`` pages, newest first.
         Each page holds the identities of requests whose ``publication_id`` is
         in that query's set and whose dispatch day is on or after its UTC
-        ``not_before`` date. Bounds: one shared newest-first scan of the
-        validated rows stops at the earliest window across all queries; the
-        shared reader's configured name and candidate limits apply before date
-        filtering, so a candidate cap reached before that window makes every
-        page incomplete instead of proving absence.
+        ``not_before`` date. Bounds: a publication with a validated seek index
+        is read only through that index and its own markers/outcomes; only
+        publications without an index share one newest-first scan of the
+        validated rows that stops at the earliest window across all queries.
+        The shared reader's configured name and candidate limits apply before
+        date filtering, so a candidate cap reached before that window makes
+        only pages naming a scanned publication incomplete instead of proving
+        absence. A query naming both indexed and legacy publications receives
+        the indexed items plus the conservative legacy result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
-        is not an identity and is not returned. Failure: unreadable evidence,
-        an unreadable dispatch marker, a stopped scan or dropped records make
-        every page incomplete; invalid dates or filters raise ``Denied``.
+        is not an identity and is not returned. An index is only created for a
+        publication whose ledger was certified free of legacy markers under
+        the writer lock. A missing index falls back to the shared scan, while
+        a malformed, stale or ambiguous index or candidate makes only pages
+        naming that publication incomplete; a stopped shared scan makes only
+        pages naming a scanned publication incomplete. Invalid dates or filters
+        raise ``Denied``.
         """
         prepared = {}
         for key, query in queries.items():
@@ -321,21 +520,58 @@ class CiRequests:
         if not prepared:
             return {}
         earliest = min(cutoff for _, cutoff in prepared.values())
-        dropped = []
-        try:
-            rows, stopped = self._rows(dropped=dropped)
-        except Exception:
-            return {key: {"items": [], "incomplete": True} for key in prepared}
+        publications = set().union(*(wanted for wanted, _ in prepared.values()))
+        indexed, invalid_publications, legacy = {}, set(), set()
+        for publication_id in publications:
+            entries, invalid = self._seek_read(publication_id)
+            if invalid:
+                invalid_publications.add(publication_id)
+            elif entries is not None:
+                indexed[publication_id] = entries
+            else:
+                legacy.add(publication_id)
+        indexed_rows: list = []
+        for publication_id, entries in indexed.items():
+            found, invalid = self._indexed_rows(publication_id, entries)
+            indexed_rows.extend(found)
+            if invalid:
+                invalid_publications.add(publication_id)
+        shared_rows: list = []
+        shared_stopped = False
+        if legacy:
+            dropped: list = []
+            try:
+                rows, stopped = self._rows(dropped=dropped)
+                shared_stopped = bool(stopped or dropped)
+                shared_rows = [row for row in rows if row["publication_id"] in legacy]
+            except Exception:
+                shared_rows = []
+                shared_stopped = True
+        combined = indexed_rows + shared_rows
+        combined.sort(key=lambda row: (row["date"], row["request_id"]))
+        return self._pages(combined, prepared, earliest, invalid_publications,
+                           shared_stopped, legacy)
+
+    @staticmethod
+    def _pages(rows, prepared, earliest, invalid_publications, stopped=False,
+               legacy_publications=None):
         items = {key: [] for key in prepared}
         for row in reversed(rows):
-            date = row["date"]
-            if date < earliest:
+            if row["date"] < earliest:
                 break
             for key, (wanted, cutoff) in prepared.items():
-                if date >= cutoff and row["publication_id"] in wanted:
+                if row["date"] >= cutoff and row["publication_id"] in wanted:
                     items[key].append(row["request_id"])
-        incomplete = bool(stopped or dropped)
-        return {key: {"items": page, "incomplete": incomplete}
+
+        def _incomplete(wanted) -> bool:
+            if wanted & invalid_publications:
+                return True
+            if legacy_publications is None:
+                return bool(stopped)
+            return bool(stopped and (wanted & legacy_publications))
+
+        return {key: {"items": page,
+                      "incomplete": _incomplete(prepared[key][0])}
                 for key, page in items.items()}
 
     def matching(self, publication_ids, *, not_before: dt.date) -> dict:
@@ -344,13 +580,14 @@ class CiRequests:
         Schema: ``{"items": [request_id, ...], "incomplete": bool}``. Items are
         the identities of requests whose ``publication_id`` is in
         ``publication_ids`` and whose dispatch day is on or after the UTC
-        ``not_before`` date. This reads the same validated rows as ``daily()``,
-        walks them newest first and stops at the first row older than the
-        publication window. Bounds: the shared reader's configured name and
-        candidate limits apply before date filtering; if they end the scan
-        before the window, the page is incomplete rather than evidence of
-        absence. No state, writes or new policy are added, and ``daily()``
-        keeps its own page and order.
+        ``not_before`` date. Validly indexed publications are served from
+        their own seek index; publications without an index use the validated
+        shared rows. Bounds: the shared reader's configured name and candidate
+        limits apply before date filtering to scanned publications; if they
+        end the scan before the window, only pages naming a scanned
+        publication are incomplete rather than evidence of absence. No state,
+        writes or new policy are added, and ``daily()`` keeps its own page and
+        order.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. Failure: unreadable evidence,
         an unreadable dispatch marker, or a stopped scan returns no items with
@@ -385,11 +622,29 @@ class CiRequests:
         try:
             if strict:
                 with os.scandir(self.root) as entries:
-                    names = [entry.name for entry in islice(entries, maximum + 1)]
+                    raw = list(islice(entries, maximum + 2))
+                if len(raw) > maximum + 1:
+                    return [], True
+                names = []
+                for entry in raw:
+                    if entry.name == SEEK_DIR:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                continue
+                        except OSError:
+                            return [], True
+                    names.append(entry.name)
                 if len(names) > maximum:
                     return [], True
             else:
                 names = sorted(os.listdir(self.root))
+                if SEEK_DIR in names:
+                    try:
+                        seek_path = self.root / SEEK_DIR
+                        if not seek_path.is_symlink() and seek_path.is_dir():
+                            names.remove(SEEK_DIR)
+                    except OSError:
+                        pass
         except FileNotFoundError:
             return [], False
         except NotADirectoryError:

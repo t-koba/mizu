@@ -177,11 +177,27 @@ class CiHeadStateTests(Fixture):
         for branch in ("main", "release"):
             self.assertEqual(rows[branch], {**expected, "subject": branch})
 
-    def test_two_configured_branches_share_one_request_scan(self):
+    def test_two_configured_branches_use_seek_indexes_without_a_scan(self):
         main_receipt = self.receipt(SHA, branch="main", code_digest="1" * 64)
         release_receipt = self.receipt(SHA, branch="release", code_digest="2" * 64)
         main_request = self.request(SHA, main_receipt)
         release_request = self.request(SHA, release_receipt)
+        with patch.object(CiRequests, "_rows", side_effect=AssertionError("shared scan used")):
+            rows = {row["subject"]: row for row in self.facts(self.two_branches())}
+        self.assertEqual(rows["main"], ci_head_state._row("main", SHA, requests=[main_request]))
+        self.assertEqual(rows["release"], ci_head_state._row(
+            "release", SHA, requests=[release_request]))
+
+    def test_two_legacy_publications_share_one_conservative_request_scan(self):
+        main_receipt = self.receipt(SHA, branch="main", code_digest="1" * 64)
+        release_receipt = self.receipt(SHA, branch="release", code_digest="2" * 64)
+        main_request = self.request(SHA, main_receipt)
+        release_request = self.request(SHA, release_receipt)
+        ledger = self.project.root / "evidence" / "ci-requests"
+        seek_dir = ledger / "seek"
+        if seek_dir.is_dir():
+            for path in seek_dir.glob("*.json"):
+                path.unlink()
         real_rows = CiRequests._rows
         with patch.object(CiRequests, "_rows", autospec=True,
                           side_effect=lambda store, **kwargs: real_rows(store, **kwargs)) as scan:

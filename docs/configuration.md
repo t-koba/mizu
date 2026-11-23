@@ -2356,6 +2356,28 @@ prefix, so it does **not** bound directory-listing memory. `scan_stopped` flags
 omitted names or candidates; `total` counts validated dispatches, a lower bound
 when scanning stops.
 
+A publication whose ledger was certified complete and free of legacy markers
+under the writer lock gets a bounded per-publication seek index,
+`evidence/ci-requests/seek/<publication_id>.json`, written under that same lock
+(the subdirectory is created under that lock) as each dispatch marker. The
+ledger directory holds only attempt markers beside the single `seek`
+subdirectory, so index files cannot crowd markers out of a bounded scandir
+window. The index holds only validated 64-hex request identities and
+their UTC dispatch dates, bounded by `record_limit` and a 64 KiB envelope; a
+dispatch whose index cannot be written does not proceed. Publications without
+an index keep the shared scan and its conservative `may_be_incomplete` result.
+Each validly indexed publication is served only from its own index with each
+marker and outcome revalidated (publication, SHA, identity, date, attempt and
+spend flags) instead of listing unrelated markers; only publications without an
+index share one scan. Superseded flat `seek-<publication_id>.json` files are
+removed under the writer lock before a new seek is certified or quiet-ledger
+certification is attempted; if that cleanup exceeds its bound or is unreadable,
+the publication stays on the conservative scan. A
+malformed, stale or ambiguous index or candidate marks only the affected
+publication's pages incomplete, and a stopped shared scan
+marks only pages naming a scanned publication incomplete, never a complete
+absence or an unvalidated identity.
+
 Local publication-receipt reads have an independent `[publication_evidence]`
 policy owner, shared by the CLI listing, runtime `publications` operation and
 strict publication-CI wait resolution. Omission preserves these defaults;
