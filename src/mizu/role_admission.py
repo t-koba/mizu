@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from . import check_jobs, ci_waits, proposal_waits, queue_facts, reviews, work_item_events
 from . import scheduling as _scheduling
-from .config import role_progress_outcomes
+from .config import ALLOWED_PROGRESS_OUTCOMES, outcome_effects
 from .ci_observation import wake_ci_failures
 from .ci_wake import _ci_due_for, _ci_wake_enabled
 from .errors import Denied, LimitExceeded, MizuError
@@ -44,7 +44,9 @@ def _reconcile_work_item_waits(project, role, config):
 
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
     """Only validated, role-specific continuation evidence can self-admit."""
-    if record.get("outcome") not in ("continue", "bounded"):
+    roles = getattr(config, "roles", None)
+    role_config = roles.get(role_name) if isinstance(roles, dict) else None
+    if record.get("outcome") not in outcome_effects(config, role_config).continuation:
         return False
     progress = record.get("progress")
     try:
@@ -53,8 +55,10 @@ def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
         return False
     if progress["role"] != role_name:
         return False
+    # Only an explicit self-admission is progress. A reevaluate disposition
+    # is an evidence gap and must never admit a run.
     return progress_disposition(progress, record["outcome"], config, role_name,
-                                current_time) != "parked_no_progress"
+                                current_time).startswith("self_admit_")
 
 def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
                         project=None, config=None, role_name="") -> bool:
@@ -166,7 +170,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         paused=bool(control.get("paused")),
         draining=bool(control.get("draining")),
         messages_due=None,
-        progress_outcomes=role_progress_outcomes(effective, role),
+        progress_outcomes=outcome_effects(effective, role).progress,
     )
     decision = _scheduling.evaluate(facts)
     if (decision.ready is None and role_name in project.roles and role is not None
@@ -220,7 +224,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             value = any(queue_facts.due(project, name) for name in names)
         elif needed == "outcome":
             value = role_record.get("outcome", "wait")
-            if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):
+            if observer and value not in ALLOWED_PROGRESS_OUTCOMES:
                 value = "wait"
         elif needed == "routed_events_due":
             value = _role_events_due(project, snapshot, role_name,
@@ -245,7 +249,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             if observer:
                 value = _progress_self_admits(role_record, effective, role_name, current_time)
             elif role_name is None:
-                value = role_record.get("outcome") in ("continue", "bounded")
+                value = role_record.get("outcome") in outcome_effects(effective).continuation
             else:
                 value = bool(_writer_next_task(project, snapshot, role_name))
         else:

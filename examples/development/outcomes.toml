@@ -1,0 +1,11 @@
+# Example outcome policy for a development deployment (docs/os-migration.md).
+# Include from a deployment configuration; these are the product's current
+# effects, written as configuration rather than source literals.
+[limits]
+progress_outcomes = ["continue", "bounded", "wait"]
+
+[limits.outcome_effects]
+no_progress = ["continue", "bounded", "wait", "blocked"]
+continuation = ["continue", "bounded"]
+idle = ["wait", "continue"]
+waiting = ["wait", "blocked"]

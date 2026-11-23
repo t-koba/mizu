@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from . import platform as _platform
-from .config import (MAX_NO_PROGRESS_BACKOFF_SECONDS,
+from .config import (MAX_NO_PROGRESS_BACKOFF_SECONDS, outcome_effects,
                      role_no_progress_backoff_seconds, role_progress_signals)
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, safe_read_stream, write_json, relative_parts
@@ -46,8 +46,6 @@ def _exclude_matcher(excludes):
 PROGRESS_SIGNALS = ("tool", "code", "state", "message", "input")
 WRITER_HANDOFF_PROGRESS_SIGNALS = ("tool", "code", "message")
 MAX_PROGRESS_SIGNALS = 16
-#: Finish outcomes subject to the unchanged-input no-progress policy.
-NO_PROGRESS_OUTCOMES = ("continue", "bounded", "wait", "blocked")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 # The two opening pages are each bounded to at most 100 rows.
 MAX_WAIT_RESOLUTION_TOKENS = 200
@@ -231,10 +229,11 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
         role_config = _role_config
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"
-        if outcome not in NO_PROGRESS_OUTCOMES:
+        effects = outcome_effects(config, role_config)
+        if outcome not in effects.no_progress:
             return "not_applicable"
         writer = getattr(role_config, "workspace", None) == "write"
-        if not writer and outcome not in ("continue", "bounded"):
+        if not writer and outcome not in effects.continuation:
             # Allowance and backoff are a read-only continuation policy.
             return "not_applicable"
         if writer:
@@ -268,7 +267,7 @@ def no_progress_recovery_due(value: dict | None, outcome: str, config,
     persistent session rotates only when another trigger already admits a
     unit, so recovery cannot create a no-progress spin.
     """
-    if value is None or outcome not in NO_PROGRESS_OUTCOMES:
+    if value is None:
         return False
     try:
         validate_progress(value)
@@ -276,6 +275,8 @@ def no_progress_recovery_due(value: dict | None, outcome: str, config,
         role = value["role"] if role_name is None else role_name
         roles = getattr(config, "roles", None)
         role_config = roles.get(role) if isinstance(roles, dict) else None
+        if outcome not in outcome_effects(config, role_config).no_progress:
+            return False
         if getattr(role_config, "workspace", None) != "write":
             return False
         try:

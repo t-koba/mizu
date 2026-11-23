@@ -13,7 +13,8 @@ from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES, DEFAULT_PROGRESS_OUTCOM
                          MAX_QUEUE_OBSERVATIONS,
                          MAX_PROJECT_GOAL_BYTES, MAX_CHECK_INPUT_BOUND, TOML_INTEGER_MAX,
                          MAX_STORAGE_RUN_ENTRIES,
-                         Limits, ROOT_KEYS, _LIMIT_RANGES, load, role_progress_outcomes)
+                         Limits, ROOT_KEYS, _LIMIT_RANGES, load, outcome_effects,
+                         role_progress_outcomes)
 from mizu.errors import ConfigError
 from mizu.project import Project
 from mizu import fs, platform
@@ -176,7 +177,8 @@ class LimitsCoverageTests(unittest.TestCase):
         # These fields use the boolean, progress-list or finite-cost validators
         # in load(), rather than the integer range table.
         special = {"lock_diagnostics", "drain_yield", "missing_finish_counts_as_failure",
-                   "progress_signals", "progress_outcomes", "session_max_cost_usd",
+                   "progress_signals", "progress_outcomes", "outcome_effects",
+                   "session_max_cost_usd",
                    "session_delta_details"}
         fields = {field.name for field in dataclasses.fields(Limits)}
         self.assertFalse(set(_LIMIT_RANGES) & special)
@@ -239,6 +241,8 @@ class ProgressOutcomesConfigTests(Fixture):
         self.assertEqual(role_progress_outcomes(project, project.roles["worker"]), ("wait",))
         override = dataclasses.replace(role, progress_outcomes=("blocked",))
         self.assertEqual(role_progress_outcomes(self.config, override), ("blocked",))
+        self.assertEqual(role_progress_outcomes(self.config, dataclasses.replace(role, progress_outcomes=("done",))),
+                         ())
         self.assertEqual(role_progress_outcomes(self.config, dataclasses.replace(role, progress_outcomes=())), ())
         self.assertEqual(role_progress_outcomes(None, role), DEFAULT_PROGRESS_OUTCOMES)
         self.assertEqual(role_progress_outcomes(self.config, None), DEFAULT_PROGRESS_OUTCOMES)
@@ -248,6 +252,62 @@ class ProgressOutcomesConfigTests(Fixture):
         self.assertEqual(role_progress_outcomes(malformed_project, role), DEFAULT_PROGRESS_OUTCOMES)
         malformed_role = types.SimpleNamespace(progress_outcomes="wait")
         self.assertEqual(role_progress_outcomes(self.config, malformed_role), DEFAULT_PROGRESS_OUTCOMES)
+
+
+class OutcomeEffectsConfigTests(Fixture):
+    def _reload_with(self, section, line):
+        raw = self.file.read_text()
+        anchor = f"[{section}]\n"
+        self.assertIn(anchor, raw)
+        self.file.write_text(raw.replace(anchor, anchor + line + "\n", 1))
+        try:
+            return load(self.file)
+        finally:
+            self.file.write_text(raw)
+
+    def test_effects_resolve_defaults_project_role_and_done_veto(self):
+        self.assertEqual(outcome_effects(self.config).no_progress,
+                         ("continue", "bounded", "wait", "blocked"))
+        self.assertEqual(outcome_effects(self.config).continuation, ("continue", "bounded"))
+        self.assertEqual(outcome_effects(self.config).waiting, ("wait", "blocked"))
+        self.assertEqual(outcome_effects(self.config).ready_check,
+                         ("wait", "blocked", "continue", "bounded"))
+        project = self._reload_with(
+            "limits", 'outcome_effects = {idle = ["bounded"], no_progress = ["done", "wait"]}')
+        worker = project.roles["worker"]
+        self.assertEqual(project.limits.outcome_effects,
+                         {"idle": ("bounded",), "no_progress": ("done", "wait")})
+        self.assertEqual(outcome_effects(project, worker).idle, ("bounded",))
+        self.assertEqual(outcome_effects(project, worker).no_progress, ("wait",))
+        override = dataclasses.replace(worker, outcome_effects={"idle": (), "waiting": ("wait",)})
+        resolved = outcome_effects(project, override)
+        self.assertEqual(resolved.idle, ())
+        self.assertEqual(resolved.waiting, ("wait",))
+        self.assertEqual(resolved.no_progress, ("wait",))
+
+    def test_malformed_effects_fail_closed_at_runtime(self):
+        limits = dataclasses.replace(self.config.limits,
+                                     outcome_effects={"idle": ("unknown",), "waiting": ("wait",)})
+        project = dataclasses.replace(self.config, limits=limits)
+        self.assertEqual(outcome_effects(project).idle, ("wait", "continue"))
+        self.assertEqual(outcome_effects(project).waiting, ("wait",))
+        bad_role = dataclasses.replace(self.config.roles["worker"], outcome_effects="wait")
+        self.assertEqual(outcome_effects(self.config, bad_role).idle, ("wait", "continue"))
+
+    def test_load_refuses_unknown_effect_duplicate_and_unsupported_outcome(self):
+        for line in ('outcome_effects = {unknown = ["wait"]}',
+                     'outcome_effects = {idle = ["wait", "wait"]}',
+                     'outcome_effects = {idle = ["unknown"]}',
+                     'outcome_effects = {progress = ["wait"]}',
+                     'outcome_effects = "wait"'):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ConfigError, "limits.outcome_effects"):
+                    self._reload_with("limits", line)
+        for line in ('outcome_effects = {unknown = ["wait"]}',
+                     'outcome_effects = {idle = ["unknown"]}'):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ConfigError, r"roles\.worker\.outcome_effects"):
+                    self._reload_with("roles.worker", line)
 
 
 class LockTimeoutConfigTests(Fixture):

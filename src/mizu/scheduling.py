@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from .config import DEFAULT_PROGRESS_OUTCOMES
+from .config import outcome_effects
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,7 +47,7 @@ class DaemonFacts:
     # Unscoped diagnostic callers retain the legacy permissive behavior.
     progress_admits: bool | None = None
     # Supplied from configuration by the caller; gates progress self-admission.
-    progress_outcomes: tuple[str, ...] = DEFAULT_PROGRESS_OUTCOMES
+    progress_outcomes: tuple[str, ...] = outcome_effects(None).progress
 
 
 @dataclasses.dataclass(frozen=True)

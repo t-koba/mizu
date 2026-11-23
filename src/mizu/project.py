@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from .budget import Budget
-from .config import (Config, ProjectImport, _lineage_target, keys, strings,
+from .config import (Config, ProjectImport, _lineage_target, keys, outcome_effects, strings,
                      wait_ci_request_roles, wait_writer_roles)
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
@@ -62,13 +62,7 @@ def session_persistence_scope(config: Config, role_name: str | None) -> str:
     return "conditional"
 
 
-#: Completed outcomes whose no-progress finish can idle with actionable work.
-#: ``done`` never counts: the objective is complete even with open ledger rows.
-#: ``bounded`` is not named by the accepted scope, so it never marks idle.
-IDLE_NO_PROGRESS_OUTCOMES = ("wait", "continue")
-
-
-def idle_with_open_work(snapshot: dict) -> dict:
+def idle_with_open_work(snapshot: dict, config=None, role_name: str | None = None) -> dict:
     """Project the recorded idle-with-open-work diagnostic from durable facts.
 
     The published snapshot carries the outcome and progress record. Schema-2
@@ -79,10 +73,10 @@ def idle_with_open_work(snapshot: dict) -> dict:
     the old run idle. No work-item ids, titles or descriptions are included.
 
     Malformed or missing facts fail closed with a naming reason. Schema-1
-    progress is readable but predates the observation. Only ``wait`` and
-    ``continue`` can mark idle; ``bounded`` never does. This is diagnostic
-    only and cannot affect FIFO ordering, locks, transitions, recovery or
-    publication.
+    progress is readable but predates the observation. Only the configured
+    ``idle`` effect (built-in fallback ``wait``/``continue``) can mark idle;
+    ``done`` is never positive. This is diagnostic only and cannot affect
+    FIFO ordering, locks, transitions, recovery or publication.
     """
     snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
     outcome = snapshot.get("outcome") if isinstance(snapshot, dict) else None
@@ -112,7 +106,9 @@ def idle_with_open_work(snapshot: dict) -> dict:
     if progress["schema"] == 1:
         return result("legacy_no_progress_record", role, has_progress)
     ready_work = progress["ready_work"]
-    if outcome not in IDLE_NO_PROGRESS_OUTCOMES:
+    roles = getattr(config, "roles", None)
+    role_config = roles.get(role_name or role) if isinstance(roles, dict) else None
+    if outcome not in outcome_effects(config, role_config).idle:
         return result("outcome_not_applicable", role, has_progress, ready_work)
     if has_progress:
         return result("has_progress", role, has_progress, ready_work)
@@ -350,7 +346,7 @@ class Project:
         # creation, drops, or due transitions cannot retroactively mark the
         # old run idle. The observation was bound into the progress record
         # when this snapshot was created.
-        idle_diagnostic = idle_with_open_work(snapshot)
+        idle_diagnostic = idle_with_open_work(snapshot, self.config, progress_role)
         open_state = self.work_items.open_state_readonly(
             writer_roles=wait_writer_roles(self.config, self.roles))
         blocked_work = open_state["blocked_work"]

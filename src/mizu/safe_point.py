@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 from . import continuations
+from .config import ALLOWED_PROGRESS_OUTCOMES
 from .errors import Denied
 from .fs import DIGEST, ID, lock, publish_pointer, read_json, sync_dir, write_json
 
@@ -61,7 +62,7 @@ def _target(store, row):
                        max_bytes=continuations.RUN_BYTES)
     if (not isinstance(started, dict) or started.get('run') != row['run']
             or started.get('role') != row['role'] or started.get('snapshot') != row['base']
-            or not isinstance(finish, dict) or finish.get('outcome') not in ('done', 'wait', 'continue', 'blocked', 'bounded')
+            or not isinstance(finish, dict) or finish.get('outcome') not in ALLOWED_PROGRESS_OUTCOMES
             or target.get('run') != row['run'] or target.get('parent') != row['base']
             or any(target.get(k) != finish.get(k) for k in ('outcome', 'summary', 'state'))):
         raise Denied('Safe-point seal binding mismatch')

@@ -349,6 +349,21 @@ else the policy default: `signals` uses the role-effective `cooldown_seconds`
 deferred `next_evaluation_at` re-entry or the `cooldown_seconds` retry policy.
 Ready work does not accelerate it.
 
+### Outcome effects
+
+Positive outcome names are deployment policy, not runtime vocabulary. One
+resolution in `mizu.config.outcome_effects` combines the built-in fallbacks
+with `[limits] outcome_effects` and a role's `outcome_effects`; the existing
+`progress_outcomes` setting (and its role override) owns the daemon
+self-admission effect. The resolver fails closed on malformed values and
+never marks `done` positive, even when configured. `no_progress` selects the
+outcomes subject to unchanged-input continuation and recovery, `continuation`
+selects writer handoff and read-only allowance, `idle` selects the
+idle-with-open-work diagnostic, and `waiting` selects wait-style finishes that
+accept ready work. A `reevaluate` disposition is an evidence gap, never proof
+of progress. `examples/development/outcomes.toml` records the development
+deployment's choices.
+
 ### Readiness evaluation while idle
 
 The resident `signals` daemon evaluates readiness on each poll, which

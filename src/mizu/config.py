@@ -113,6 +113,35 @@ DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "message", "input")
 #: readiness; configuration may narrow the set per project or role.
 DEFAULT_PROGRESS_OUTCOMES = ("continue", "bounded", "wait")
 ALLOWED_PROGRESS_OUTCOMES = frozenset({"continue", "bounded", "wait", "blocked", "done"})
+#: Every positive outcome effect, with its documented built-in fallback. A
+#: deployment owns the values in `[limits] outcome_effects` / role overrides;
+#: `progress` keeps its own existing `progress_outcomes` setting. `done` is
+#: never positive and is removed by the resolver even when configured.
+DEFAULT_OUTCOME_EFFECTS = {
+    "progress": DEFAULT_PROGRESS_OUTCOMES,
+    "no_progress": ("continue", "bounded", "wait", "blocked"),
+    "continuation": ("continue", "bounded"),
+    "idle": ("wait", "continue"),
+    "waiting": ("wait", "blocked"),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class OutcomeEffects:
+    """Positive outcome names for each effect, resolved from configuration."""
+
+    progress: tuple[str, ...] = DEFAULT_PROGRESS_OUTCOMES
+    no_progress: tuple[str, ...] = DEFAULT_OUTCOME_EFFECTS["no_progress"]
+    continuation: tuple[str, ...] = DEFAULT_OUTCOME_EFFECTS["continuation"]
+    idle: tuple[str, ...] = DEFAULT_OUTCOME_EFFECTS["idle"]
+    waiting: tuple[str, ...] = DEFAULT_OUTCOME_EFFECTS["waiting"]
+
+    @property
+    def ready_check(self) -> tuple[str, ...]:
+        """Outcomes whose finish must validate ready-work evidence."""
+        return self.waiting + self.continuation
+
+
 #: Shared-fragment `include` bounds (fixed mechanism, not knobs per ADR-006).
 MAX_INCLUDE_DEPTH = 8
 MAX_INCLUDE_FILES = 32
@@ -420,6 +449,23 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
     return command
 
 
+def outcome_effects_table(value, name: str) -> dict[str, tuple[str, ...]]:
+    """Validate a configured table of positive outcome effects at load."""
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a table of outcome lists")
+    result = {}
+    for effect, raw in value.items():
+        if effect not in DEFAULT_OUTCOME_EFFECTS:
+            raise ConfigError(f"{name} names an unsupported effect")
+        if effect == "progress":
+            raise ConfigError(f"{name}.progress is configured through progress_outcomes")
+        values = strings(raw, f"{name}.{effect}")
+        if len(values) != len(set(values)) or any(v not in ALLOWED_PROGRESS_OUTCOMES for v in values):
+            raise ConfigError(f"{name}.{effect} must contain unique supported outcome names")
+        result[effect] = values
+    return result
+
+
 @dataclasses.dataclass(frozen=True)
 class Limits:
     #: Operator-selected selector timer ceiling; TOML integer range, not a timestamp.
@@ -456,6 +502,8 @@ class Limits:
     cooldown_seconds: int = 5
     progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
     progress_outcomes: tuple[str, ...] = DEFAULT_PROGRESS_OUTCOMES
+    #: Per-effect positive outcome lists; unset keeps the built-in effects.
+    outcome_effects: dict[str, tuple[str, ...]] | None = None
     no_progress_continuations: int = 0
     no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
@@ -816,6 +864,10 @@ class Role:
     #: progress self-admission for that role) must hold unique supported
     #: outcome names like the project bound.
     progress_outcomes: tuple[str, ...] | None = None
+    #: Per-effect positive outcome list overrides. None inherits the project
+    #: `[limits] outcome_effects` values; named effects must be supported and
+    #: hold unique outcome names like the project bound.
+    outcome_effects: dict[str, tuple[str, ...]] | None = None
     #: Per-role event-only recovery poll override. None keeps the fixed
     #: 60-second default; a set value must lie in 60-2678400 like the
     #: Task Scheduler repetition bound. Only unscheduled watched roles use
@@ -1020,32 +1072,60 @@ def role_progress_signals(config, role):
         return DEFAULT_PROGRESS_SIGNALS
 
 
-def role_progress_outcomes(config, role):
-    """Effective progress-outcome list for one role for one daemon check.
+def _outcome_list(value) -> tuple[str, ...] | None:
+    """Validated unique outcome names, or None for a malformed value."""
+    if (isinstance(value, (tuple, list))
+            and all(isinstance(v, str) and v in ALLOWED_PROGRESS_OUTCOMES for v in value)
+            and len(value) == len(set(value))):
+        return tuple(v for v in value if v != "done")
+    return None
 
-    Schema: role override when set (including empty, which disables progress
-    self-admission for that role), else project `[limits]` progress_outcomes.
-    Trust: configuration. Failure: never raises; malformed values read as the
-    built-in default (load already refuses them fail-closed).
-    """
+
+def _configured_progress_outcomes(config, role) -> tuple[str, ...]:
     try:
         value = getattr(role, "progress_outcomes", None)
     except Exception:
         value = None
     if value is not None:
-        if (isinstance(value, (tuple, list))
-                and all(isinstance(v, str) and v in ALLOWED_PROGRESS_OUTCOMES for v in value)
-                and len(value) == len(set(value))):
-            return tuple(value)
-        return DEFAULT_PROGRESS_OUTCOMES
+        valid = _outcome_list(value)
+        return DEFAULT_PROGRESS_OUTCOMES if valid is None else valid
     try:
         values = tuple(config.limits.progress_outcomes)
     except Exception:
         return DEFAULT_PROGRESS_OUTCOMES
-    if (all(isinstance(v, str) and v in ALLOWED_PROGRESS_OUTCOMES for v in values)
-            and len(values) == len(set(values))):
-        return values
-    return DEFAULT_PROGRESS_OUTCOMES
+    valid = _outcome_list(values)
+    return DEFAULT_PROGRESS_OUTCOMES if valid is None else valid
+
+
+def outcome_effects(config, role=None) -> OutcomeEffects:
+    """Resolve every positive outcome effect from configuration.
+
+    Schema: built-in fallbacks, project `[limits] outcome_effects`, then a
+    role's `outcome_effects`; `progress` comes from the existing
+    `progress_outcomes` setting. Trust: configuration. Failure: never raises;
+    a malformed effect reads as its built-in fallback (load already refuses
+    malformed values fail-closed). `done` is never a positive effect.
+    """
+    values = dict(DEFAULT_OUTCOME_EFFECTS)
+    sources = (getattr(getattr(config, "limits", None), "outcome_effects", None),
+               getattr(role, "outcome_effects", None))
+    for source in sources:
+        if source is None:
+            continue
+        if not isinstance(source, dict):
+            values = dict(DEFAULT_OUTCOME_EFFECTS)
+            break
+        for effect, value in source.items():
+            if effect in values:
+                valid = _outcome_list(value)
+                values[effect] = DEFAULT_OUTCOME_EFFECTS[effect] if valid is None else valid
+    values["progress"] = _configured_progress_outcomes(config, role)
+    return OutcomeEffects(**values)
+
+
+def role_progress_outcomes(config, role):
+    """Effective positive daemon-progress outcomes for one role's check."""
+    return outcome_effects(config, role).progress
 
 
 def role_event_poll_seconds(role: "Role") -> int:
@@ -1571,6 +1651,9 @@ def load(file: Path) -> Config:
                 raise ConfigError("limits.progress_outcomes must contain unique supported outcome names")
             lim[k] = values
             continue
+        if k == "outcome_effects":
+            lim[k] = outcome_effects_table(v, "limits.outcome_effects")
+            continue
         if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics"):
             boolean(v, f"limits.{k}")
             continue
@@ -1773,7 +1856,7 @@ def load(file: Path) -> Config:
             raise ConfigError("Invalid role name")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "finish_outcomes", "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "work_item_events", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "progress_outcomes", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
+                    "work_item_events", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "progress_outcomes", "outcome_effects", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1914,6 +1997,9 @@ def load(file: Path) -> Config:
             role_outcomes = values
         else:
             role_outcomes = None
+        role_effects = role.get("outcome_effects")
+        if role_effects is not None:
+            role_effects = outcome_effects_table(role_effects, f"roles.{name}.outcome_effects")
         role_event_poll = role.get("event_poll_seconds")
         if role_event_poll is not None:
             number(role_event_poll, f"roles.{name}.event_poll_seconds",
@@ -1965,6 +2051,7 @@ def load(file: Path) -> Config:
                            cooldown_seconds=role_cooldown,
                            progress_signals=role_progress,
                            progress_outcomes=role_outcomes,
+                           outcome_effects=role_effects,
                            event_poll_seconds=role_event_poll,
                            event_batch_seconds=role_event_batch,
                            event_wakes=event_wakes,

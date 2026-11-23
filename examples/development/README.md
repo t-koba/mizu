@@ -14,6 +14,10 @@ nothing here specially.
 - `policies/messages.md` says what a message in each queue means and what its
   reader does with it. Compose it into the role policies of the roles that
   read or write these queues.
+- `outcomes.toml` declares which finish outcomes have each positive progress
+  effect (daemon self-admission, no-progress policy, writer continuation,
+  idle diagnostic and wait-style ready-work acceptance). It is stage-4
+  userland: the runtime reads these names from configuration, not source.
 
 `work` is only the stage-3 message form. The dedicated work-item store stays
 authoritative until cutover; declaring the queue changes no runtime authority.
@@ -28,7 +32,7 @@ the message it refers to.
 To use it, include the file and add the policy part:
 
 ```toml
-include = ["../examples/development/queues.toml"]
+include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml"]
 
 [roles.worker]
 policy = ["policies/shared.md", "policies/worker.md", "../examples/development/policies/messages.md"]

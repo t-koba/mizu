@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 
 from . import check_jobs, ci_waits, proposal_waits, queue_facts, reviews, work_item_events
-from .config import role_progress_signals
+from .config import outcome_effects, role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
 from .fs import DIGEST, canonical, digest, now, write_json
 from .snapshot import (PROGRESS_SIGNALS, WRITER_HANDOFF_PROGRESS_SIGNALS,
@@ -141,7 +141,9 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
     successor consumes this handoff. Reads at most one parent and never changes
     WorkItems or wait authority.
     """
-    if snapshot.get("outcome") not in ("continue", "bounded"):
+    roles = getattr(project.config, "roles", None)
+    role_config = roles.get(role_name) if isinstance(roles, dict) else None
+    if snapshot.get("outcome") not in outcome_effects(project.config, role_config).continuation:
         return None
     progress = snapshot.get("progress")
     try:
@@ -201,12 +203,12 @@ class ContextFinishMixin:
         empty role-scoped inventory under the page API maximum. Unknown waits
         and overflow are evidence gaps, never dispositions.
         """
+        effects = outcome_effects(self.config, self.role)
         if finished["outcome"] == "bounded" and self.bound_hit is not None:
             return
-        if finished["outcome"] not in ("wait", "blocked", "continue", "bounded"):
+        if finished["outcome"] not in effects.ready_check:
             return
-        if (finished["outcome"] in ("continue", "bounded")
-                and finished.get("next_step") is not None):
+        if finished["outcome"] in effects.continuation and finished.get("next_step") is not None:
             captured = self.project.snapshots.capture_files(self.workspace, persist=False)
             candidate = {**finished, "parent": self.snapshot["id"],
                          "progress": self._finish_progress(captured, finished)}
@@ -226,7 +228,7 @@ class ContextFinishMixin:
                 AttributeError, RecursionError) as exc:
             raise Denied("Ready evidence unavailable or incomplete at finish.") from exc
         if page["total"]:
-            if finished["outcome"] in ("wait", "blocked"):
+            if finished["outcome"] in effects.waiting:
                 # Keep the signature captured with this unit's ready input.
                 # An unchanged row remains visible but is not fresh progress:
                 # both admission gates and the no-progress record compare the

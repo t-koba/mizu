@@ -1,10 +1,12 @@
 """Idle-with-open-work diagnostic: recorded-at-finish observation, never live-joined."""
+import dataclasses
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
+from mizu.config import outcome_effects
 from mizu.errors import Denied
 from mizu.fs import now
-from mizu.project import IDLE_NO_PROGRESS_OUTCOMES, idle_with_open_work
+from mizu.project import idle_with_open_work
 from mizu.runtime import Engine, _progress_record
 from mizu.snapshot import PROGRESS_SIGNALS, progress_projection, validate_progress
 
@@ -82,7 +84,7 @@ class IdleWithOpenWorkTests(Fixture):
     # --- recorded diagnostic basics ---
 
     def test_only_wait_and_continue_can_mark_idle(self):
-        self.assertEqual(tuple(IDLE_NO_PROGRESS_OUTCOMES), ("wait", "continue"))
+        self.assertEqual(outcome_effects(self.config).idle, ("wait", "continue"))
         for outcome in ("wait", "continue"):
             snap = self.park(outcome, has_progress=False, ready_work=True)
             idle = idle_with_open_work(snap)
@@ -94,6 +96,19 @@ class IdleWithOpenWorkTests(Fixture):
             self.assertNotIn("items", idle)
             self.assertNotIn("Idle candidate", repr(idle))
 
+    def test_idle_effect_comes_from_project_and_role_configuration(self):
+        snap = self.park("bounded", has_progress=False, ready_work=True)
+        self.assertFalse(idle_with_open_work(snap, self.config, "worker")["active"])
+        project = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits,
+                                       outcome_effects={"idle": ("bounded",)}))
+        self.assertTrue(idle_with_open_work(snap, project, "worker")["active"])
+        role = dataclasses.replace(project.roles["worker"], outcome_effects={"idle": ()})
+        roles = dict(project.roles, worker=role)
+        self.assertFalse(idle_with_open_work(snap, dataclasses.replace(project, roles=roles),
+                                             "worker")["active"])
+
     def test_bounded_never_marks_idle_even_with_recorded_ready_work(self):
         snap = self.park("bounded", has_progress=False, ready_work=True)
         idle = idle_with_open_work(snap)
@@ -103,6 +118,11 @@ class IdleWithOpenWorkTests(Fixture):
 
     def test_done_never_marks_idle(self):
         snap = self.park("done", has_progress=False, ready_work=True)
+        configured = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits,
+                                       outcome_effects={"idle": ("done",)}))
+        self.assertFalse(idle_with_open_work(snap, configured, "worker")["active"])
         idle = idle_with_open_work(snap)
         self.assertFalse(idle["active"])
         self.assertEqual(idle["reason"], "outcome_not_applicable")
