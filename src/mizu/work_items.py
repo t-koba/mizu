@@ -1922,7 +1922,6 @@ class WorkItems:
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
-            self._publish_wake()
             index_terminal(self, record, terminal=False, marker=marker)
             self._publish_wake()
             return record
@@ -2177,11 +2176,10 @@ class WorkItems:
             with self.committing([item_id]):
                 write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
                            record, exclusive=True)
-            self._publish_wake()
             if status in ("done", "dropped"):
                 from .work_item_events import index_terminal
                 index_terminal(self, record, marker=marker)
-                self._publish_wake()
+            self._publish_wake()
             return record
 
     def _publish_wake(self):
