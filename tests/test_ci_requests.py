@@ -1019,6 +1019,60 @@ class CiRequestTests(Fixture):
                 "head": ([publication], dt.datetime.fromisoformat(receipt["recorded_at"]))})
         self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
 
+    def test_unrelated_dispatch_does_not_revoke_known_empty(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        mkdir(store.root)
+        publication = self.fresh_receipt()["publication_id"]
+        instant = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
+        stamp = dt.datetime(2026, 5, 31, tzinfo=dt.timezone.utc)
+        epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        delta = stamp - epoch
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+                pages = store.matching_many({"head": ([publication], instant)})
+            self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+            self.assertTrue(store._seek_path(publication).exists())
+            self.assertEqual(store._seek_read(publication), ([], False))
+        # A valid dispatch for a different publication rotates the global
+        # token, so freshness alone can no longer prove this publication quiet.
+        other = "e" * 64
+        identity = request_id(other, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": other, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-06-02T00:00:00+00:00"})
+        self.assertFalse(store._fresh_activity(instant))
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+
+    def test_established_empty_index_grows_on_first_dispatch(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        mkdir(store.root)
+        publication = self.fresh_receipt()["publication_id"]
+        instant = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
+        stamp = dt.datetime(2026, 5, 31, tzinfo=dt.timezone.utc)
+        epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        delta = stamp - epoch
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+                pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+        self.assertEqual(store._seek_read(publication), ([], False))
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-06-02T00:00:00+00:00"})
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
+        self.assertEqual(store._seek_read(publication), ([(identity, "2026-06-02")], False))
+
     def test_activity_boundary_uses_the_exact_instant_not_its_date(self):
         store = CiRequests(self.project.root, CiRequestEvidence())
         self.write_activity()

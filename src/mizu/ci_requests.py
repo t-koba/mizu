@@ -13,6 +13,7 @@ Records live in the project's evidence tree, outside the workspace.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import os
 import re
@@ -339,6 +340,33 @@ class CiRequests:
         mkdir(self.root / SEEK_DIR)
         write_json(self._seek_path(publication), index)
 
+    def _establish_empty_seek(self, publication_id: str, instant: dt.datetime) -> bool:
+        """Record a certified publication's known emptiness as a durable index.
+
+        Called while a validated activity token still proves this publication
+        quiet. The empty index survives later, unrelated request writes that
+        rotate that global token. No activity token is rotated here; only the
+        per-publication index is written under the writer lock.
+        """
+        if not isinstance(publication_id, str) or not _HEX64.fullmatch(publication_id):
+            return False
+        if not self._fresh_activity(instant):
+            return False
+        with lock(self.lock):
+            entries, invalid = self._seek_read(publication_id)
+            if invalid:
+                return False
+            if entries is not None:
+                return True
+            if not self._retire_legacy_seeks():
+                return False
+            if not self._seek_certifiable(publication_id):
+                return False
+            mkdir(self.root / SEEK_DIR)
+            write_json(self._seek_path(publication_id), {
+                "version": SEEK_VERSION, "publication_id": publication_id, "entries": []})
+            return True
+
     def _retire_legacy_seeks(self) -> bool:
         """Remove superseded flat index files before first seek certification."""
         maximum = self.policy.name_processing_limit
@@ -517,9 +545,11 @@ class CiRequests:
         only pages naming a scanned publication incomplete instead of proving
         absence. A publication with no index is known empty when a validated
         activity token predates the exact query instant: it needs neither a
-        shared scan nor an incomplete page. A query naming both indexed and legacy
-        publications receives the indexed items plus the conservative legacy
-        result.
+        shared scan nor an incomplete page. That known emptiness is recorded
+        as a durable per-publication empty seek index under the writer lock, so
+        a later unrelated request write cannot revoke it. A query naming both
+        indexed and legacy publications receives the indexed items plus the
+        conservative legacy result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. An index is only created for a
         publication whose ledger was certified free of legacy markers under
@@ -575,7 +605,14 @@ class CiRequests:
             elif (_HEX64.fullmatch(publication_id)
                   and self._fresh_activity(publication_instants[publication_id])):
                 # Known empty: no request write has happened since the
-                # publication, so this publication needs no ledger scan.
+                # publication, so this publication needs no ledger scan. Record
+                # that fact under the writer lock so later unrelated writes
+                # cannot revoke it. A failure here leaves this call's
+                # token-based answer intact.
+                with contextlib.suppress(OSError, Denied, LimitExceeded,
+                                         ValueError, TypeError, MizuError):
+                    self._establish_empty_seek(
+                        publication_id, publication_instants[publication_id])
                 continue
             else:
                 legacy.add(publication_id)
