@@ -80,7 +80,6 @@ from .fs import (canonical, digest, loads_finite, lock, mkdir, now, read_json, r
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS,
                    text_preview, ID)
 from .project import Project
-from .readiness_witness import settled as witness_settled, witness as state_witness
 from .snapshot import (MAX_MISSING_FINISH_STREAK,
                        missing_finish_recovery_due, missing_finish_streak,
                        no_progress_recovery_due)

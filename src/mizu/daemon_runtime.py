@@ -20,7 +20,6 @@ from .config import DAEMON_POLICIES, Config, load, role_daemon_spacing_seconds
 from .errors import Busy, ConfigError, Denied, MizuError
 from .fs import lock, now, read_json, write_json
 from .project import Project
-from .readiness_witness import settled as witness_settled, witness as state_witness
 from .role_admission import should_run
 from .vcs_poll_policy import upstream_fetch_due, vcs_poll_enabled, vcs_poll_interval
 from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
@@ -135,9 +134,6 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             upstream_state: dict = {"last_fetch": None}
             ordinary_after = 0.0
             project = None
-            # (state witness, monotonic re-evaluation deadline) of the last
-            # negative readiness result; see readiness_recheck_seconds.
-            readiness_memo = None
             while not stop.is_set():
                 try:
                     updated = load(config.file)
@@ -151,7 +147,6 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     # but revalidate mutable project settings on every daemon poll.
                     if project is None or project.config != config:
                         project = Project(config, name)
-                        readiness_memo = None
                     else:
                         project.refresh_settings()
                     role = config.roles[role_name]
@@ -160,8 +155,6 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         raise ConfigError("Invalid daemon_policy; reload validated configuration")
                     control = project.control()
                     ready = False
-                    if not control.get("armed") or control.get("paused"):
-                        readiness_memo = None
                     # An unarmed or paused project has no work: probes, editor
                     # ingestion, VCS polling and readiness are skipped entirely.
                     if control.get("armed") and not control.get("paused"):
@@ -174,21 +167,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                             for event in poll_project_vcs(config, project, upstream_state,
                                                           now=time.time(), interval=interval):
                                 print(json.dumps(event, ensure_ascii=False), flush=True)
-                        if policy == "signals" and config.limits.readiness_recheck_seconds:
-                            observed = state_witness(project.root)
-                            if (readiness_memo is not None and readiness_memo[0] == observed[0]
-                                    and time.monotonic() < readiness_memo[1]):
-                                pass
-                            else:
-                                # A positive result or an error is never reused.
-                                readiness_memo = None
-                                ready = should_run(project, project.snapshots.get(),
-                                                   role_name=role_name)
-                                if (not ready and witness_settled(observed[1], observed[2])
-                                        and state_witness(project.root)[0] == observed[0]):
-                                    readiness_memo = (observed[0], time.monotonic()
-                                                      + config.limits.readiness_recheck_seconds)
-                        elif policy == "signals":
+                        if policy == "signals":
                             ready = should_run(project, project.snapshots.get(), role_name=role_name)
                         else:
                             ready = not control.get("draining")
