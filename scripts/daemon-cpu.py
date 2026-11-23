@@ -3,7 +3,11 @@
 
 Spawns real ``mizu daemon`` subprocesses against a synthetic deployment and
 attributes their CPU time over an idle window and a one-change window. CPU is
-sampled per PID from /proc when available, else from reaped children. Relative
+sampled per PID from /proc when available, else from reaped children. The
+measured window starts only after a minimum warmup plus an observed quiet CPU
+trend: interpreter startup is excluded only when the receipt's validity block
+reports steady_state_observed=true. Without /proc, the reaped-children getrusage
+fallback includes startup and cannot evidence a steady window. Relative
 before/after only. Unix-only.
 
 By default the freshly armed project has an unconsumed operator wake generation,
@@ -25,6 +29,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+DEFAULT_WARMUP = 3.0
+PROBE_SECONDS = 0.25
+STEADY_THRESHOLD = 0.01  # CPU-seconds per child per probe
+STEADY_PROBES = 2
+MAX_SETTLE_SECONDS = 30.0
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -48,13 +58,52 @@ def _pid_cpu(pid):
         return None
 
 
+def _steady_state(procs, *, min_warmup, sleep=time.sleep, clock=time.monotonic,
+                  probe_seconds=PROBE_SECONDS, threshold=STEADY_THRESHOLD,
+                  required_probes=STEADY_PROBES, max_settle=MAX_SETTLE_SECONDS):
+    """Wait out the minimum warmup, then require a quiet per-PID CPU trend.
+
+    Linux polls the live children through /proc. RUSAGE_CHILDREN accrues only
+    reaped children, so off Linux there is no live signal to observe and the
+    fallback cannot evidence a steady window.
+    """
+    started = clock()
+    sleep(min_warmup)
+    samples = []
+    values = [_pid_cpu(p.pid) for p in procs]
+    method = ('proc-per-pid' if values and all(v is not None for v in values)
+              else 'reaped-children-getrusage')
+    observed = False
+    if method == 'proc-per-pid':
+        deadline = started + min_warmup + max_settle
+        quiet = 0
+        while clock() < deadline:
+            before = [_pid_cpu(p.pid) for p in procs]
+            if any(v is None for v in before):
+                break
+            sleep(probe_seconds)
+            after = [_pid_cpu(p.pid) for p in procs]
+            if any(v is None for v in after):
+                break
+            growth = (sum(after) - sum(before)) / len(procs)
+            samples.append(round(growth, 6))
+            quiet = quiet + 1 if growth <= threshold else 0
+            if quiet >= required_probes:
+                observed = True
+                break
+    info = {'method': method, 'steady_state_observed': observed,
+            'observed_warmup_seconds': round(clock() - started, 3), 'probes': samples}
+    return observed, info
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, help='Write the measurement receipt')
     parser.add_argument('--projects', type=int, default=2)
     parser.add_argument('--messages', type=int, default=200)
     parser.add_argument('--window', type=float, default=4.0)
-    parser.add_argument('--warmup', type=float, default=0.5)
+    parser.add_argument('--warmup', type=float, default=DEFAULT_WARMUP,
+                        help='Minimum warmup seconds before steady-state probing')
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--idle-seconds', type=int, default=1)
     parser.add_argument('--settled', action='store_true',
@@ -63,7 +112,7 @@ def main():
     args = parser.parse_args()
     for name, value, low, high in (
             ('projects', args.projects, 1, 16), ('messages', args.messages, 0, 5000),
-            ('window', args.window, 1, 120), ('warmup', args.warmup, 0.1, 30),
+            ('window', args.window, 1, 120), ('warmup', args.warmup, 0.1, 60),
             ('repeats', args.repeats, 1, 20), ('idle-seconds', args.idle_seconds, 1, 86400)):
         if not low <= value <= high:
             parser.error(f'--{name.replace("_", "-")} must be {low}..{high}')
@@ -111,7 +160,7 @@ def main():
                 project.snapshots.publish(settled)
         env = dict(os.environ, PYTHONPATH=str(ROOT / 'src'))
 
-        def _scenario(change):
+        def _scenario(change, label, repeat):
             procs = []
             for name in names:
                 cmd = [sys.executable, '-m', 'mizu', '--config', str(cfg),
@@ -119,12 +168,13 @@ def main():
                 procs.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                               stderr=subprocess.PIPE, env=env))
             start = {}
+            end = {}
             fallback = None
             try:
-                time.sleep(args.warmup)
-                # Measure only the steady-state window, excluding interpreter startup.
-                # /proc gives per-PID CPU for the live children; where it is absent,
-                # fall back to reaped-children CPU (which includes startup).
+                _, info = _steady_state(procs, min_warmup=args.warmup)
+                info['scenario'] = label
+                info['repeat'] = repeat
+                # The window starts only once the CPU trend has been seen quiet.
                 start = {p.pid: _pid_cpu(p.pid) for p in procs}
                 fallback = _cpu()
                 if change:
@@ -143,35 +193,61 @@ def main():
                     except subprocess.TimeoutExpired:
                         p.kill()
                         p.communicate()
-            if start and all(v is not None for v in start.values()):
-                return round(sum(end[pid] - start[pid] for pid in start), 6)
-            return round(_cpu() - fallback, 6)
+            if all(start.get(p.pid) is not None and end.get(p.pid) is not None
+                   for p in procs):
+                value = round(sum(end[p.pid] - start[p.pid] for p in procs), 6)
+            else:
+                # Reaped children are then the only CPU source; that delta
+                # includes startup and cannot evidence a steady window.
+                info['method'] = 'reaped-children-getrusage'
+                info['steady_state_observed'] = False
+                value = round(_cpu() - fallback, 6)
+            return value, info
 
         def _summary(samples):
             return {'median_seconds': round(statistics.median(samples), 6),
                     'min_seconds': round(min(samples), 6),
                     'max_seconds': round(max(samples), 6), 'samples': samples}
 
-        idle = [_scenario(False) for _ in range(args.repeats)]
-        change = [_scenario(True) for _ in range(args.repeats)]
+        idle_results = [_scenario(False, 'idle', n) for n in range(args.repeats)]
+        change_results = [_scenario(True, 'one_change', n) for n in range(args.repeats)]
+        idle = [value for value, _ in idle_results]
+        change = [value for value, _ in change_results]
+        scenarios = [info for _, info in idle_results + change_results]
+        validity = {
+            'method': scenarios[0]['method'],
+            'steady_state_observed': all(info['steady_state_observed'] for info in scenarios),
+            'minimum_requested_warmup_seconds': args.warmup,
+            'observed_warmup_seconds': {
+                label: [info['observed_warmup_seconds'] for info in scenarios
+                        if info['scenario'] == label]
+                for label in ('idle', 'one_change')},
+            'probe_seconds': PROBE_SECONDS,
+            'steady_threshold_cpu_seconds_per_child': STEADY_THRESHOLD,
+            'consecutive_quiet_probes': STEADY_PROBES,
+            'max_settle_seconds': MAX_SETTLE_SECONDS,
+            'scenarios': scenarios,
+        }
         receipt = {
             'kind': 'local-daemon-cpu',
-            'note': 'Synthetic local deployment; real mizu daemon subprocesses; '
-                    'CPU sampled per PID over the steady-state window via /proc on '
-                    'Linux (interpreter startup excluded); reaped-children '
-                    'getrusage fallback elsewhere includes startup. Relative '
-                    'before/after only, not a performance ceiling.',
+            'note': 'Synthetic local deployment; real mizu daemon subprocesses. The '
+                    'window starts only after a quiet per-PID /proc CPU trend, so '
+                    'interpreter startup is excluded only when validity.steady_state_observed '
+                    'is true; the reaped-children getrusage fallback includes startup and '
+                    'cannot evidence a steady window. Relative before/after only, not a '
+                    'performance ceiling.',
             'projects': args.projects, 'retained_messages': args.messages,
             'idle_seconds': args.idle_seconds, 'window_seconds': args.window,
             'warmup_seconds': args.warmup, 'repeats': args.repeats,
             'settled': args.settled,
             'python': sys.version.split()[0], 'platform': platform.platform(),
-            'idle': _summary(idle), 'one_change': _summary(change)}
+            'idle': _summary(idle), 'one_change': _summary(change),
+            'validity': validity}
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(receipt, indent=2) + '\n')
         print(json.dumps(receipt, indent=2))
-    return 0
+        return 0 if validity['steady_state_observed'] else 1
 
 
 if __name__ == '__main__':

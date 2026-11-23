@@ -1229,6 +1229,17 @@ GATE_DECLARATIONS = {
         'PROJECT_IMPORT_DIAGNOSTIC_BYTES': (
             '8192', 'safety', 'gate import diagnostic / bounded sidecar read'),
     },
+    'daemon-cpu.py': {
+        'DEFAULT_WARMUP': (
+            '3.0', 'mechanism',
+            'CPU harness / minimum warmup excluding interpreter startup'),
+        'PROBE_SECONDS': (
+            '0.25', 'mechanism',
+            'CPU harness / steady-state CPU probe interval'),
+        'MAX_SETTLE_SECONDS': (
+            '30.0', 'mechanism',
+            'CPU harness / bounded wait for an observed quiet CPU trend'),
+    },
 }
 
 

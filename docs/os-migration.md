@@ -49,8 +49,10 @@ switches authority at once together with the one-time conversion, then deletes
 the dedicated code. Measure host CPU of an idle deployment and of one change
 before and after the stages that touch the daemon (4 onward). The repeatable local harness is
 `python3 scripts/daemon-cpu.py --report private-validation/daemon-cpu.json`; it
-runs real daemon subprocesses (Unix-only) and records the deployment shape, so
-only the relative before/after comparison on one machine is meaningful.
+runs real daemon subprocesses (Unix-only), waits for an observed steady-state CPU
+window, and records measurement validity in the receipt. It also records the
+deployment shape, so only the relative before/after comparison on one machine is
+meaningful; a non-zero exit means that window was not steady state.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
