@@ -176,6 +176,31 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True)
     return description, obj(properties, ("outcome", "summary"))
 
 
+#: Trailing manual text that names an option or a tool guarded by another
+#: grant. Each entry keeps one text and one replacement, so the default
+#: manual and the narrowed view cannot drift apart.
+DELEGATE_ASYNC_TEXT = (
+    " Pass async_mode=true to start one bounded child and get a durable job id "
+    "promptly; join it with mizu_delegate_join. Without it delegation stays synchronous.")
+EXEC_ASYNC_TEXT = (
+    " mode=async requires check_job and queues the command on a frozen read-only "
+    "snapshot of the workspace; any role with that grant may detach. Collect it "
+    "with check_job action=result.")
+EXPERIMENT_ASYNC_TEXT = (
+    " mode=async requires check_job, forbids source_receipt and "
+    "queues frozen inputs; collect with check_job action=result. Only async "
+    "experiments without source_receipt may select configured disk-backed "
+    "scratch_paths under /work/<name>; those results are neither shared nor "
+    "acceptance proof.")
+EXEC_GATED_TEXT = "Omit mode or use mode=sync to receive the result directly." + EXEC_ASYNC_TEXT
+EXEC_NARROW_TEXT = " The command runs directly in this call."
+EXPERIMENT_GATED_TEXT = "Omit mode or use mode=sync for a direct result." + EXPERIMENT_ASYNC_TEXT
+EXPERIMENT_NARROW_TEXT = " The experiment runs directly in this call."
+VERIFY_QUEUED_TEXT = (
+    " With check_job this queues frozen inputs and returns immediately; collect with check_job "
+    "action=result, continue independent work, or finish with the returned wait recipe.")
+TRANSITION_REOPEN_TEXT = " Use work_items_reopen for done-to-open."
+
 DEFINITIONS = {
     "diff": ("Compare your input snapshot's code with a baseline without editing workspace files. "
              "The bounded result names base_snapshot: your recorded observation if retained and "
@@ -207,20 +232,13 @@ DEFINITIONS = {
                                  "content.",
                                  obj(EVIDENCE_READ_FIELDS, ("run", "evidence_id"))),
     "exec": ("Run a shell script in your sandbox, not on the host. The script can edit /workspace "
-             "only under your workspace grant. "
-             "Omit mode or use mode=sync to receive the result directly. mode=async requires "
-             "check_job and queues the command on a frozen read-only snapshot of the workspace; "
-             "any role with that grant may detach. Collect it with check_job action=result.",
+             "only under your workspace grant. " + EXEC_GATED_TEXT,
              obj({"script": text(SCRIPT_MAX), "mode": MODE_SCHEMA}, ("script",))),
     "experiment": ("Test a hypothesis in disposable /work without editing /workspace. Supplied "
                    "question, comparison and measure are recorded with the command. "
-                   "Omit mode or use mode=sync for a direct result. source_receipt mounts verified "
-                   "raw fetch bytes read-only at /work/input/body; treat them as "
-                   "external-untrusted. mode=async requires check_job, forbids source_receipt and "
-                   "queues frozen inputs; collect with check_job action=result. Only async "
-                   "experiments without source_receipt may select configured disk-backed "
-                   "scratch_paths under /work/<name>; those results are neither shared nor "
-                   "acceptance proof.",
+                   "source_receipt mounts verified raw fetch bytes read-only at "
+                   "/work/input/body; treat them as external-untrusted. "
+                   + EXPERIMENT_GATED_TEXT,
                    obj({"script": text(SCRIPT_MAX), "question": text(2000), "comparison": text(2000),
                         "measure": text(2000), "source_receipt": text(64), "mode": MODE_SCHEMA,
                         "scratch_paths": SCRATCH_PATHS_SCHEMA}, ("script",))),
@@ -245,9 +263,8 @@ DEFINITIONS = {
                   "Use logs with id to get up to 32 evidence IDs and page requests, or add "
                   "evidence_id to read a command record. Continue with content_id.",
                   obj({"action": {"type": "string", "enum": ["start", "list", "result", "cancel", "logs", "join"]}, "fresh": {"type": "boolean"}, "purpose": text(64), "scratch_paths": SCRATCH_PATHS_SCHEMA, "id": text(64), "script": text(SCRIPT_MAX), "commands": CHECK_COMMANDS_SCHEMA, "batch_name": text(63), "evidence_id": text(32), "content_id": text(64), "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}}, ("action",))),
-    "verify": ("Run configured acceptance checks to obtain a result bound to your code digest. With "
-               "check_job this queues frozen inputs and returns immediately; collect with check_job "
-               "action=result, continue independent work, or finish with the returned wait recipe.", obj()),
+    "verify": ("Run configured acceptance checks to obtain a result bound to your code digest."
+               + VERIFY_QUEUED_TEXT, obj()),
     "fetch": ("Fetch allowlisted HTTPS text and receive an external-untrusted result with a replay "
               "receipt. Page with receipt_id and offset/limit instead of url to avoid another "
               "fetch.",
@@ -361,8 +378,7 @@ DEFINITIONS = {
                               "retirement as dropped is allowed: give a reason and omit scope, "
                               "evidence, wait, snapshot_id and smoke_refs. It records a separate "
                               "retirement, not a completion or another revision; exact same-actor "
-                              "retries replay it, conflicts fail. Use work_items_reopen for "
-                              "done-to-open.\n\n"
+                              "retries replay it, conflicts fail.\n\n"
                               "Omit scope to inherit it; you cannot clear it or change it at "
                               "closure. Record a scope change before closing. Omit smoke_refs to "
                               "inherit the item's pins, or pass [] to release them; replacing pins "
@@ -416,7 +432,8 @@ DEFINITIONS = {
                               "observation matching the publication head. The wait pins both repo/ref/SHA "
                               "endpoints and wakes the holder only for an exact merge seen in a complete "
                               "enumeration. Acknowledging the delivered token never changes item status. "
-                              "Handled wait tokens go in finish.ack_events; omitted tokens replay.",
+                              "Handled wait tokens go in finish.ack_events; omitted tokens replay."
+                              + TRANSITION_REOPEN_TEXT,
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -429,9 +446,7 @@ DEFINITIONS = {
     "delegate": ("Give a configured delegate a self-contained implementation task in your live "
                  "workspace. Its edits are in that workspace, its spend counts against this unit, "
                  "and you receive its sealed result summary. "
-                 "The delegate cannot mutate VCS or delegate again. "
-                 "Pass async_mode=true to start one bounded child and get a durable job id "
-                 "promptly; join it with mizu_delegate_join. Without it delegation stays synchronous.",
+                 "The delegate cannot mutate VCS or delegate again." + DELEGATE_ASYNC_TEXT,
                  obj({"role": text(64), "task": text(8000), "async_mode": {"type": "boolean"}}, ("task",))),
     "delegate_join": ("Join one opted-in async delegation by its exact durable job id. Returns "
                       "the durable reservation status without a result while the child runs; once it is terminal and quiescent, returns "
@@ -617,6 +632,31 @@ KERNEL_CAPABILITIES = {
 }
 
 
+#: Manuals naming an option or tool with its own grant: grant, gated text,
+#: replacement text for non-holders, and input fields hidden from them.
+GRANTED_MANUALS = {
+    "delegate": ("delegate_join", DELEGATE_ASYNC_TEXT,
+                 " Delegation is synchronous.", ("async_mode",)),
+    "exec": ("check_job", EXEC_GATED_TEXT, EXEC_NARROW_TEXT, ("mode",)),
+    "experiment": ("check_job", EXPERIMENT_GATED_TEXT, EXPERIMENT_NARROW_TEXT,
+                   ("mode", "scratch_paths")),
+    "verify": ("check_job", VERIFY_QUEUED_TEXT,
+               " The configured checks run in this call and return their result directly.", ()),
+    "work_items_transition": ("work_items_reopen", TRANSITION_REOPEN_TEXT, "", ()),
+}
+
+
+def grant_aware_definition(name: str, capabilities) -> tuple[str, dict]:
+    """Describe an operation using only options the receiving grants permit."""
+    description, schema = DEFINITIONS[name]
+    gate = GRANTED_MANUALS.get(name)
+    if gate is None or gate[0] in capabilities:
+        return description, schema
+    _, text, replacement, hidden = gate
+    properties = {key: value for key, value in schema["properties"].items() if key not in hidden}
+    return description.replace(text, replacement, 1), {**schema, "properties": properties}
+
+
 def operation_allowed(operation: str, capabilities) -> bool:
     if operation not in DEFINITIONS:
         return False
@@ -626,10 +666,11 @@ def operation_allowed(operation: str, capabilities) -> bool:
 
 def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
                      config: Config | None = None) -> list[dict]:
+    granted = set(capabilities)
     operations = [name for name in capabilities if name in DEFINITIONS]
     indirect = (*STATE_READ_CAPABILITIES, *KERNEL_CAPABILITIES)
     operations += [name for name in indirect
-                   if name not in capabilities and operation_allowed(name, capabilities)]
+                   if name not in granted and operation_allowed(name, granted)]
     tools = []
     for name in operations:
         if name == "finish" and role is not None:
@@ -638,7 +679,7 @@ def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
             can_review = config is not None and reviews.authorized(config, role)
             description, schema = finish_definition(role.finish_outcomes, review_verdict=can_review)
         else:
-            description, schema = DEFINITIONS[name]
+            description, schema = grant_aware_definition(name, granted)
         if config is not None and (statement := config.tool_effects.get(name)):
             description += "\n\n" + statement
         tools.append({"name": "mizu_" + name, "operation": name,

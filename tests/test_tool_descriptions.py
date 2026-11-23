@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from mizu.protocol import DEFINITIONS
+from mizu.protocol import DEFINITIONS, GRANTED_MANUALS, tool_definitions
 
 
 PURPOSE_PREFIXES = {
@@ -107,3 +107,65 @@ class ToolDescriptionTests(unittest.TestCase):
         # The rewritten manual plus the five declared queue tools is 27,582
         # bytes; it must stay at or below that measured size.
         self.assertLessEqual(sum(len(d.encode("utf-8")) for d, _ in DEFINITIONS.values()), 27_582)
+
+
+class GrantAwareDescriptionTests(unittest.TestCase):
+    @staticmethod
+    def tool(capabilities, operation):
+        tools = [tool for tool in tool_definitions(capabilities) if tool["operation"] == operation]
+        return tools[0] if len(tools) == 1 else None
+
+    def test_gates_are_parts_of_the_default_manuals(self):
+        for name, (grant, text, _, hidden) in GRANTED_MANUALS.items():
+            with self.subTest(name=name):
+                description, schema = DEFINITIONS[name]
+                self.assertTrue(grant)
+                self.assertEqual(description.count(text), 1)
+                self.assertTrue(description.endswith(text))
+                self.assertTrue(set(hidden) <= set(schema["properties"]))
+
+    def test_delegate_without_join_is_synchronous(self):
+        tool = self.tool(("delegate",), "delegate")
+        self.assertIn("Delegation is synchronous.", tool["description"])
+        self.assertNotIn("async_mode", tool["description"])
+        self.assertNotIn("mizu_delegate_join", tool["description"])
+        self.assertNotIn("async_mode", tool["inputSchema"]["properties"])
+        self.assertEqual(tool["inputSchema"]["required"], ["task"])
+
+    def test_delegate_with_join_keeps_the_full_manual(self):
+        tool = self.tool(("delegate", "delegate_join"), "delegate")
+        self.assertEqual(tool["description"], DEFINITIONS["delegate"][0])
+        self.assertEqual(tool["inputSchema"], DEFINITIONS["delegate"][1])
+        self.assertIn("async_mode=true", tool["description"])
+        self.assertIn("mizu_delegate_join", tool["description"])
+        self.assertIn("async_mode", tool["inputSchema"]["properties"])
+
+    def test_exec_and_experiment_hide_async_without_check_job(self):
+        for operation in ("exec", "experiment"):
+            with self.subTest(operation=operation):
+                narrow = self.tool((operation,), operation)
+                full = self.tool((operation, "check_job"), operation)
+                self.assertEqual(full["description"], DEFINITIONS[operation][0])
+                self.assertEqual(full["inputSchema"], DEFINITIONS[operation][1])
+                self.assertNotIn("mode=async", narrow["description"])
+                self.assertNotIn("check_job", narrow["description"])
+                self.assertNotIn("mode", narrow["description"])
+                self.assertNotIn("mode", narrow["inputSchema"]["properties"])
+                if operation == "experiment":
+                    self.assertNotIn("scratch_paths", narrow["description"])
+                    self.assertNotIn("scratch_paths", narrow["inputSchema"]["properties"])
+                self.assertIn("runs directly in this call", narrow["description"])
+
+    def test_verify_hides_queued_collection_without_check_job(self):
+        narrow = self.tool(("verify",), "verify")
+        full = self.tool(("verify", "check_job"), "verify")
+        self.assertEqual(full["description"], DEFINITIONS["verify"][0])
+        self.assertNotIn("check_job", narrow["description"])
+        self.assertIn("return their result directly", narrow["description"])
+
+    def test_transition_hides_reopen_without_its_grant(self):
+        operation = "work_items_transition"
+        narrow = self.tool((operation,), operation)
+        full = self.tool((operation, "work_items_reopen"), operation)
+        self.assertEqual(full["description"], DEFINITIONS[operation][0])
+        self.assertNotIn("work_items_reopen", narrow["description"])

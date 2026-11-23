@@ -1617,8 +1617,12 @@ companion tool `mizu_delegate_join` accepts only that exact id; it reports a
 pending status with the child's `run` when the live reservation is available
 and returns the sealed child record (already carrying `run`) unchanged only
 after terminal execution and proven in-process handback. A missing `delegate_join` grant denies
-`async_mode=true` before any reservation. There is no external runner, fan-out
-or second concurrent child; external runner handback paths remain refused.
+`async_mode=true` before any reservation. A role holding `delegate` without
+`delegate_join` is told only that delegation is synchronous: its tool manual and
+input schema omit `async_mode` and `mizu_delegate_join`. Grant-guarded text is
+narrowed the same way for `exec`, `experiment` and `verify` without `check_job`,
+and for `work_items_transition` without `work_items_reopen`. There is no external
+runner, fan-out or second concurrent child; external runner handback paths remain refused.
 A lost owner never relaunches the child: its edits are non-idempotent file
 patches without per-edit durable deduplication, so a successor cannot know
 whether the last edit landed. The durable reservation stays held rather
