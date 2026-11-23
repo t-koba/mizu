@@ -76,18 +76,13 @@ class DaemonWakeTests(unittest.TestCase):
                 "deadline")
 
     def _bump_directory(self, directory):
-        # Changing a directory's mtime by adding a direct child works on every
-        # supported platform; os.utime(follow_symlinks=False) raises
-        # NotImplementedError on Windows directories.
-        before = directory.stat().st_mtime_ns
-        marker = directory / ".wake-probe"
-        marker.write_text("probe")
-        self.addCleanup(lambda: marker.unlink(missing_ok=True))
-        if directory == self.root:
-            return
-        deadline = time.monotonic() + 3.0
-        while directory.stat().st_mtime_ns == before and time.monotonic() < deadline:
-            time.sleep(0.02)
+        # Set the directory mtime directly, as the product's wake publisher
+        # does. Adding a child does not reliably update a directory's
+        # st_mtime_ns on every filesystem (notably NTFS), which made this test
+        # flake on Windows. os.utime(follow_symlinks=False) is unsupported on
+        # Windows directories, so use the default (follow_symlinks=True).
+        st = directory.stat()
+        os.utime(directory, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
 
     def test_fingerprint_detects_writer_hints_but_not_project_root(self):
         watched = self.root / "work-items"
