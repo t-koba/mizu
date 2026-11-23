@@ -23,9 +23,11 @@ def readable(config, role_name: str) -> list[str]:
 
 
 def waking(config, role_name: str) -> list[str]:
-    """Declared queues whose new or due messages wake the role."""
+    """Declared queues whose messages can wake the role: its ``wake`` queues, and
+    the queues it may both write and read, where replies to its messages arrive."""
     actor = principal(role_name)
-    return [name for name, queue in config.queues.items() if actor in queue.wake]
+    return [name for name, queue in config.queues.items()
+            if actor in queue.wake or (allows(queue.write, actor) and allows(queue.read, actor))]
 
 
 def due(project, role_name: str) -> bool:
@@ -45,11 +47,10 @@ def due(project, role_name: str) -> bool:
 
 
 def mark_woken(project, role_name: str, rows: list[dict]) -> None:
-    """Record that the opening's due messages have woken the role (waking queues only)."""
+    """Record that the opening's due messages have woken the role."""
     store = project.kernel_queues
-    wakes = set(waking(project.config, role_name))
     for row in rows:
-        if row.get("queue") in wakes and type(row.get("through")) is int:
+        if type(row.get("through")) is int and "queue" in row:
             store.mark_woken(row["queue"], principal(role_name), row["through"])
 
 
@@ -69,5 +70,18 @@ def opening(project, role_name: str) -> list[dict]:
             rows.append({"queue": name, "error": str(exc)[:512]})
             continue
         if facts["count"]:
+            facts["messages"] = [_with_thread(store, message, principal(role_name))
+                                 for message in facts["messages"]]
             rows.append(facts)
     return rows
+
+
+def _with_thread(store, message: dict, actor: str) -> dict:
+    """A reply arrives with the messages it refers to that the reader may read."""
+    refers = []
+    for ref in message.get("refs") or ():
+        try:
+            refers.append(store.message(ref, actor))
+        except (Denied, OSError, ValueError):
+            continue
+    return {**message, "refers": refers} if refers else message

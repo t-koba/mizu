@@ -32,8 +32,9 @@ policy and a `decisions` queue in the configuration, not code.
 
 Existing stored records are converted by operator-run procedures that append
 equivalent messages to the declared queues; they are not part of the kernel or
-of a running role. The example userland declares the `proposals`, `questions`,
-`answers` and `notices` queues with their schemas, roles and wakes. There is no
+of a running role. The example userland declares the `proposals`, `questions`
+(threads: questions and the answers that refer to them) and `notices` queues
+with their schemas, roles and wakes. There is no
 authority marker, dual-write path, or adapter left in the runtime: decisions are
 plain-English judgements made by roles under policy, and acknowledgements are
 queue cursors. Old record files appear only as stored data for those conversions

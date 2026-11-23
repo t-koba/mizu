@@ -81,7 +81,11 @@ body = {type = "string", max = 65536}
   kernel records them and offers lookup in both directions; it attaches no
   meaning to a reference. An answer, a decision, a revision or a withdrawal is
   simply a later message that refers to an earlier one, in whatever queue the
-  deployment declares for it.
+  deployment declares for it. References make threads: a message that refers
+  to another wakes that message's author (when the author is a role that may
+  read the reply), whatever the queue's `wake` list says, and is delivered with
+  the messages it refers to that its reader may read. A question needs no
+  waking queue for its answer to reach whoever asked.
 - `deliver_at` delays delivery: the message is stored at once but is neither
   delivered nor wakes anyone before that instant. Delayed messages are the only
   timers: a deferral, a revisit or a deadline is a message to oneself or to
@@ -109,7 +113,8 @@ body = {type = "string", max = 65536}
   opening delivered (`woken/<principal>.json`), and only a later due message
   wakes that reader again. Unacknowledged messages stay pending and readable
   but are not a standing wake. A reader is not woken by its own message,
-  except a delayed one, which is a wake its author asked for. The service manager
+  except a delayed one, which is a wake its author asked for. A reply also
+  wakes the author of the message it refers to (see `refs`). The service manager
   watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's
   own watch). The scheduler sleeps until the next wake or the earliest
   `deliver_at`.

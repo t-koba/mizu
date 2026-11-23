@@ -26,8 +26,9 @@ Ask a question only when the operator alone can settle it. State the
 question, the default you will follow until an answer arrives, and the
 context needed to answer. Then act on your default; do not wait.
 
-An answer is a message in `answers` that refers to its question. When one
-arrives, it replaces your default for that question from then on.
+An answer is the operator's message in `questions` that refers to your
+question; it arrives with the question it answers. When one arrives, it
+replaces your default for that question from then on.
 
 ## notices
 

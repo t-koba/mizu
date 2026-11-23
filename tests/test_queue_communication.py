@@ -247,6 +247,23 @@ class QueueFactsTests(QueueFixture):
         self.write("Another release")
         self.assertTrue(queue_facts.due(self.project, "worker"))
 
+    def test_answer_wakes_the_asker_and_arrives_with_its_question(self):
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        queues = dict(self.config.queues)
+        queues["answers"] = dataclasses.replace(queues["answers"], write=("role:*", "operator"), wake=())
+        config = dataclasses.replace(self.config, roles=roles, queues=queues)
+        self.project = Project(config, self.project.name)
+        store = self.project.kernel_queues
+        asked = store.append("answers", {"body": "May I?"}, "role:worker")
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        store.append("answers", {"body": "Yes"}, "operator", refs=[asked["id"]])
+        self.assertTrue(queue_facts.due(self.project, "worker"))
+        rows = queue_facts.opening(self.project, "worker")
+        answer = next(m for m in rows[0]["messages"] if m["author"] == "operator")
+        self.assertEqual([m["body"]["body"] for m in answer["refers"]], ["May I?"])
+
     def test_readiness_admits_on_due_message_in_a_waking_queue(self):
         snapshot = self.project.snapshots.get()
         self.project.set_control(armed=True, paused=False)

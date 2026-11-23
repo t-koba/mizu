@@ -69,6 +69,10 @@ class QueueDeclarations(unittest.TestCase):
         self.assertIn("proposals", example)
         self.assertTrue(example["proposals"].fields["title"].required)
         self.assertIn("work", example)
+        # Questions are threads: answers refer to them and wake the asker, not a wake list.
+        self.assertEqual(example["questions"].wake, ())
+        self.assertNotIn("answers", example)
+        self.assertIn("answer", example["questions"].fields)
         work = example["work"].fields
         self.assertTrue(work["kind"].required)
         self.assertEqual(work["kind"].values, ("item", "transition", "wait", "completion"))
@@ -244,6 +248,23 @@ class QueueStoreTests(unittest.TestCase):
         self.assertTrue(self.store.due("tasks", "role:alpha"))
         with self.assertRaises(Denied):
             self.store.mark_woken("notes", "role:beta", 1)
+
+    def test_reply_wakes_the_author_it_refers_to(self):
+        # A thread queue with no wake list: a reply reaches whoever wrote the message.
+        store = QueueStore(self.root, parse_queues({"threads": {
+            "write": ["role:*", "operator"], "read": ["role:*", "operator"]}}))
+        question = store.append("threads", {"q": "?"}, "role:alpha")
+        self.assertFalse((self.root / "wake" / "alpha").exists())
+        self.assertFalse(store.due("threads", "role:alpha"))
+        store.append("threads", {"a": "self"}, "role:alpha", refs=[question["id"]])
+        self.assertFalse(store.due("threads", "role:alpha"))  # own follow-up is no wake
+        store.append("threads", {"a": "!"}, "operator", refs=[question["id"]])
+        self.assertTrue((self.root / "wake" / "alpha").exists())
+        self.assertFalse((self.root / "wake" / "beta").exists())  # not beta's thread
+        self.assertTrue(store.due("threads", "role:alpha"))
+        self.assertFalse(store.due("threads", "role:beta"))
+        store.mark_woken("threads", "role:alpha", store.pending("threads", "role:alpha")["through"])
+        self.assertFalse(store.due("threads", "role:alpha"))
 
     def test_read_and_ack_never_cross_an_undelivered_delayed_message(self):
         now = "2026-01-01T00:00:00+00:00"

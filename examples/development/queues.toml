@@ -10,20 +10,15 @@ wake = ["role:worker"]
 title = {type = "string", max = 240, required = true}
 body = {type = "string", max = 65536, required = true}
 
-[queues.questions]       # what only the operator can settle
-write = ["role:*"]
+[queues.questions]       # threads: a question, and the operator's answer referring to it
+write = ["role:*", "operator"]
 read = ["operator", "role:*"]
+# No wake list: an answer is a reply, and a reply wakes whoever asked.
 [queues.questions.schema]
-question = {type = "string", max = 8192, required = true}
-default = {type = "string", max = 8192, required = true}
+question = {type = "string", max = 8192}
+default = {type = "string", max = 8192}
 context = {type = "string", max = 16384}
-
-[queues.answers]         # refs: the question
-write = ["operator"]
-read = ["role:*", "operator"]
-wake = ["role:worker"]   # and any other role that asks
-[queues.answers.schema]
-body = {type = "string", max = 16384, required = true}
+answer = {type = "string", max = 16384}
 
 [queues.notices]         # operator and host facts for the roles
 write = ["operator", "host"]

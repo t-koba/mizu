@@ -366,6 +366,28 @@ class QueueStore:
             return None
         return self._message(pointer["queue"], pointer["seq"])
 
+    def _replies_to(self, message: Mapping, actor: str) -> bool:
+        """Whether ``message`` refers to a message ``actor`` wrote (a reply in its thread)."""
+        for ref in message.get("refs", ()):
+            try:
+                target = self._message_by_id(ref)
+            except Denied:
+                continue
+            if target is not None and target.get("author") == actor:
+                return True
+        return False
+
+    def _wakes(self, declaration: Queue, message: Mapping, actor: str) -> bool:
+        """Whether a due ``message`` wakes ``actor``: a queue wake or a reply to its message.
+
+        A reader is not woken by its own message unless it is delayed, which is
+        a wake its author asked for.
+        """
+        own = message.get("author") == actor
+        if actor in declaration.wake and (not own or message.get("deliver_at") is not None):
+            return True
+        return not own and self._replies_to(message, actor)
+
     def _refs_to(self, message_id: str) -> list[dict]:
         entries = self._optional_json(self._relative("refs", message_id, "to.json"))
         if entries is None:
@@ -409,9 +431,16 @@ class QueueStore:
             atomic_write(self.root / self._relative(queue, "head.json"), canonical({"seq": seq}))
         declaration = self.queues.get(queue)
         if self._due(message, stamp) and declaration is not None:
-            for principal in declaration.wake:
-                if principal == message.get("author") and message.get("deliver_at") is None:
-                    continue  # a reader is not woken by its own message
+            woken = [principal for principal in declaration.wake
+                     if self._wakes(declaration, message, principal)]
+            for ref in message["refs"]:
+                target = self._message_by_id(ref)
+                author = target.get("author") if target else None
+                if (isinstance(author, str) and author.startswith("role:") and author not in woken
+                        and allows(declaration.read, author)
+                        and self._wakes(declaration, message, author)):
+                    woken.append(author)
+            for principal in woken:
                 role = identifier(principal[5:])
                 wake = self.root / "wake" / role
                 mkdir(wake.parent)
@@ -595,8 +624,9 @@ class QueueStore:
 
         Wakes are edges, not levels: a message wakes a reader once (see
         ``mark_woken``), and an unacknowledged message does not wake it again.
-        A reader's own message does not wake it, unless it is delayed: a
-        delayed message is a wake its author asked for.
+        Besides the queue's ``wake`` list, a reply wakes the author of the
+        message it refers to (see ``_wakes``), so a thread reaches whoever
+        started it.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
@@ -609,9 +639,8 @@ class QueueStore:
                 continue
             if not self._due(message, stamp):
                 return False  # head-of-line: a read stops here too
-            if message.get("author") == actor and message.get("deliver_at") is None:
-                continue
-            return True
+            if self._wakes(declaration, message, actor):
+                return True
         return False
 
     def message(self, id: str, actor: str) -> dict:

@@ -6,10 +6,10 @@ declarations and role policy text on the kernel
 includes it from its own configuration and changes it freely. The kernel reads
 nothing here specially.
 
-- `queues.toml` declares five queues: `proposals` (knowledge and ideas for the
-  product), `questions` (what only the operator can settle), `answers`
-  (operator replies that refer to their question), `notices` (operator and
-  host facts for the roles) and `work` (stage-3 work messages: items,
+- `queues.toml` declares four queues: `proposals` (knowledge and ideas for the
+  product), `questions` (threads: what only the operator can settle, and the
+  operator's answers referring to it), `notices` (operator and host facts for
+  the roles) and `work` (stage-3 work messages: items,
   transitions, waits and completions).
 - `policies/messages.md` says what a message in each queue means and what its
   reader does with it. Compose it into the role policies of the roles that
@@ -22,7 +22,8 @@ Roles reach the queues with the `queues` capability and the `queue_*` and
 `message_*` tools. The operator and host tooling use
 `mizu queue PROJECT write|read|ack|message|refs` (see
 [docs/operations.md](../../docs/operations.md)). Which queues wake which
-roles is the `wake` list of each declaration.
+roles is the `wake` list of each declaration; a reply also wakes the author of
+the message it refers to.
 
 To use it, include the file and add the policy part:
 
