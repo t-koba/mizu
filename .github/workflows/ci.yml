@@ -56,7 +56,10 @@ jobs:
         # This bounded addition uses the existing cell's scope, not a new job.
         timeout-minutes: 10
         run: |
-          timeout 60 sudo apt-get update
+          # A shared-runner apt mirror can stall past one 60s bound. Retry the
+          # idempotent list refresh once at the same bound; with bash -e the
+          # step still fails closed if both attempts time out.
+          timeout 60 sudo apt-get update || timeout 60 sudo apt-get update
           timeout 90 sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
           trap 'timeout 60 sh -c "podman ps -aq --filter label=io.mizu.project | xargs -r podman rm --force"' EXIT
           IMAGE=$(timeout 210 ./scripts/build-sandbox.sh --base docker.io/library/python:3.13-slim-bookworm)
