@@ -388,6 +388,111 @@ class DaemonRuntimeOwnershipTests(Fixture):
                     daemon_runtime.threading.Event.is_set = original_iss
             self.assertGreaterEqual(admissions[0], 3, admissions[0])
 
+    def test_expired_or_unactionable_wait_contributes_no_deadline(self):
+        # A persisted wake_at is an edge to observe once, not permission for a
+        # fresh 0.1s timer on every pass. An elapsed bound is admitted at the
+        # top of the loop; an unactionable one blocks on a real input change.
+        mono, wall = 1000.0, 2000.0
+
+        class Snaps:
+            state = {"state": "wait", "wake_at": wall - 5.0}
+
+            @classmethod
+            def get(cls):
+                return cls.state
+
+        class Stub:
+            root = None
+            snapshots = Snaps()
+            control_value = {"armed": True, "paused": False}
+
+            @classmethod
+            def control(cls):
+                return cls.control_value
+
+        with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
+              patch.object(daemon_runtime.time, "time", return_value=wall),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.check_jobs, "deferral", return_value=None),
+              patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None)):
+            project = Stub()
+            # Elapsed wait: no deadline, admission observes it at pass start.
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
+            # Future wait while paused: unactionable, block on a real change.
+            Snaps.state = {"state": "wait", "wake_at": wall + 30.0}
+            Stub.control_value = {"armed": True, "paused": True}
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
+            # Future wait while disarmed: same.
+            Stub.control_value = {"armed": False, "paused": False}
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
+            # Actionable future wait keeps the exact deadline.
+            Stub.control_value = {"armed": True, "paused": False}
+            self.assertEqual(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0), 1030.0)
+
+    def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
+        # A paused deployment with a due wait used to reload config and re-arm a
+        # 0.1s deadline ~10x/s with zero admissions. It must settle instead.
+        import json
+        import tempfile
+        import time as real_time
+        from pathlib import Path as TPath
+
+        from mizu.cli import configure
+        from mizu.config import load as load_config
+        from mizu.project import Project, initialize as initialize_project
+
+        with tempfile.TemporaryDirectory(prefix="daemon-paused-wait-") as td:
+            root = TPath(td)
+            cfg = root / "config/config.toml"
+            configure(cfg, None)
+            text = cfg.read_text()
+            text = text.replace('data_dir = "~/.local/state/mizu"',
+                                'data_dir = ' + json.dumps(str(root / "projects")))
+            text = text.replace("free_disk_mb = 1024", "free_disk_mb = 0")
+            cfg.write_text(text)
+            config = load_config(cfg)
+            source = root / "src"
+            source.mkdir()
+            (source / "a.py").write_text("x = 1\n")
+            goal = root / "goal.md"
+            goal.write_text("g\n")
+            initialize_project(config, "p0", source, goal, ["worker"], ["python3 -m unittest"])
+            project = Project(config, "p0")
+            project.set_control(armed=True, paused=True, wake_generation="w")
+            snap = project.snapshots.get()
+            captured = {"files": snap["files"], "code_digest": snap["code_digest"],
+                        "goal_digest": snap["goal_digest"], "goal": snap["goal"]}
+            settled = project.snapshots.create(
+                captured, goal=snap["goal"], state="wait", run=None, outcome="wait",
+                summary="idle", wake_at=time.time() - 30.0, wake_generation="w",
+                parent=snap["id"])
+            project.snapshots.publish(settled)
+
+            loads = [0]
+            real_load = daemon_runtime.load
+            def counted_load(*a, **k):
+                loads[0] += 1
+                return real_load(*a, **k)
+            start = [0.0]
+            original_iss = daemon_runtime.threading.Event.is_set
+            def timed_is_set(self):
+                return real_time.monotonic() - start[0] > 2.2
+            with (patch.object(daemon_runtime, "load", side_effect=counted_load),
+                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
+                  patch.object(daemon_runtime.signal, "signal"),
+                  patch.object(daemon_runtime, "lock", return_value=nullcontext()),
+                  patch("builtins.print")):
+                start[0] = real_time.monotonic()
+                try:
+                    daemon_runtime.daemon(config, "p0", "worker")
+                finally:
+                    daemon_runtime.threading.Event.is_set = original_iss
+            self.assertLessEqual(loads[0], 2, loads[0])
+
     def test_only_real_facts_bound_the_wait_without_an_idle_tick(self):
         config = dataclasses.replace(
             self.config,

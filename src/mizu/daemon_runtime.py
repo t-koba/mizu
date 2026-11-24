@@ -188,9 +188,22 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
             pass
     if project is not None:
         try:
+            # A persisted wait bound is an edge to observe once, not a licence
+            # for a fresh timer on every pass. An elapsed bound is admitted at
+            # the top of the loop (the wait_expired fact), so re-arming it at the
+            # clamp floor reloads configuration ~10x/s while the same snapshot
+            # persists. When control makes the wait unactionable (paused or
+            # disarmed) there is no admission to wake, so block on a real input
+            # change instead: control.json is watched and a resume re-enters
+            # admission, which still honours a due wait.
+            control = project.control()
             snapshot = project.snapshots.get()
-            if snapshot.get("state") == "wait" and snapshot.get("wake_at") is not None:
-                candidates.append(now_mono + max(0.1, snapshot["wake_at"] - now_wall))
+            wake_at = snapshot.get("wake_at")
+            if (control.get("armed") and not control.get("paused")
+                    and snapshot.get("state") == "wait"
+                    and type(wake_at) in (int, float) and math.isfinite(wake_at)
+                    and wake_at > now_wall):
+                candidates.append(now_mono + (wake_at - now_wall))
         except (MizuError, OSError, ValueError):
             pass
     return min(candidates) if candidates else None
