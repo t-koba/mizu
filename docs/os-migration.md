@@ -51,8 +51,12 @@ before and after the stages that touch the daemon (4 onward). The repeatable loc
 `python3 scripts/daemon-cpu.py --report private-validation/daemon-cpu.json`; it
 runs real daemon subprocesses (Unix-only), waits for an observed steady-state CPU
 window, and records measurement validity in the receipt. It also records the
-deployment shape, so only the relative before/after comparison on one machine is
-meaningful; a non-zero exit means that window was not steady state.
+deployment shape and the exact source the daemons loaded (git revision and a
+content digest of the daemon source), so a before/after pair is bound to the code
+it exercised and only the relative comparison on one machine is meaningful; a
+non-zero exit means that window was not steady state. To measure an earlier
+revision with the same harness, set `MIZU_CPU_SOURCE_ROOT` to that tree and
+`MIZU_CPU_SOURCE_REVISION` to its git label.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
