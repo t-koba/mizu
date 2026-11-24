@@ -492,7 +492,7 @@ merge, review approval, installation or deployment.
 
 ### Synthetic systemd/OCI recovery CI smoke
 
-`delegation-recovery-smoke` is a separate, eight-minute GitHub-hosted Ubuntu
+`delegation-recovery-smoke` is a separate, eleven-minute GitHub-hosted Ubuntu
 24.04 job, not an async runner, handoff, or pilot. Ordinary discovery of
 `test_delegation_recovery_smoke.py` runs only small offline reservation tests.
 Do not run its explicit `--prepare` / `--live` modes on a development host.
