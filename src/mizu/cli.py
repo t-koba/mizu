@@ -134,6 +134,11 @@ def parser() -> argparse.ArgumentParser:
     q.add_argument("--limit", type=int, default=None, help="Messages per page (1-512; default 64)")
     for q in qsub.choices.values():
         q.add_argument("--host", action="store_true", help="Act as the host principal instead of operator")
+    p = sub.add_parser("observe", help="Invoke one configured observation driver; append to its declared queue",
+                       usage="mizu observe PROJECT DRIVER --request JSON|-")
+    p.add_argument("project", help="Managed project name")
+    p.add_argument("driver", help="Configured driver name")
+    p.add_argument("--request", required=True, help="JSON object request; '-' reads it from stdin")
     p = sub.add_parser("publication", help="Record or list durable publication receipts")
     publication = p.add_subparsers(dest="publication_command", required=True)
     record = publication.add_parser("record", help="Record an operator-run publication receipt; create-only and idempotent")
@@ -498,6 +503,20 @@ def _cmd_queue(project, args):
     return store.refs(args.id, "to" if args.direction == "in" else "from", actor, **options)
 
 
+def _cmd_observe(config, project, args):
+    """Invoke one declared driver as the host and return the append receipt."""
+    from .fs import loads_finite
+    from .host_drivers import observe
+    raw = sys.stdin.read(4 * 1024 * 1024 + 1) if args.request == "-" else args.request
+    try:
+        request = loads_finite(raw.encode("utf-8"))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ConfigError("--request must be a JSON object") from exc
+    if not isinstance(request, dict):
+        raise ConfigError("--request must be a JSON object")
+    return observe(config, project, args.driver, request)
+
+
 def _cmd_check_jobs(config, project, args):
     if _platform.is_root():
         raise Denied("Never run sandbox jobs as root")
@@ -656,6 +675,8 @@ def _execute(config, args):
         # `editor export` needs a project; `editor mcp` handled above.
         project = Project(config, args.project)
         return _cmd_editor_export(config, project, args)
+    if args.command == "observe":
+        return _cmd_observe(config, Project(config, args.project), args)
     if args.command == "queue":
         return _cmd_queue(Project(config, args.project), args)
     if args.command == "work-items":

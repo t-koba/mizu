@@ -29,6 +29,17 @@ declares none, so an unconfigured deployment is unchanged. See
 [kernel.md](kernel.md#drivers) for the full protocol, bounds and failure
 behavior.
 
+### Host invocation
+
+Host tooling invokes a declared driver with `mizu observe PROJECT DRIVER
+--request JSON|-` (`-` reads the JSON object from stdin). The host seam resolves
+the name in `config.drivers` and delegates to the kernel, which bounds the
+request and one invocation and appends validated observations as `host` to the
+driver's declared queue. An unknown driver, a non-object request or any kernel
+or queue refusal fails closed without a success receipt. This is only the
+generic observation path: no dedicated CI/VCS authority switches, and the
+shipped example declares no driver.
+
 ## Declared host records
 
 `record_kinds` defaults to empty. Data-only declarations bind an authenticated
