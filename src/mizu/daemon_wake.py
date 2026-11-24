@@ -45,23 +45,32 @@ WATCHED_DIRS = (
 )
 
 
-def fingerprint(root: Path | None, config_file: Path | None = None) -> tuple:
+def fingerprint(root: Path | None, config_file: Path | None = None,
+                *, config_files=()) -> tuple:
     """Return a metadata-only fingerprint of the authoritative paths.
 
     Missing paths contribute a stable sentinel.  The fingerprint changes when a
     watched file is created, replaced, resized or rewritten, or when a watched
     directory gains, loses or replaces a direct child. ``config_file`` is the
-    authoritative deployment config path, which normally lives outside the
-    project root; its stat is included so a config edit wakes a settled daemon
-    even when there is no project or deadline.
+    root deployment config path and ``config_files`` is its bounded authoritative
+    input set (the root plus every transitive ``include`` actually loaded); each
+    is statted once, in that order, before the project-root rows. A config edit
+    therefore wakes a settled daemon even when there is no project or deadline.
     """
     rows = []
+    authoritative = []
     if config_file is not None:
+        authoritative.append(config_file)
+    for path in config_files:
+        if path not in authoritative:
+            authoritative.append(path)
+    for path in authoritative:
         try:
-            st = config_file.stat()
-            rows.append(("config", (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)))
+            st = path.stat()
+            rows.append(("config", str(path),
+                         (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)))
         except (OSError, TypeError, ValueError):
-            rows.append(("config", None))
+            rows.append(("config", str(path), None))
     if root is None:
         return tuple(rows)
     for name in WATCHED_FILES:
@@ -80,7 +89,8 @@ def fingerprint(root: Path | None, config_file: Path | None = None) -> tuple:
 
 
 def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
-         poll: float | None = None, config_file: Path | None = None) -> str:
+         poll: float | None = None, config_file: Path | None = None,
+         *, config_files=()) -> str:
     """Block until state changes, ``deadline`` passes, or ``stop`` is set.
 
     ``deadline`` is a monotonic instant.  Returns ``"change"``, ``"deadline"``
@@ -90,7 +100,7 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
     if poll is None:
         poll = POLL_SECONDS
     while not stop.is_set():
-        if fingerprint(root, config_file) != baseline:
+        if fingerprint(root, config_file, config_files=config_files) != baseline:
             return "change"
         now = time.monotonic()
         if deadline is not None and now >= deadline:

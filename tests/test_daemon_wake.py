@@ -206,6 +206,67 @@ class DaemonWakeTests(unittest.TestCase):
         self.assertEqual(daemon_wake.wait(stop, self.root, baseline, deadline, poll=0.01), "deadline")
         self.assertGreaterEqual(time.monotonic() - started, 0.05)
 
+    def _config(self, name, text="idle_seconds = 60\n"):
+        cfg = self.root / "config" / name
+        cfg.parent.mkdir(exist_ok=True)
+        cfg.write_text(text)
+        self.addCleanup(cfg.unlink, missing_ok=True)
+        return cfg
+
+    def test_fingerprint_includes_secondary_config_file(self):
+        primary = self._config("config.toml")
+        fragment = self._config("shared.toml", "[limits]\nidle_seconds = 15\n")
+        base = daemon_wake.fingerprint(None, primary, config_files=(fragment,))
+        self.assertEqual(len(base), len(daemon_wake.fingerprint(None, primary)) + 1)
+        self.assertIn(("config", str(fragment)), [row[:2] for row in base])
+        self.assertEqual(base, daemon_wake.fingerprint(None, primary, config_files=(fragment,)))
+        # An edit to the included file perturbs the fingerprint even though the
+        # authoritative root path is byte-for-byte untouched.
+        fragment.write_text("[limits]\nidle_seconds = 1500\n")
+        self.assertEqual(primary.read_text(), "idle_seconds = 60\n")
+        self.assertNotEqual(daemon_wake.fingerprint(None, primary, config_files=(fragment,)), base)
+
+    def test_fingerprint_detects_removed_and_restored_config_file(self):
+        primary = self._config("config.toml")
+        fragment = self._config("shared.toml", "[limits]\nidle_seconds = 15\n")
+        base = daemon_wake.fingerprint(None, primary, config_files=(fragment,))
+        fragment.unlink()
+        removed = daemon_wake.fingerprint(None, primary, config_files=(fragment,))
+        self.assertNotEqual(removed, base)
+        self.assertEqual(removed[1], ("config", str(fragment), None))
+        fragment.write_text("[limits]\nidle_seconds = 15\n")
+        restored = daemon_wake.fingerprint(None, primary, config_files=(fragment,))
+        self.assertNotEqual(restored, removed)
+        self.assertIsInstance(restored[1][2], tuple)
+
+    def test_fingerprint_deduplicates_authoritative_config_paths(self):
+        primary = self._config("config.toml")
+        fragment = self._config("shared.toml")
+        # The root appears in both arguments but is statted and emitted once.
+        self.assertEqual(daemon_wake.fingerprint(None, primary, config_files=(primary,)),
+                         daemon_wake.fingerprint(None, primary))
+        original_stat = Path.stat
+        calls = []
+
+        def counting_stat(path, *args, **kwargs):
+            calls.append(path)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", counting_stat):
+            daemon_wake.fingerprint(None, primary, config_files=(primary, fragment))
+        self.assertEqual(calls, [primary, fragment])
+
+    def test_wait_wakes_on_secondary_config_file_change(self):
+        primary = self._config("config.toml")
+        fragment = self._config("shared.toml", "[limits]\nidle_seconds = 15\n")
+        baseline = daemon_wake.fingerprint(self.root, primary, config_files=(fragment,))
+        fragment.write_text("[limits]\nidle_seconds = 1500\n")
+        stop = threading.Event()
+        self.assertEqual(
+            daemon_wake.wait(stop, self.root, baseline, None, poll=0.01,
+                             config_file=primary, config_files=(fragment,)),
+            "change")
+
 
 if __name__ == "__main__":
     unittest.main()

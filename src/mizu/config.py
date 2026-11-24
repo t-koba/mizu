@@ -398,8 +398,12 @@ ROOT_KEYS = frozenset({
     "project_import", "doctor", "completion_evidence", "queues", "drivers"})
 
 
-def _load_merged(top: Path) -> dict:
-    """Load the top file plus its transitive `include` graph into one dict."""
+def _load_merged(top: Path) -> tuple[dict, tuple[Path, ...]]:
+    """Load the top file plus its transitive `include` graph.
+
+    Returns the merged dict and the sorted, resolved set of files actually read
+    (the root plus every transitive include visited within the fixed bounds).
+    """
     budget = [0]
     merged: dict = {}
     origins: dict[str, Path] = {}
@@ -438,7 +442,7 @@ def _load_merged(top: Path) -> dict:
     # them; the top file merges last and any duplicate leaf names its pair.
     # Implemented by visiting includes first (above) then merging self.
     visit(top, 0, ())
-    return merged
+    return merged, tuple(sorted(visited))
 
 
 def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
@@ -1547,6 +1551,9 @@ class Config:
     editor: Editor = dataclasses.field(default_factory=Editor)
     completion_evidence: CompletionEvidence = dataclasses.field(default_factory=CompletionEvidence)
     tool_effects: dict[str, str] = dataclasses.field(default_factory=dict)
+    #: Bounded authoritative config input set: the root file plus every
+    #: transitive `include` actually loaded. The daemon watches all of it.
+    input_files: tuple[Path, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -1625,7 +1632,7 @@ def _validate_review_capabilities(name, workspace, capabilities):
 
 def load(file: Path) -> Config:
     file = file.expanduser().resolve()
-    data = _load_merged(file)
+    data, input_files = _load_merged(file)
     keys(data, ROOT_KEYS, "root")
     data.pop("include", None)
     from .host_records import configuration as kind_configuration
@@ -2247,4 +2254,5 @@ def load(file: Path) -> Config:
                   services=service_settings(data.get("services", {})),
                   editor=editor_settings(data.get("editor", {}), queues),
                   completion_evidence=completion_evidence_policy(data.get("completion_evidence", {}), roles),
-                  tool_effects=tool_effects)
+                  tool_effects=tool_effects,
+                  input_files=input_files)

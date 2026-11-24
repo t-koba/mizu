@@ -32,7 +32,8 @@ from mizu.project import initialize
 from mizu.runtime import Context
 
 
-def deadline_wait(stop, root, baseline, deadline, poll=None, config_file=None):
+def deadline_wait(stop, root, baseline, deadline, poll=None, config_file=None,
+                  config_files=()):
     """Stand-in for daemon_wake.wait that sleeps once to the deadline.
 
     Timing tests drive a fake clock through ``stop.wait`` and assert exact

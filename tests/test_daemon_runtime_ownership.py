@@ -78,6 +78,46 @@ class DaemonRuntimeOwnershipTests(Fixture):
         self.assertEqual(len(deadlines), 2, deadlines)
         self.assertTrue(all(started < d <= started + 2.5 for d in deadlines), deadlines)
 
+    def test_daemon_wake_boundary_covers_loaded_config_inputs(self):
+        # A settled daemon must arm and wait on the loaded config's bounded
+        # input set (root + transitive include), not on the root path alone.
+        from mizu.config import load as load_config
+
+        fragment = self.file.parent / "shared.toml"
+        fragment.write_text("[limits]\nidle_seconds = 15\n")
+        text = "".join(ln for ln in self.file.read_text().splitlines(keepends=True)
+                       if "idle_seconds = 15" not in ln)
+        self.file.write_text('include = ["shared.toml"]\n' + text)
+        config = load_config(self.file)
+        expected = tuple(sorted((self.file.resolve(), fragment.resolve())))
+        self.assertEqual(config.input_files, expected)
+
+        stop = Mock()
+        stop.is_set.side_effect = [False, True]
+        with (patch.object(daemon_runtime.threading, "Event", return_value=stop),
+              patch.object(daemon_runtime.signal, "signal"),
+              patch.object(daemon_runtime, "lock", return_value=nullcontext()),
+              patch.object(daemon_runtime, "load", return_value=config),
+              patch.object(daemon_runtime, "Project", return_value=self.project),
+              patch.object(daemon_runtime, "should_run", return_value=False),
+              patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False),
+              patch("mizu.probes.service_due", return_value=None),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
+              patch.object(daemon_runtime.daemon_wake, "fingerprint",
+                           return_value=("baseline",)) as fingerprint,
+              patch.object(daemon_runtime.daemon_wake, "wait",
+                           return_value="stop") as wake_wait,
+              patch("builtins.print")):
+            daemon_runtime.daemon(config, "sample", "worker")
+        self.assertEqual(fingerprint.call_count, 1)
+        self.assertEqual(fingerprint.call_args.args[1], config.file)
+        self.assertEqual(fingerprint.call_args.kwargs, {"config_files": expected})
+        self.assertEqual(wake_wait.call_count, 1)
+        self.assertEqual(wake_wait.call_args.args[2], ("baseline",))
+        self.assertEqual(wake_wait.call_args.kwargs,
+                         {"config_file": config.file, "config_files": expected})
+
     def test_daemon_survives_first_pass_config_failure(self):
         # A load failure before Project() is built leaves `project` as None at
         # the outer wait; the delivery-deadline cap must not dereference it.
@@ -294,12 +334,12 @@ class DaemonRuntimeOwnershipTests(Fixture):
             waits = [0]
             real_wait = daemon_runtime.daemon_wake.wait
             def edited_wait(stop, watched_root, baseline, deadline, poll=None,
-                            config_file=None):
+                            config_file=None, config_files=()):
                 waits[0] += 1
                 if waits[0] == 2:
                     (watched_root / "PROJECT.md").write_text("a different goal\n")
                 return real_wait(stop, watched_root, baseline, deadline, poll,
-                                 config_file=config_file)
+                                 config_file=config_file, config_files=config_files)
             start = [0.0]
             original_iss = daemon_runtime.threading.Event.is_set
             def timed_is_set(self):
@@ -364,13 +404,13 @@ class DaemonRuntimeOwnershipTests(Fixture):
             waits = [0]
             real_wait = daemon_runtime.daemon_wake.wait
             def edited_wait(stop, watched_root, baseline, deadline, poll=None,
-                            config_file=None):
+                            config_file=None, config_files=()):
                 waits[0] += 1
                 if waits[0] == 2:
                     cfg.write_text(cfg.read_text().replace("idle_seconds = 60",
                                                            "idle_seconds = 6100"))
                 return real_wait(stop, watched_root, baseline, deadline, poll,
-                                 config_file=config_file)
+                                 config_file=config_file, config_files=config_files)
             start = [0.0]
             original_iss = daemon_runtime.threading.Event.is_set
             def timed_is_set(self):

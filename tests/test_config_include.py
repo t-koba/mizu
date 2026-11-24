@@ -165,6 +165,26 @@ class IncludeTests(Fixture):
         config = load(self.file)
         self.assertEqual(config.limits.idle_seconds, 17)
 
+    def test_input_files_are_bounded_root_plus_transitive_includes(self):
+        import mizu.config as config_mod
+
+        subdir = self.file.parent / "nested"
+        subdir.mkdir()
+        text = _strip_line(self.file.read_text(), "idle_seconds = 15")
+        self.file.write_text('include = ["nested/mid.toml"]\n' + text)
+        (subdir / "mid.toml").write_text('include = ["leaf.toml"]\n')
+        (subdir / "leaf.toml").write_text("[limits]\nidle_seconds = 17\n")
+        config = load(self.file)
+        expected = tuple(sorted((self.file.resolve(), (subdir / "mid.toml").resolve(),
+                                 (subdir / "leaf.toml").resolve())))
+        self.assertIsInstance(config.input_files, tuple)
+        self.assertEqual(config.input_files, expected)
+        self.assertEqual(config.limits.idle_seconds, 17)
+        self.assertLessEqual(len(config.input_files), config_mod.MAX_INCLUDE_FILES)
+        # A root with no fragments still reports its own resolved path.
+        self.file.write_text(text)
+        self.assertEqual(load(self.file).input_files, (self.file.resolve(),))
+
     def test_duplicate_leaf_names_both_files(self):
         frag = self._split_idle()
         text = self.file.read_text().replace("[limits]", "[limits]\nidle_seconds = 15", 1)
