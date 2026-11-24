@@ -371,8 +371,13 @@ writer-published state change or an exact deadline (cooldown, delayed delivery,
 check wait or explicit wake) — rather than on a fixed idle tick. A wake is only
 a reason to recheck: admission still reads durable state and decides whether a
 role may run. A negative admission result is reused while the state fingerprint
-and configuration are unchanged and no deadline has lapsed. Event dispatch
-(`--event`) and the other daemon policies are unaffected.
+and configuration are unchanged and no deadline has lapsed. A unit that ends
+`waiting` or `deferred` holds the role's next dispatch until its
+`next_evaluation_at` only while nothing changes: the first change to the
+watched state after that unit (a message, a check result, an operator wake)
+lifts the hold, and the role may run again once its ordinary spacing has
+passed. The bound remains a wake deadline. Event dispatch (`--event`) and the
+other daemon policies are unaffected.
 
 ### Read-only completion cursors
 

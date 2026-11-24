@@ -226,6 +226,13 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             policy = None
             delivery_cache: dict = {}
             readiness_memo: dict = {}
+            # A unit that ended waiting or deferred names when it can next make
+            # progress. That bound holds dispatch only while nothing changes:
+            # any later change to the watched state (a message, a check
+            # result, an operator wake) lifts it, and the bound stays a wake
+            # deadline. Without a change, the role is not re-dispatched early.
+            hold_fingerprint = None
+            spacing_after = 0.0
             while not stop.is_set():
                 # Arm before the first state read: anything that changes during
                 # the read/render/pass leaves a fingerprint difference that ends
@@ -239,6 +246,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 input_files = tuple(config.input_files) or (config_path,)
                 baseline = daemon_wake.fingerprint(root, config_path,
                                                    config_files=input_files)
+                if hold_fingerprint is not None and baseline != hold_fingerprint:
+                    ordinary_after = min(ordinary_after, spacing_after)
+                    hold_fingerprint = None
                 try:
                     updated = load(config.file)
                     if updated.data != config.data:
@@ -293,12 +303,18 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                         enqueue_busy=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
                         delay = role_daemon_spacing_seconds(config, role)
-                        if result.get("status") in ("waiting", "deferred"):
-                            # The reported bound is the real reason to re-enter;
-                            # an idle poll cannot replace it without starving it.
-                            delay = max(0.1, result["next_evaluation_at"] - time.time())
                         # Cooldown gates dispatch, never just a state read.
-                        ordinary_after = time.monotonic() + delay
+                        spacing_after = time.monotonic() + delay
+                        ordinary_after = spacing_after
+                        hold_fingerprint = None
+                        if result.get("status") in ("waiting", "deferred"):
+                            # The reported bound is the real reason to re-enter
+                            # when nothing changes; a change after this unit
+                            # lifts it (see hold_fingerprint).
+                            bound = max(0.1, result["next_evaluation_at"] - time.time())
+                            ordinary_after = time.monotonic() + bound
+                            hold_fingerprint = daemon_wake.fingerprint(
+                                project.root, config_path, config_files=input_files)
                 except (MizuError, OSError, ValueError) as exc:
                     print(json.dumps({"event": "run_deferred", "error": str(exc), "time": now()}), flush=True)
                 # A single interruptible wait covers every idle path: a state
