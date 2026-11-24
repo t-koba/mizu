@@ -366,12 +366,13 @@ deployment's choices.
 
 ### Readiness evaluation while idle
 
-The resident `signals` daemon evaluates readiness on each poll, which
-enumerates work-item history, check jobs and the inbox. Wake and delayed-message
-delivery deadlines now drive dispatch and cap the sleep between polls, so
-readiness is evaluated fresh every time: this is the unchanged default behavior
-and needs no reuse cache. Event dispatch (`--event`) and the other daemon
-policies are unaffected.
+The resident `signals` daemon evaluates readiness only when it wakes — on a
+writer-published state change or an exact deadline (cooldown, delayed delivery,
+check wait or explicit wake) — rather than on a fixed idle tick. A wake is only
+a reason to recheck: admission still reads durable state and decides whether a
+role may run. A negative admission result is reused while the state fingerprint
+and configuration are unchanged and no deadline has lapsed. Event dispatch
+(`--event`) and the other daemon policies are unaffected.
 
 ### Read-only completion cursors
 
@@ -938,10 +939,11 @@ grants and invocation.
 Control and configured ordinary spacing remain in force (explicit
 `daemon_spacing_seconds` when set, else the policy default: `signals` uses the
 role-effective cooldown, `periodic` uses `idle_seconds`; ordinary spacing only,
-never deferred re-entry). Daemons recheck on
-idle ticks; observation also touches the existing `waits` directory as a
-best-effort hint to already-configured platform event watches. Those hints
-never carry authority: dispatch revalidates the exact waiter and evidence.
+never deferred re-entry). Daemons wake on writer-published state changes and
+exact deadlines rather than on idle ticks; observation also touches the existing
+`waits` directory as a best-effort hint to already-configured platform event
+watches. Those hints never carry authority: dispatch revalidates the exact
+waiter and evidence.
 Unscheduled/unsubscribed roles keep their existing explicit-run policy.
 
 A deferred decision does not admit a run on its own: its revisit condition is
@@ -980,7 +982,8 @@ covered across hosts with `system=` in `tests/test_platform.py`). `event_watches
 selects non-daemon roles with event subscriptions, unscheduled `on_change`
 roles, and scheduled writable roles
 (the latter also need to reevaluate their own structured waits); daemon roles
-recheck their wake policy on idle ticks instead of file triggers.
+wait on writer-published state changes and exact deadlines instead of file
+triggers.
 
 - Linux (systemd user units): timers (`OnBootSec`/`OnUnitInactiveSec` for
   intervals, `OnCalendar` for calendar entries) invoke `mizu run`; opted-in
@@ -1039,7 +1042,7 @@ cadence:
 service-manager availability, a busy job, and all routing/admission gates still
 apply; Linux's interval is measured after the event service becomes inactive,
 with up to one second of timer accuracy slack. Scheduled services are unchanged.
-Daemon ticks and
+Daemon wakes and
 scheduled runs likewise recheck their inputs (`src/mizu/services.py` and
 `docs/configuration.md` terminal-subscription section).
 

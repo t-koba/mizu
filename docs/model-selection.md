@@ -177,10 +177,9 @@ not tied to the runner's role, so recovery never depends on a resident daemon
 for the sponsoring role. The probe still revalidates the stored sponsoring
 role, target, budget and locks. This adds no services or timers: a project
 with no daemon is serviced by its own one-shot runs. Servicing is best-effort;
-a probe failure never fails the run's own work. The daemon rechecks
-at least at `idle_seconds` cadence and waits for an earlier probe/upper-expiry
-deadline when present. These extra ticks do not shorten the ordinary role
-cooldown. Probe
+a probe failure never fails the run's own work. The daemon wakes on
+writer-published state changes and waits for an exact probe/upper-expiry deadline
+when present. Probe servicing does not shorten the ordinary role cooldown. Probe
 admission still requires armed, unpaused, not draining, and not stopped. It
 uses the normal role lock, writer lock where applicable, and execution slot;
 there is no lock across inference on the shared selection state. Lock contention,
@@ -507,10 +506,11 @@ rule's `counts_as_failure` to `true` opts it into that single increment. A
 completed fallback resets the consecutive count. An unmatched failure follows
 the existing health/pause behavior.
 `status = "waiting"` means no main-model invocation was made. Both results
-provide `next_evaluation_at`. The daemon uses interruptible waits and rechecks
-at least at its configured idle cadence so external updates can be noticed.
-This is not a new scheduling/wake policy: existing project readiness and
-on-change checks still apply.
+provide `next_evaluation_at`. The daemon uses an interruptible wait that ends
+on a writer-published state change or the reported `next_evaluation_at`
+deadline, so external updates wake it without a fixed idle recheck. This is not
+a new scheduling/wake policy: existing project readiness and on-change checks
+still apply.
 
 Pre-execution waits are evaluated before a run directory is allocated. The
 first wait with a given reason audits as one run (`started.json`,
