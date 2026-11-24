@@ -6,6 +6,8 @@ enforce the stated bounds, and that a host-authenticated driver can append an
 observation the way the generic kernel driver does.
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,7 +24,8 @@ from mizu.kernel import QueueStore, parse_queues
 from mizu.kernel.queues import allows
 from mizu.runtime import Context
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "development"
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE = SOURCE_ROOT / "examples" / "development"
 FRAGMENT = EXAMPLE / "observation_queues.toml"
 DRIVER_FRAGMENT = EXAMPLE / "observation_drivers.toml"
 DRIVER = EXAMPLE / "drivers" / "ci_costs_driver.py"
@@ -195,7 +198,12 @@ class GeneratedDeploymentCosts(unittest.TestCase):
             config = load(config_file)
 
             driver = config.drivers["ci_costs"]
-            self.assertEqual(driver.command, (sys.executable, str(EXAMPLE / "drivers" / "ci_costs_driver.py")))
+            durable = config_file.parent / "drivers" / "ci_costs_driver.py"
+            self.assertEqual(driver.command, (sys.executable, str(durable)))
+            self.assertTrue(durable.is_file())
+            self.assertEqual(durable.read_bytes(), DRIVER.read_bytes())
+            self.assertFalse(durable.is_relative_to(EXAMPLE))
+            self.assertFalse(durable.is_relative_to(SOURCE_ROOT))
             self.assertEqual(driver.observation_queue, "ci_observations")
             self.assertTrue(all(Path(arg).is_absolute() for arg in driver.command))
             example = tomllib.loads(DRIVER_FRAGMENT.read_text(encoding="utf-8"))["drivers"]["ci_costs"]
@@ -231,6 +239,65 @@ class GeneratedDeploymentCosts(unittest.TestCase):
             self.assertEqual(page["messages"][0]["author"], "host")
             body = page["messages"][0]["body"]
             self.assertEqual((body["driver"], body["kind"]), ("ci_costs", "ci_costs"))
+
+    def test_migrated_config_reports_from_a_foreign_cwd(self):
+        """An existing config with the documented durable argv needs no source tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generated = root / "generated" / "config.toml"
+            configure(generated, None)
+            existing_dir = root / "existing"
+            existing = existing_dir / "config.toml"
+            durable = existing_dir / "drivers" / "ci_costs_driver.py"
+            # Migration: copy the reviewed program into the durable config dir
+            # and declare its absolute path with the operator's interpreter.
+            (durable.parent).mkdir(parents=True)
+            shutil.copyfile(DRIVER, durable)
+            shutil.copytree(generated.parent / "policies",
+                            existing_dir / "policies", dirs_exist_ok=True)
+            text = generated.read_text(encoding="utf-8").replace(
+                'data_dir = "~/.local/state/mizu"',
+                "data_dir = " + json.dumps(str(root / "data")))
+            generated_command = "command = " + json.dumps(
+                [sys.executable, str(generated.parent / "drivers" / "ci_costs_driver.py")])
+            documented_command = "command = " + json.dumps([sys.executable, str(durable)])
+            if generated_command in text:
+                text = text.replace(generated_command, documented_command)
+            else:
+                text = text.replace(
+                    'command = ["python3", "examples/development/drivers/ci_costs_driver.py"]',
+                    documented_command)
+            existing.write_text(text, encoding="utf-8")
+            self.assertEqual(configure(existing, None)["status"], "unchanged")
+            config = load(existing)
+            self.assertEqual(config.drivers["ci_costs"].command,
+                             (sys.executable, str(durable)))
+
+            project = SimpleNamespace(root=root, kernel_queues=QueueStore(root, config.queues))
+            run_dir = root / "run"
+            (run_dir / "vcs-read").mkdir(parents=True)
+            context = SimpleNamespace(
+                config=config, project=project, run_dir=run_dir,
+                _new_invocation_evidence=lambda op: ("eid-1", "vcs-read/eid-1.json"))
+            foreign = root / "foreign-cwd"
+            foreign.mkdir()
+            previous = os.getcwd()
+            try:
+                os.chdir(foreign)
+                result = Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(result["op"], "ci_costs")
+            self.assertEqual(result["trust"], "external-untrusted")
+            self.assertEqual(result["days"], [])
+            self.assertIsNone(result["observed_wall_seconds"])
+            self.assertEqual(result["coverage"], "partial")
+            self.assertTrue((run_dir / "vcs-read" / "eid-1.json").is_file())
+            page = project.kernel_queues.read("ci_observations", "role:worker")
+            self.assertEqual((page["head"], len(page["messages"])), (1, 1))
+            self.assertEqual(page["messages"][0]["author"], "host")
+            self.assertEqual(page["messages"][0]["body"]["driver"], "ci_costs")
 
 
 if __name__ == "__main__":

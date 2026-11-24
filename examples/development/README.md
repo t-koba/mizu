@@ -28,9 +28,13 @@ nothing here specially.
   `drivers/ci_costs_driver.py`. Including it switches the `vcs_read ci_costs`
   join to that operator-owned program through the generic host seam; without
   it the op fails closed. A config written by `mizu configure` already carries
-  a working `ci_costs` declaration with an absolute, CWD-independent command,
-  so including this fragment there would duplicate the key. Use it for a
-  manually authored config or when migrating an existing one.
+  a working `ci_costs` declaration with an absolute, CWD-independent command
+  pointing at a durable copy of the program in the config dir, so including
+  this fragment there would duplicate the key. A manually authored or migrated
+  config must copy the reviewed program into a durable location that survives
+  upgrades (the config dir) and declare an absolute argv of its Python
+  interpreter and that copy, as `mizu configure` generates; the relative argv
+  here is illustrative only, not a usable deployment command.
 - `policies/observations.md` says what an observation in each queue means, who
   reads it and what the reader does. Compose it into the role policies of the
   roles that read those queues.
