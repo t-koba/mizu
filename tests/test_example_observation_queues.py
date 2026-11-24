@@ -5,7 +5,6 @@ authority. These tests check that the declarations validate, that their schemas
 enforce the stated bounds, and that a host-authenticated driver can append an
 observation the way the generic kernel driver does.
 """
-import os
 import tempfile
 import tomllib
 import unittest
@@ -87,8 +86,13 @@ class ObservationDeclaration(unittest.TestCase):
                 'data_dir = "~/.local/state/mizu"',
                 "data_dir = " + repr(str(root / "data")))
             names = ("queues.toml", "outcomes.toml", "observation_queues.toml")
-            rel = [os.path.relpath(EXAMPLE / name, cfgdir) for name in names]
-            include = "include = [" + ", ".join('"%s"' % r for r in rel) + "]\n"
+            # Copy the fragments beside the top config and include them by bare
+            # relative name, as the README documents. A cross-tree os.path.relpath
+            # breaks on platform temp symlinks (macOS /var -> /private/var), where
+            # the lexically computed ".." count does not match the resolved path.
+            for name in names:
+                (cfgdir / name).write_bytes((EXAMPLE / name).read_bytes())
+            include = "include = [" + ", ".join('"%s"' % n for n in names) + "]\n"
             top.write_text(include + text, encoding="utf-8")
             config = load(top)
             self.assertEqual(set(config.queues), {
