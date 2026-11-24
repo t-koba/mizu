@@ -18,6 +18,17 @@ declarations, and role policy decides what each message means. See
 [kernel.md](kernel.md) for queue mechanics and the commented
 `config/config.example.toml` for the shipped declarations.
 
+## Observation drivers
+
+Drivers are declared `[drivers.<name>]` tables: an operator-owned `command`
+argv, one `observation_queue` that `host` may write, and bounded
+`timeout_seconds`, `max_bytes` and `diagnostic_bytes`. The kernel invokes the
+command once with a bounded JSON request and appends any returned observations
+to the declared queue; it attaches no meaning to them. The shipped example
+declares none, so an unconfigured deployment is unchanged. See
+[kernel.md](kernel.md#drivers) for the full protocol, bounds and failure
+behavior.
+
 ## Declared host records
 
 `record_kinds` defaults to empty. Data-only declarations bind an authenticated

@@ -182,6 +182,54 @@ returns observations, which the kernel appends to the driver's configured
 queue. Version control, CI, pull requests, publication and review are driver
 operations plus deployment policy; none of them is a kernel concept.
 
+### Declaration
+
+Each driver is a `[drivers.<name>]` table; a name is a lowercase identifier,
+as queue names are. An absent or empty `[drivers]` table is valid and changes
+nothing. All declarations are validated together: one bad declaration refuses
+the whole configuration with a `ConfigError`.
+
+| Key | Meaning | Default | Bound |
+|---|---|---|---|
+| `command` | argv array of the operator-owned program | required | nonempty array of nonempty strings without newline or NUL |
+| `timeout_seconds` | wall deadline of one call | `20` | finite number in [1, 86400] |
+| `max_bytes` | canonical request and combined output byte cap | `524288` | integer in [1024, 16777216] |
+| `observation_queue` | queue that receives observations | required | a declared queue whose `write` principals include `host` |
+| `diagnostic_bytes` | stderr tail attached to a nonzero-exit failure | `0` (disabled) | integer in [0, 8192] |
+
+### Protocol and records
+
+`invoke(driver, request, cancel=...)` takes one dict request, serializes it
+canonically with `fs.canonical`, refuses NUL and a canonical request longer
+than `max_bytes`, then runs `command` once with that request on stdin. The
+program must print one JSON object on stdout. Any JSON object is a valid
+response; the kernel returns it verbatim as an external-untrusted dict and
+assigns no meaning to its keys. An observing driver returns an `observations`
+key holding a list of at most 1024 plain objects. `record_observations(store,
+driver, response)` appends each object to the declared queue as `host` and
+returns only `{"appended": n}`. Observation bodies stay opaque: the queue's own
+declared schema and its 1 MiB body bound still apply, so a body the queue
+refuses fails closed. Appends are sequential, not transactional: a refusal
+raises `Denied` after any earlier appends remain in the queue.
+
+### Trust, retry, evidence and failure
+
+The command is operator configuration, never model-provided argv, and never
+runs in the sandbox. Requests, responses and the bounded stderr tail attached
+to a nonzero-exit failure are external-untrusted; the tail is labelled as
+such. Each call invokes the program once under `timeout_seconds`, polling an
+optional `cancel` callback; there is no shell retry and no automatic
+replay after cancellation. The returned dict and the append receipt carry no
+provider meaning: callers bind them to their own records and digests, and the
+kernel records no driver-specific evidence.
+
+Failures are fail-closed `Denied`: a non-dict request, NUL or oversize
+request, timeout, output-limit, cancellation, any nonzero exit or reason other
+than a clean exit, and malformed, duplicate-key, non-finite, over-deep or
+non-object JSON on stdout. `record_observations` refuses a non-dict response,
+a missing, non-list or over-long `observations` value, a non-object body, and
+any append the destination queue's schema or grants reject.
+
 ## Bounds
 
 Bounds are either fixed mechanism limits or configuration with documented

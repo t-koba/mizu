@@ -10,7 +10,7 @@ import sys
 import tomllib
 import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
@@ -395,7 +395,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "workspace_cache",
     "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor", "completion_evidence", "queues"})
+    "project_import", "doctor", "completion_evidence", "queues", "drivers"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -1301,6 +1301,11 @@ def _kernel_queues(raw):
     return parse_queues(raw)
 
 
+def _kernel_drivers(raw, queues):
+    from .kernel import parse_drivers
+    return parse_drivers(raw, queues)
+
+
 def publication_review_requirement(policy: PublicationPolicy) -> tuple[tuple[str, ...], int]:
     if policy.reviewers:
         return policy.reviewers, policy.required_approvals
@@ -1529,6 +1534,8 @@ class Config:
     record_kinds: dict = dataclasses.field(default_factory=dict)
     #: Kernel message queues declared by the deployment (docs/kernel.md).
     queues: dict = dataclasses.field(default_factory=dict)
+    #: Kernel observation drivers declared by the deployment (docs/kernel.md).
+    drivers: Mapping = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
@@ -2187,6 +2194,7 @@ def load(file: Path) -> Config:
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
     queues = _kernel_queues(data.get("queues", {}))
+    drivers = _kernel_drivers(data.get("drivers", {}), queues)
     from .kernel.queues import allows as _queue_allows
     for key, writer in (("observation_queue", "host"), ("approval_queue", "operator")):
         vcs[key] = string(vcs[key], f"vcs.{key}")
@@ -2228,6 +2236,7 @@ def load(file: Path) -> Config:
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), record_kinds=kinds,
                   queues=queues,
+                  drivers=drivers,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
