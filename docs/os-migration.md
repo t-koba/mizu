@@ -61,9 +61,13 @@ the explicit label is used, so a git-less exported tree cannot inherit an
 enclosing checkout's HEAD. To measure an earlier revision with the same harness,
 set `MIZU_CPU_SOURCE_ROOT` to that tree and `MIZU_CPU_SOURCE_REVISION` to its git
 label. The stage-4 before/after receipts are retained path-free in
-`docs/evidence/stage4-cpu-evidence.json`, with a verifiable link from each
-source-tree digest to its named git commit; `scripts/verify-stage4-cpu-evidence.py`
-recomputes the record's internal digests and shape from tracked files only.
+`docs/evidence/stage4-cpu-evidence.json`. Each receipt names the git commit it
+measured; a reader with a full clone recomputes that source-tree digest with the
+harness recipe (`scripts/verify-stage4-cpu-evidence.py --repo <checkout>`), which is
+non-circular because the commit tree is outside the record. Tracked-only mode
+verifies record integrity, harness digest, shape and validity and explicitly skips
+the tree checks rather than asserting them from fields in the same file; the record's
+witness block carries the captured outputs and reader recipes, without worker-private IDs.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|

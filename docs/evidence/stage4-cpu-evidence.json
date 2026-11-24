@@ -1,5 +1,5 @@
 {
-  "schema": "stage4-cpu-evidence-v1",
+  "schema": "stage4-cpu-evidence-v2",
   "purpose": "Audit-readable record of the existing stage-4 daemon before/after CPU receipts. Reuses the already-captured measurement; no remeasurement. Relative before/after on one machine, synthetic deployment, not a performance ceiling.",
   "measurement": {
     "kind": "local-daemon-cpu",
@@ -26,7 +26,6 @@
     "validity_matches_after": true
   },
   "before": {
-    "source_receipt_sha256": "692779284074f6ae15652a5f4f3fafdabdf0cf88905cd2c620be38cc99475e78",
     "embedded_receipt": {
       "kind": "local-daemon-cpu",
       "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
@@ -173,12 +172,15 @@
       "source_revision_resolved_from_git": false,
       "label_verified_against_git": true,
       "daemon_src_sha256": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
-      "daemon_src_sha256_recomputed_from_git_tree": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
-      "recompute": "sha256 over sorted src/mizu/**/*.py of `git archive <source_revision> src` == daemon_src_sha256"
+      "recompute_from_public_commit": {
+        "method": "git archive <source_revision> src; sha256 over sorted src/mizu/**/*.py of relpath + NUL + file bytes + NUL",
+        "harness_function": "scripts/daemon-cpu.py::_source_digest",
+        "commit_is_public_ancestor_of_head": true,
+        "note": "Any reader with a full clone of the public repository at the named source_revision can recompute daemon_src_sha256 independently; the receipt claims the value, this record does not self-assert it."
+      }
     }
   },
   "after": {
-    "source_receipt_sha256": "2803e61a718490805f3dbd893929fd9b48655bedfc79944493df0091fb6197f0",
     "embedded_receipt": {
       "kind": "local-daemon-cpu",
       "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
@@ -324,8 +326,12 @@
       "source_revision": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
       "source_revision_resolved_from_git": true,
       "daemon_src_sha256": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
-      "daemon_src_sha256_recomputed_from_git_tree": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
-      "recompute": "sha256 over sorted src/mizu/**/*.py of `git archive <source_revision> src` == daemon_src_sha256"
+      "recompute_from_public_commit": {
+        "method": "git archive <source_revision> src; sha256 over sorted src/mizu/**/*.py of relpath + NUL + file bytes + NUL",
+        "harness_function": "scripts/daemon-cpu.py::_source_digest",
+        "commit_is_public_ancestor_of_head": true,
+        "note": "Any reader with a full clone of the public repository at the named source_revision can recompute daemon_src_sha256 independently; the receipt claims the value, this record does not self-assert it."
+      }
     }
   },
   "result": {
@@ -340,24 +346,58 @@
   },
   "no_private_paths": true,
   "verification": {
-    "verifier_script": "scripts/verify-stage4-cpu-evidence.py",
-    "check_id": "958f14dba1be167a39453b105d7948db4b27eb58629633386f1f6bffd10551a1",
-    "check_command_id": "bccd8f93f0894bdda1eeaec6f3c86109",
-    "check_purpose": "stage4-cpu-evidence-audit-record-verify",
-    "check_result_recompute": "mizu_check_job action=result id=958f14dba1be167a39453b105d7948db4b27eb58629633386f1f6bffd10551a1",
-    "check_log_recompute": "mizu_check_job action=logs with check id and command id bccd8f93f0894bdda1eeaec6f3c86109",
-    "dereferenceable_anchors": {
-      "before_tree_commit": "8295dba3f6cd913e69ea5014229c766fe5321edc",
-      "after_tree_commit": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
-      "anchor_read": "mizu_vcs_read op=log with exact sha",
-      "tracked_record": "docs/evidence/stage4-cpu-evidence.json",
-      "tracked_verifier": "scripts/verify-stage4-cpu-evidence.py",
-      "tracked_guard_test": "tests/test_stage4_cpu_evidence.py"
+    "verifier": "scripts/verify-stage4-cpu-evidence.py",
+    "guard_test": "tests/test_stage4_cpu_evidence.py",
+    "no_worker_private_ids": true,
+    "scope_note": "The tracked-only verifier checks record integrity, the harness digest against the tracked script, matched shape/validity and the recorded witness; it does not claim to prove the source-tree link from fields in this file. A reader recomputes that link from the public git commits (see witness.reproduce)."
+  },
+  "witness": {
+    "trust": "external-untrusted",
+    "scope": "Worker-recorded output of the verifier and of a full-clone git recompute; reproducible by any reader with a full clone, not an authenticity proof by itself.",
+    "reproduce": {
+      "verifier_tracked": "python3 scripts/verify-stage4-cpu-evidence.py",
+      "verifier_with_git": "python3 scripts/verify-stage4-cpu-evidence.py --repo <full-clone>",
+      "tree_digest": "git archive <source_revision> src | tar -x -C <tmp>; sha256 over sorted <tmp>/src/mizu/**/*.py of relpath + NUL + bytes + NUL"
     },
-    "git_recompute_witness": {
-      "command_id": "67a13271bb254a47972c13f643a6808e",
-      "note": "mizu_exec git archive recompute of both source-tree digests from the named commits; external-untrusted recorded-local evidence"
+    "verifier_output": {
+      "checks": {
+        "after_embedded_receipt_integrity": true,
+        "after_source_hex": true,
+        "after_tree_commit": true,
+        "after_tree_digest_from_git": true,
+        "after_witness_consistent": true,
+        "before_embedded_receipt_integrity": true,
+        "before_source_hex": true,
+        "before_tree_commit": true,
+        "before_tree_digest_from_git": true,
+        "before_witness_consistent": true,
+        "harness_digest": true,
+        "no_private_paths": true,
+        "no_worker_private_ids": true,
+        "schema": true,
+        "shape_matched": true,
+        "validity_flags": true,
+        "validity_matched": true
+      },
+      "passed": true,
+      "schema": "stage4-cpu-evidence-v2",
+      "scope": "with_git",
+      "skipped": []
     },
-    "note": "The check verifies embedded receipts, harness digest, source-tree digest agreement, shape, validity and no-private-paths. The verification annotations are not among the recomputed fields."
+    "git_recompute": [
+      {
+        "side": "before",
+        "source_revision": "8295dba3f6cd913e69ea5014229c766fe5321edc",
+        "tree_digest": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
+        "matched_receipt": true
+      },
+      {
+        "side": "after",
+        "source_revision": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
+        "tree_digest": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
+        "matched_receipt": true
+      }
+    ],
+    "note": "These values were observed in a git-enabled full clone during the worker unit; a reader reproduces them with the commands above. They are external-untrusted and are not used by the tracked-only verifier as a substitute for that recompute."
   }
 }

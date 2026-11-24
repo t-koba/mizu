@@ -1,52 +1,103 @@
-"""Verify the tracked stage-4 CPU evidence record from tracked files only.
+"""Verify the tracked stage-4 CPU evidence record.
 
-Reads docs/evidence/stage4-cpu-evidence.json and checks, without git or network:
-no private paths; the harness digest against the tracked script; each embedded
-receipt's content digest; that each recorded source-tree digest agrees with the
-witnessed recompute value; matched deployment shape and validity flags.
+Two scopes:
 
-The witness that recomputed the source-tree digests from the named git commits
-is recorded in the record's verification section with a dereference rule; this
-script reuses that already-captured result and never reruns the measurement.
-Prints one bounded JSON summary; exit 0 only when every check passes.
+* Tracked-only (default): uses only files in the repository. It verifies no
+  private paths, the schema, the harness digest against the tracked script,
+  each embedded receipt's content digest, matched shape/validity flags, the
+  recorded witness's consistency with the receipts, and the absence of
+  worker-private IDs. It does NOT claim to prove the source-tree link from
+  fields that live in the record: that would be circular.
+
+* With git (--repo <checkout>): additionally recomputes each source-tree
+  digest from the named git commit with the harness's own recipe. The commit
+  tree is external to the record, so this check is non-circular and fails on
+  falsified numbers. A reader reproduces it with a full clone; the named
+  commits are ancestors of HEAD in the public history.
+
+Prints one bounded JSON summary; exit 0 only when every reported check passes.
+The already-captured measurement is reused; this never reruns it.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RECORD = ROOT / "docs" / "evidence" / "stage4-cpu-evidence.json"
 PRIVATE_MARKERS = ("/tmp/", "/workspace", "/usr/", "/home/", "mizu-before-src")
+PRIVATE_ID_KEYS = ("check_id", "check_command_id", "check_result_recompute",
+                   "check_log_recompute", "command_id", "source_receipt_sha256",
+                   "daemon_src_sha256_recomputed_from_git_tree")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def main() -> int:
+def canonical_sha(obj: object) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"))
+                          .encode()).hexdigest()
+
+
+def source_digest(src: pathlib.Path) -> str:
+    """Same recipe as scripts/daemon-cpu.py::_source_digest."""
+    digest = hashlib.sha256()
+    for path in sorted((src / "mizu").rglob("*.py")):
+        digest.update(str(path.relative_to(src)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def tree_digest_from_git(repo: pathlib.Path, revision: str) -> str:
+    """Recompute the source-tree digest from an external git commit."""
+    with tempfile.TemporaryDirectory(prefix="stage4-evidence-") as tmp:
+        archive = subprocess.run(["git", "-C", str(repo), "archive", revision, "src"],
+                                 check=True, capture_output=True)
+        subprocess.run(["tar", "-x", "-C", tmp], input=archive.stdout, check=True,
+                       capture_output=True)
+        return source_digest(pathlib.Path(tmp) / "src")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=pathlib.Path, default=None,
+                        help="full git checkout to recompute source-tree digests from")
+    args = parser.parse_args(argv)
+
     text = RECORD.read_text(encoding="utf-8")
     record = json.loads(text)
     checks: dict[str, bool] = {}
 
-    checks["no_private_paths"] = not any(marker in text for marker in PRIVATE_MARKERS)
+    checks["no_private_paths"] = not any(m in text for m in PRIVATE_MARKERS)
+    checks["schema"] = record["schema"] == "stage4-cpu-evidence-v2"
+    checks["no_worker_private_ids"] = not any(k in text for k in PRIVATE_ID_KEYS)
 
     harness = ROOT / record["measurement"]["harness"]
-    harness_sha = hashlib.sha256(harness.read_bytes()).hexdigest()
-    checks["harness_digest"] = harness_sha == record["measurement"]["harness_script_sha256"]
+    checks["harness_digest"] = (hashlib.sha256(harness.read_bytes()).hexdigest()
+                                == record["measurement"]["harness_script_sha256"])
 
+    witness_rows = {row["side"]: row for row in record["witness"]["git_recompute"]}
     for side in ("before", "after"):
         binding = record[side]["source_binding"]
-        checks[f"{side}_source_digest"] = (
-            bool(HEX64.fullmatch(binding["daemon_src_sha256"]))
-            and binding["daemon_src_sha256"]
-            == binding["daemon_src_sha256_recomputed_from_git_tree"])
-        checks[f"{side}_embedded_receipt"] = (
-            hashlib.sha256(json.dumps(record[side]["embedded_receipt"], sort_keys=True,
-                                      separators=(",", ":")).encode()).hexdigest()
+        claimed = binding["daemon_src_sha256"]
+        checks[f"{side}_source_hex"] = bool(HEX64.fullmatch(claimed))
+        checks[f"{side}_embedded_receipt_integrity"] = (
+            canonical_sha(record[side]["embedded_receipt"])
             == record[side]["embedded_receipt_sha256"])
         checks[f"{side}_tree_commit"] = bool(HEX40.fullmatch(binding["source_revision"]))
+        # Consistency of the recorded (external-untrusted) witness with the
+        # receipt claim. NOT a proof of the tree link by itself.
+        checks[f"{side}_witness_consistent"] = (
+            witness_rows[side]["tree_digest"] == claimed
+            and witness_rows[side]["source_revision"] == binding["source_revision"]
+            and witness_rows[side]["matched_receipt"] is True)
 
     m = record["measurement"]
     checks["shape_matched"] = bool(m["deployment_matches_after"])
@@ -54,7 +105,22 @@ def main() -> int:
     checks["validity_flags"] = (m["validity"]["method"] == "proc-per-pid"
                                 and m["validity"]["steady_state_observed"] is True)
 
-    summary = {"schema": record["schema"], "checks": checks,
+    skipped: list[str] = []
+    if args.repo is None:
+        skipped = ["before_tree_digest_from_git", "after_tree_digest_from_git"]
+    else:
+        for side in ("before", "after"):
+            revision = record[side]["source_binding"]["source_revision"]
+            try:
+                recomputed = tree_digest_from_git(args.repo, revision)
+            except (subprocess.CalledProcessError, OSError):
+                recomputed = None  # unresolvable commit is a failed check, not a crash
+            checks[f"{side}_tree_digest_from_git"] = (
+                recomputed == record[side]["source_binding"]["daemon_src_sha256"])
+
+    summary = {"schema": record["schema"],
+               "scope": "with_git" if args.repo is not None else "tracked_only",
+               "checks": checks, "skipped": skipped,
                "passed": all(checks.values())}
     print(json.dumps(summary, sort_keys=True))
     return 0 if summary["passed"] else 1
