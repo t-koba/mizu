@@ -59,6 +59,25 @@ def command(*argv, seconds=10, codes=(0,), maximum=8192, diagnostic_bytes=0):
     return result
 
 
+# A shared CI runner's apt mirror can stall past a single command bound. Retry
+# only the idempotent package-list refresh; every attempt keeps the same hard
+# bound and fail-closed rule (a timeout/overflow is never read as absence).
+# Exhausting the retries re-raises the last failure, so an unanswered mirror
+# aborts --prepare rather than letting --recover run against an empty fixture.
+APT_UPDATE_ATTEMPTS = 2
+
+
+def provision_package_lists():
+    last = None
+    for _ in range(APT_UPDATE_ATTEMPTS):
+        try:
+            command('sudo', '-n', 'apt-get', '-qq', 'update', seconds=60, maximum=32768)
+            return
+        except RuntimeError as exc:
+            last = exc
+    raise last
+
+
 def atomic_json(path, value):
     """Same-directory replace, private file, fsync file AND parent directory."""
     fd, temporary = tempfile.mkstemp(prefix='.record-', dir=path.parent)
@@ -482,6 +501,25 @@ def live(path):
 
 
 class RecoveryReservationTests(unittest.TestCase):
+    def test_provision_package_lists_retries_transient_stall(self):
+        module = sys.modules[__name__]
+        stall = RuntimeError('sudo failed: timeout/-9')
+        with mock.patch.object(module, 'command',
+                               side_effect=[stall, mock.Mock()]) as invoke:
+            module.provision_package_lists()
+        self.assertEqual(invoke.call_count, 2)
+        invoke.assert_called_with(
+            'sudo', '-n', 'apt-get', '-qq', 'update', seconds=60, maximum=32768)
+
+    def test_provision_package_lists_fails_closed_when_exhausted(self):
+        module = sys.modules[__name__]
+        stall = RuntimeError('sudo failed: timeout/-9')
+        with mock.patch.object(module, 'command',
+                               side_effect=[stall, stall]) as invoke:
+            with self.assertRaises(RuntimeError):
+                module.provision_package_lists()
+        self.assertEqual(invoke.call_count, module.APT_UPDATE_ATTEMPTS)
+
     @unittest.skipUnless(os.name == 'posix', 'host preflight is POSIX-only')
     def test_host_preflight_uses_supported_podman_template_fields(self):
         module = sys.modules[__name__]
@@ -1223,7 +1261,7 @@ if __name__ == '__main__':
     actions.add_argument('--supervise', type=Path)
     args = parser.parse_args()
     if args.prepare:
-        command('sudo', '-n', 'apt-get', '-qq', 'update', seconds=60, maximum=32768)
+        provision_package_lists()
         command('sudo', '-n', 'apt-get', '-y', '-qq', 'install', 'podman', 'uidmap',
                 'slirp4netns', 'fuse-overlayfs', seconds=90, maximum=32768)
     elif args.live:

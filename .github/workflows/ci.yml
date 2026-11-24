@@ -188,7 +188,7 @@ jobs:
   delegation-recovery-smoke:
     # Trusted disposable host fixture only, never a role/runtime grant or pilot.
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 11
     permissions:
       contents: read
     steps:
@@ -199,8 +199,10 @@ jobs:
         with:
           python-version: "3.13"
       - name: Provision rootless OCI fixture tools
-        timeout-minutes: 3
-        run: timeout --kill-after=5 170 python tests/test_delegation_recovery_smoke.py --prepare
+        # apt-list refresh may retry once on a stalled shared-runner mirror;
+        # allow two 60s update bounds plus the 90s install bound and margin.
+        timeout-minutes: 5
+        run: timeout --kill-after=5 260 python tests/test_delegation_recovery_smoke.py --prepare
       - name: Synthetic supervisor death and independent recovery
         timeout-minutes: 3
         run: timeout --kill-after=5 170 python tests/test_delegation_recovery_smoke.py --live "$RUNNER_TEMP/mizu-recovery/state.json"
