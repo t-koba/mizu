@@ -19,6 +19,7 @@ after a change; the two modes are not comparable to each other.
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_WARMUP = 3.0
@@ -36,10 +38,52 @@ STEADY_PROBES = 2
 MAX_SETTLE_SECONDS = 30.0
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
+# The measured source can be a different checkout (e.g. the revision before a
+# daemon change). Both this harness's fixture driver and the daemon subprocesses
+# load mizu from that one source, so the receipt's provenance names exactly the
+# code that ran. MIZU_CPU_SOURCE_ROOT overrides the tree; MIZU_CPU_SOURCE_REVISION
+# carries its git label when the tree has no .git (e.g. an exported archive).
+SOURCE_ROOT = Path(os.environ.get('MIZU_CPU_SOURCE_ROOT', str(ROOT))).resolve()
+SOURCE_REVISION = os.environ.get('MIZU_CPU_SOURCE_REVISION')
+sys.path.insert(0, str(SOURCE_ROOT / 'src'))
 from mizu.cli import configure
 from mizu.config import load
 from mizu.project import Project, initialize
+
+
+def _source_digest(src: Path) -> str:
+    """Content digest of the daemon source actually placed on PYTHONPATH."""
+    digest = hashlib.sha256()
+    for path in sorted((src / 'mizu').rglob('*.py')):
+        digest.update(str(path.relative_to(src)).encode())
+        digest.update(b'\0')
+        digest.update(path.read_bytes())
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def _git_head(tree: Path) -> str | None:
+    try:
+        result = subprocess.run(['git', '-C', str(tree), 'rev-parse', 'HEAD'],
+                                capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _provenance(daemon_cmd, *, launched_at=None) -> dict:
+    """Bind a receipt to the exact source and command it measured, at launch."""
+    head = _git_head(SOURCE_ROOT)
+    return {
+        'source_root': str(SOURCE_ROOT),
+        'source_revision': head or SOURCE_REVISION,
+        'source_revision_resolved_from_git': head is not None,
+        'daemon_src_sha256': _source_digest(SOURCE_ROOT / 'src'),
+        'harness_src_sha256': _source_digest(ROOT / 'src'),
+        'python_executable': sys.executable,
+        'daemon_command': list(daemon_cmd),
+        'launched_at_utc': (launched_at or datetime.now(timezone.utc)).isoformat(),
+    }
 
 
 def _cpu():
@@ -162,7 +206,7 @@ def main():
                     wake_generation=project.control().get('wake_generation', ''),
                     parent=snap['id'])
                 project.snapshots.publish(settled)
-        env = dict(os.environ, PYTHONPATH=str(ROOT / 'src'))
+        env = dict(os.environ, PYTHONPATH=str(SOURCE_ROOT / 'src'))
 
         def _scenario(change, label, repeat):
             procs = []
@@ -213,6 +257,10 @@ def main():
                     'min_seconds': round(min(samples), 6),
                     'max_seconds': round(max(samples), 6), 'samples': samples}
 
+        sample_cmd = [sys.executable, '-m', 'mizu', '--config', '<synthetic>',
+                      'daemon', names[0], '--role', 'worker']
+        launched_at = datetime.now(timezone.utc)
+        provenance = _provenance(sample_cmd, launched_at=launched_at)
         idle_results = [_scenario(False, 'idle', n) for n in range(args.repeats)]
         change_results = [_scenario(True, 'one_change', n) for n in range(args.repeats)]
         idle = [value for value, _ in idle_results]
@@ -245,6 +293,7 @@ def main():
             'warmup_seconds': args.warmup, 'repeats': args.repeats,
             'settled': args.settled,
             'python': sys.version.split()[0], 'platform': platform.platform(),
+            'source': provenance,
             'idle': _summary(idle), 'one_change': _summary(change),
             'validity': validity}
         if args.report:

@@ -1,9 +1,12 @@
 """Focused checks for the local daemon-CPU harness's steady-state gate."""
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts' / 'daemon-cpu.py'
@@ -71,6 +74,30 @@ class SteadyStateTests(unittest.TestCase):
         self.assertFalse(observed)
         self.assertEqual(info['method'], 'reaped-children-getrusage')
         self.assertEqual(info['observed_warmup_seconds'], 3.0)
+
+    def test_provenance_binds_receipt_to_measured_source(self):
+        h = self.harness
+        with tempfile.TemporaryDirectory(prefix='cpu-provenance-') as td:
+            tree = Path(td)
+            src = tree / 'src'
+            (src / 'mizu').mkdir(parents=True)
+            (src / 'mizu' / 'daemon_runtime.py').write_text('DEFINE = 1\n')
+            digest = h._source_digest(src)
+            stamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+            cmd = [sys.executable, '-m', 'mizu', 'daemon', 'p0']
+            with (patch.object(h, 'SOURCE_ROOT', tree),
+                  patch.object(h, 'SOURCE_REVISION', 'abc123')):
+                provenance = h._provenance(cmd, launched_at=stamp)
+            self.assertEqual(provenance['source_revision'], 'abc123')
+            self.assertFalse(provenance['source_revision_resolved_from_git'])
+            self.assertEqual(provenance['source_root'], str(tree))
+            self.assertEqual(provenance['daemon_src_sha256'], digest)
+            self.assertEqual(provenance['daemon_command'], cmd)
+            self.assertEqual(provenance['launched_at_utc'], stamp.isoformat())
+            # A source edit changes the digest, so a receipt cannot claim a
+            # revision it did not measure.
+            (src / 'mizu' / 'daemon_runtime.py').write_text('DEFINE = 2\n')
+            self.assertNotEqual(h._source_digest(src), digest)
 
     def test_startup_sized_warmup_is_outside_the_accepted_bound(self):
         result = subprocess.run(
