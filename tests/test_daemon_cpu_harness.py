@@ -99,6 +99,31 @@ class SteadyStateTests(unittest.TestCase):
             (src / 'mizu' / 'daemon_runtime.py').write_text('DEFINE = 2\n')
             self.assertNotEqual(h._source_digest(src), digest)
 
+    def test_git_head_ignores_an_enclosing_worktree(self):
+        # A git-less source tree extracted beneath a checkout must not inherit
+        # that parent's HEAD. A revision is trusted only when the measured tree
+        # is its own worktree root; otherwise the explicit label stands.
+        h = self.harness
+        from subprocess import CompletedProcess
+
+        def run(tree_root):
+            def fake_run(cmd, **kwargs):
+                if '--show-toplevel' in cmd:
+                    return CompletedProcess(cmd, 0, tree_root + '\n', '')
+                return CompletedProcess(cmd, 0, 'enclosing-head\n', '')
+            return fake_run
+
+        with tempfile.TemporaryDirectory(prefix='cpu-git-head-') as td:
+            tree = Path(td)
+            with patch.object(h.subprocess, 'run', side_effect=run(str(tree.parent))):
+                self.assertIsNone(h._git_head(tree))
+            with patch.object(h.subprocess, 'run', side_effect=run(str(tree))):
+                self.assertEqual(h._git_head(tree), 'enclosing-head')
+            # A git-less tree (no .git, no repository above) has no HEAD.
+            with patch.object(h.subprocess, 'run',
+                              side_effect=subprocess.CalledProcessError(128, 'git')):
+                self.assertIsNone(h._git_head(tree))
+
     def test_startup_sized_warmup_is_outside_the_accepted_bound(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), '--warmup', '0.01'],

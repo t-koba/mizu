@@ -63,7 +63,15 @@ def _source_digest(src: Path) -> str:
 
 
 def _git_head(tree: Path) -> str | None:
+    # A git-less exported tree nested inside some checkout must not inherit that
+    # enclosing worktree's HEAD; git -C walks parent directories. Only trust a
+    # revision when this tree is its own worktree root, so an explicit label can
+    # stand for an archive that has no .git of its own.
     try:
+        top = subprocess.run(['git', '-C', str(tree), 'rev-parse', '--show-toplevel'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if Path(top).resolve() != tree.resolve():
+            return None
         result = subprocess.run(['git', '-C', str(tree), 'rev-parse', 'HEAD'],
                                 capture_output=True, text=True, check=True)
         return result.stdout.strip()
