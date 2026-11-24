@@ -218,7 +218,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 # the read/render/pass leaves a fingerprint difference that ends
                 # the wait immediately, so no wake is lost between look and sleep.
                 root = project.root if project is not None else None
-                baseline = daemon_wake.fingerprint(root)
+                baseline = daemon_wake.fingerprint(root, config.file)
                 try:
                     updated = load(config.file)
                     if updated.data != config.data:
@@ -286,7 +286,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 root = project.root if project is not None else None
                 deadline = _wake_deadline(config, project, name, role_name,
                                           ordinary_after, baseline, delivery_cache)
-                reason = daemon_wake.wait(stop, root, baseline, deadline)
+                reason = daemon_wake.wait(stop, root, baseline, deadline,
+                                          config_file=config.file)
                 if reason == "change" or reason == "deadline":
                     readiness_memo.clear()
     finally:

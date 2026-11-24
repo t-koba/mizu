@@ -50,6 +50,36 @@ class DaemonWakeTests(unittest.TestCase):
         fs.touch_directory(self.root / "wake")
         self._eventually_changed(after_dir)
 
+    def test_fingerprint_includes_authoritative_config_file(self):
+        # The deployment config normally lives outside the project root. A
+        # change to it must perturb the fingerprint so a settled daemon wakes,
+        # even when there is no project root at all.
+        cfg = self.root / "config" / "config.toml"
+        cfg.parent.mkdir()
+        self.addCleanup(cfg.unlink, missing_ok=True)
+        cfg.write_text("idle_seconds = 60\n")
+        base = daemon_wake.fingerprint(None, cfg)
+        self.assertNotEqual(base, daemon_wake.fingerprint(None))
+        self.assertEqual(daemon_wake.fingerprint(None, cfg), base)
+        # Change content length so st_size changes on every filesystem.
+        cfg.write_text("idle_seconds = 6100\n")
+        self.assertNotEqual(daemon_wake.fingerprint(None, cfg), base)
+        # The config row augments, never replaces, the project-root rows.
+        with_root = daemon_wake.fingerprint(self.root, cfg)
+        self.assertEqual(with_root[0], daemon_wake.fingerprint(None, cfg)[0])
+        self.assertEqual(with_root[1:], daemon_wake.fingerprint(self.root))
+
+    def test_wait_wakes_on_config_file_change(self):
+        cfg = self.root / "config" / "config.toml"
+        cfg.parent.mkdir()
+        self.addCleanup(cfg.unlink, missing_ok=True)
+        cfg.write_text("idle_seconds = 60\n")
+        baseline = daemon_wake.fingerprint(self.root, cfg)
+        cfg.write_text("idle_seconds = 6100\n")
+        stop = threading.Event()
+        self.assertEqual(daemon_wake.wait(stop, self.root, baseline, None,
+                                          poll=0.01, config_file=cfg), "change")
+
     def test_fingerprint_stat_count_is_independent_of_retained_inventory(self):
         original_stat = Path.stat
         calls = []

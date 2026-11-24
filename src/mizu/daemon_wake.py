@@ -2,7 +2,8 @@
 
 A settled daemon must not re-read configuration, rebuild its project, or run
 full admission on a fixed idle tick.  It takes a cheap, metadata-only
-fingerprint of the authoritative state paths beneath a project root and blocks
+fingerprint of the authoritative state paths (the project root plus the
+authoritative deployment config file) and blocks
 until that fingerprint changes, an explicit deadline passes, or the daemon is
 stopped.  A changed fingerprint is only a reason to look: admission still reads
 durable state and decides whether a role may run.
@@ -44,16 +45,25 @@ WATCHED_DIRS = (
 )
 
 
-def fingerprint(root: Path | None) -> tuple:
+def fingerprint(root: Path | None, config_file: Path | None = None) -> tuple:
     """Return a metadata-only fingerprint of the authoritative paths.
 
     Missing paths contribute a stable sentinel.  The fingerprint changes when a
     watched file is created, replaced, resized or rewritten, or when a watched
-    directory gains, loses or replaces a direct child.
+    directory gains, loses or replaces a direct child. ``config_file`` is the
+    authoritative deployment config path, which normally lives outside the
+    project root; its stat is included so a config edit wakes a settled daemon
+    even when there is no project or deadline.
     """
-    if root is None:
-        return ()
     rows = []
+    if config_file is not None:
+        try:
+            st = config_file.stat()
+            rows.append(("config", (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)))
+        except (OSError, TypeError, ValueError):
+            rows.append(("config", None))
+    if root is None:
+        return tuple(rows)
     for name in WATCHED_FILES:
         try:
             st = (root / name).stat()
@@ -70,7 +80,7 @@ def fingerprint(root: Path | None) -> tuple:
 
 
 def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
-         poll: float | None = None) -> str:
+         poll: float | None = None, config_file: Path | None = None) -> str:
     """Block until state changes, ``deadline`` passes, or ``stop`` is set.
 
     ``deadline`` is a monotonic instant.  Returns ``"change"``, ``"deadline"``
@@ -80,7 +90,7 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
     if poll is None:
         poll = POLL_SECONDS
     while not stop.is_set():
-        if fingerprint(root) != baseline:
+        if fingerprint(root, config_file) != baseline:
             return "change"
         now = time.monotonic()
         if deadline is not None and now >= deadline:

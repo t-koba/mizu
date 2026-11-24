@@ -293,11 +293,84 @@ class DaemonRuntimeOwnershipTests(Fixture):
                                        real_admission(*a, **k))[1]
             waits = [0]
             real_wait = daemon_runtime.daemon_wake.wait
-            def edited_wait(stop, watched_root, baseline, deadline, poll=None):
+            def edited_wait(stop, watched_root, baseline, deadline, poll=None,
+                            config_file=None):
                 waits[0] += 1
                 if waits[0] == 2:
                     (watched_root / "PROJECT.md").write_text("a different goal\n")
-                return real_wait(stop, watched_root, baseline, deadline, poll)
+                return real_wait(stop, watched_root, baseline, deadline, poll,
+                                 config_file=config_file)
+            start = [0.0]
+            original_iss = daemon_runtime.threading.Event.is_set
+            def timed_is_set(self):
+                return real_time.monotonic() - start[0] > 2.2
+            with (patch.object(daemon_runtime, "should_run", side_effect=counted),
+                  patch.object(daemon_runtime.daemon_wake, "wait", side_effect=edited_wait),
+                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
+                  patch.object(daemon_runtime.signal, "signal"),
+                  patch.object(daemon_runtime, "lock", return_value=nullcontext()),
+                  patch("builtins.print")):
+                start[0] = real_time.monotonic()
+                try:
+                    daemon_runtime.daemon(config, "p0", "worker")
+                finally:
+                    daemon_runtime.threading.Event.is_set = original_iss
+            self.assertGreaterEqual(admissions[0], 3, admissions[0])
+
+    def test_config_edit_wakes_a_settled_daemon(self):
+        # The authoritative deployment config lives outside the project root.
+        # An out-of-band config edit changes policy (e.g. daemon policy, limits)
+        # and must wake a settled daemon with no deadline and no writer hint.
+        import json
+        import tempfile
+        import time as real_time
+        from pathlib import Path as TPath
+
+        from mizu.cli import configure
+        from mizu.config import load as load_config
+        from mizu.project import Project, initialize as initialize_project
+
+        with tempfile.TemporaryDirectory(prefix="daemon-config-edit-") as td:
+            root = TPath(td)
+            cfg = root / "config/config.toml"
+            configure(cfg, None)
+            text = cfg.read_text()
+            text = text.replace('data_dir = "~/.local/state/mizu"',
+                                'data_dir = ' + json.dumps(str(root / "projects")))
+            text = text.replace("free_disk_mb = 1024", "free_disk_mb = 0")
+            text = text.replace("idle_seconds = 15", "idle_seconds = 60")
+            cfg.write_text(text)
+            config = load_config(cfg)
+            source = root / "src"
+            source.mkdir()
+            (source / "a.py").write_text("x = 1\n")
+            goal = root / "goal.md"
+            goal.write_text("g\n")
+            initialize_project(config, "p0", source, goal, ["worker"], ["python3 -m unittest"])
+            project = Project(config, "p0")
+            project.set_control(armed=True, paused=False, wake_generation="w")
+            snap = project.snapshots.get()
+            captured = {"files": snap["files"], "code_digest": snap["code_digest"],
+                        "goal_digest": snap["goal_digest"], "goal": snap["goal"]}
+            settled = project.snapshots.create(
+                captured, goal=snap["goal"], state="wait", run=None, outcome="wait",
+                summary="idle", wake_generation="w", parent=snap["id"])
+            project.snapshots.publish(settled)
+
+            admissions = [0]
+            real_admission = daemon_runtime.should_run
+            counted = lambda *a, **k: (admissions.__setitem__(0, admissions[0] + 1),
+                                       real_admission(*a, **k))[1]
+            waits = [0]
+            real_wait = daemon_runtime.daemon_wake.wait
+            def edited_wait(stop, watched_root, baseline, deadline, poll=None,
+                            config_file=None):
+                waits[0] += 1
+                if waits[0] == 2:
+                    cfg.write_text(cfg.read_text().replace("idle_seconds = 60",
+                                                           "idle_seconds = 6100"))
+                return real_wait(stop, watched_root, baseline, deadline, poll,
+                                 config_file=config_file)
             start = [0.0]
             original_iss = daemon_runtime.threading.Event.is_set
             def timed_is_set(self):
