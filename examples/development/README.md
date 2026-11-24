@@ -18,9 +18,21 @@ nothing here specially.
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4
   userland: the runtime reads these names from configuration, not source.
+- `observation_queues.toml` declares `vcs_observations` and `ci_observations`:
+  bounded queues to which observation drivers append what they find. Their
+  bodies are opaque plain objects; the schemas enforce bounds and required
+  fields only. It is stage-5 userland.
+- `policies/observations.md` says what an observation in each queue means, who
+  reads it and what the reader does. Compose it into the role policies of the
+  roles that read those queues.
 
 `work` is only the stage-3 message form. The dedicated work-item store stays
 authoritative until cutover; declaring the queue changes no runtime authority.
+
+Declaring the observation queues changes no runtime authority either: the
+dedicated version-control and CI code stays authoritative until the later
+stage-5 cutover and deletion slices switch the code paths. These files are
+declarations and policy text only; no driver command is shipped here.
 
 Roles reach the queues with the `queues` capability and the `queue_*` and
 `message_*` tools. The operator and host tooling use
@@ -32,10 +44,13 @@ the message it refers to.
 To use it, include the file and add the policy part:
 
 ```toml
-include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml"]
+include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml",
+          "../examples/development/observation_queues.toml"]
 
 [roles.worker]
-policy = ["policies/shared.md", "policies/worker.md", "../examples/development/policies/messages.md"]
+policy = ["policies/shared.md", "policies/worker.md",
+             "../examples/development/policies/messages.md",
+             "../examples/development/policies/observations.md"]
 capabilities = [..., "queues"]
 ```
 

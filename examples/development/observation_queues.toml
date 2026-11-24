@@ -1,0 +1,30 @@
+# Example userland observation queues (docs/kernel.md, docs/os-migration.md stage 5).
+# Include from a deployment configuration alongside queues.toml. The bodies are
+# the plain objects a driver reports; the kernel validates only these bounds and
+# required fields and assigns no meaning to them. Declaring a queue changes no
+# runtime authority: the dedicated version-control and CI code stays authoritative
+# until the later cutover and deletion slices.
+
+[queues.vcs_observations]       # what a driver observed in version control
+write = ["host"]
+read = ["role:*", "operator"]
+wake = ["role:worker"]
+[queues.vcs_observations.schema]
+driver = {type = "string", max = 80, required = true}
+kind = {type = "string", max = 80, required = true}
+summary = {type = "string", max = 4096, required = true}
+observed_at = {type = "instant", required = true}
+digest = {type = "digest"}
+detail = {type = "string", max = 16384}
+
+[queues.ci_observations]        # what a driver observed in continuous integration
+write = ["host"]
+read = ["role:*", "operator"]
+wake = ["role:worker"]
+[queues.ci_observations.schema]
+driver = {type = "string", max = 80, required = true}
+kind = {type = "string", max = 80, required = true}
+summary = {type = "string", max = 4096, required = true}
+observed_at = {type = "instant", required = true}
+digest = {type = "digest"}
+detail = {type = "string", max = 16384}
