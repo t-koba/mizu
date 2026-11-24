@@ -24,8 +24,10 @@ Drivers are declared `[drivers.<name>]` tables: an operator-owned `command`
 argv, one `observation_queue` that `host` may write, and bounded
 `timeout_seconds`, `max_bytes` and `diagnostic_bytes`. The kernel invokes the
 command once with a bounded JSON request and appends any returned observations
-to the declared queue; it attaches no meaning to them. The shipped example
-declares none, so an unconfigured deployment is unchanged. See
+to the declared queue; it attaches no meaning to them. The development
+example declares a `ci_costs` driver in `examples/development/observation_drivers.toml`;
+the top-level shipped example declares none, so omitting the fragment leaves
+an unconfigured deployment unchanged. See
 [kernel.md](kernel.md#drivers) for the full protocol, bounds and failure
 behavior.
 
@@ -36,9 +38,12 @@ Host tooling invokes a declared driver with `mizu observe PROJECT DRIVER
 the name in `config.drivers` and delegates to the kernel, which bounds the
 request and one invocation and appends validated observations as `host` to the
 driver's declared queue. An unknown driver, a non-object request or any kernel
-or queue refusal fails closed without a success receipt. This is only the
-generic observation path: no dedicated CI/VCS authority switches, and the
-shipped example declares no driver.
+or queue refusal fails closed without a success receipt. The `ci_costs` driver
+is the first dedicated consumer of this path: the host gathers exact
+receipt-bound status results and passes them with the dispatch page through
+the seam; the returned observation's JSON detail becomes the `vcs_read ci_costs`
+report, and an unconfigured driver fails closed. No other dedicated
+CI/VCS authority switches: the top-level shipped example declares no driver.
 
 ## Declared host records
 

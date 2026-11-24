@@ -57,7 +57,7 @@ class HostDriverFixture(Fixture):
 class HostObservation(HostDriverFixture):
     def test_observe_appends_to_declared_queue_as_host(self):
         receipt = observe(self.config, self.project, "echo", {"value": "one"})
-        self.assertEqual(receipt, {"appended": 1})
+        self.assertEqual(receipt, {"appended": 1, "observations": [{"body": "one"}]})
         page = self.page()
         self.assertEqual([row["body"] for row in page["messages"]], [{"body": "one"}])
         self.assertEqual([row["author"] for row in page["messages"]], ["host"])
@@ -82,10 +82,12 @@ class ObserveCli(HostDriverFixture):
     def test_cli_request_argument_and_stdin_append(self):
         code, receipt, _ = self.cli("observe", "sample", "echo", "--request",
                                     json.dumps({"value": "argument"}))
-        self.assertEqual((code, receipt), (0, {"appended": 1}))
+        self.assertEqual((code, receipt), (0, {"appended": 1,
+                                               "observations": [{"body": "argument"}]}))
         code, receipt, _ = self.cli("observe", "sample", "echo", "--request", "-",
                                     stdin=json.dumps({"value": "stdin"}))
-        self.assertEqual((code, receipt), (0, {"appended": 1}))
+        self.assertEqual((code, receipt), (0, {"appended": 1,
+                                               "observations": [{"body": "stdin"}]}))
         page = self.page()
         self.assertEqual([row["body"]["body"] for row in page["messages"]], ["argument", "stdin"])
         self.assertEqual([row["author"] for row in page["messages"]], ["host", "host"])

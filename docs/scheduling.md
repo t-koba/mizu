@@ -769,8 +769,12 @@ validated is not listed, and no provider is contacted.
 Runner wall time is separate from this local count view. `vcs_read` with
 `ci_costs` derives an explicitly partial observed subtotal for a page of
 1–8 validated dispatches (`limit`, default 8; `offset` 0–999, default 0).
-It reuses one exact publication-bound status observation per receipt within
-the page and retains its evidence reference. Typed workflow-run/job/attempt/
+The host reuses one exact publication-bound status observation per receipt
+within the page and retains its evidence reference, then passes the page and
+those results to the operator-declared `ci_costs` observation driver through
+the generic host seam. The join runs in that driver; its single
+external-untrusted observation carries the report as JSON detail, and an
+unconfigured driver fails closed. Typed workflow-run/job/attempt/
 repository identity is required for attribution; terminal `not_dispatched`
 attempts trigger no status read and contribute no run timing. Unresolved attempts (including legacy timeout-unknown)
 have no known run IDs, so their possible spend is not converted to zero or

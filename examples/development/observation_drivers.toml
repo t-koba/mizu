@@ -1,0 +1,12 @@
+# Example operator-owned observation driver for the development deployment.
+# Include alongside observation_queues.toml. The command is illustrative: the
+# operator owns its argv and decides whether to declare it in a deployment.
+# Declaring it switches the vcs_read ci_costs projection to the generic host
+# seam; without it that op fails closed.
+
+[drivers.ci_costs]
+command = ["python3", "examples/development/drivers/ci_costs_driver.py"]
+observation_queue = "ci_observations"
+timeout_seconds = 20
+max_bytes = 524288
+diagnostic_bytes = 0

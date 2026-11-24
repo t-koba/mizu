@@ -218,7 +218,10 @@ slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
 `model_catalog.py` includes its observation-store schema version at magnitude 1.
-This is not a global numeric comparison linter.
+The operator-owned example `ci_costs_driver.py` keeps its five join-conflict
+comparisons under the focused magnitude-1 slice, and its observation envelope
+bounds are inventoried from the driver file itself. This is not a global
+numeric comparison linter.
 """
 import ast
 import math
@@ -2057,19 +2060,19 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'CI acceptance reuse / schema version two is the retained provider-proof format'),
     ('ci_acceptance.py', 'retain', 0, 0): (
         '1', 'format', 'CI acceptance ingestion / provider attempt selector is positive'),
-    ('ci_costs.py', 'observed_costs', 1, 0): (
+    ('ci_costs_driver.py', 'observed_costs', 1, 0): (
         '1', 'safety',
         'CI cost attribution / more than one repository attestation is ambiguous'),
-    ('ci_costs.py', 'observed_costs', 1, 1): (
+    ('ci_costs_driver.py', 'observed_costs', 1, 1): (
         '1', 'safety',
         'CI cost attribution / an execution observed on multiple dispatch days is ambiguous'),
-    ('ci_costs.py', 'observed_costs', 1, 2): (
+    ('ci_costs_driver.py', 'observed_costs', 1, 2): (
         '1', 'safety',
         'CI cost attribution / incompatible durations for one execution are not summed'),
-    ('ci_costs.py', 'observed_costs', 1, 3): (
+    ('ci_costs_driver.py', 'observed_costs', 1, 3): (
         '1', 'safety',
         'CI cost attribution / incompatible SHAs for one execution are ambiguous'),
-    ('ci_costs.py', 'observed_costs', 1, 4): (
+    ('ci_costs_driver.py', 'observed_costs', 1, 4): (
         '1', 'safety',
         'CI cost projection / expose a namespace only when exactly one is attested'),
     ('ci_observation.py', 'ci_cache_limits', 0, 0): (
@@ -3440,6 +3443,18 @@ def sibling():
         arithmetic_bound = ast.parse('def queue(resources): return len(resources) > 1 + 2')
         self.assertEqual(comparison_argument_inventory(arithmetic_bound),
                          {('queue', 1, 0): '1 + 2'})
+
+    def test_ci_cost_driver_keeps_its_join_and_envelope_bounds(self):
+        driver = (Path(__file__).resolve().parents[1] / 'examples' / 'development'
+                  / 'drivers' / 'ci_costs_driver.py')
+        tree = ast.parse(driver.read_text(encoding='utf-8'))
+        self.assertEqual(inventory(tree), {'SUMMARY_MAX': '4096', 'DETAIL_MAX': '16384'})
+        expected = {(scope, argument, occurrence): entry[0]
+                    for (filename, scope, argument, occurrence), entry
+                    in COMPARISON_BOUND_ARGUMENTS.items()
+                    if filename == 'ci_costs_driver.py'}
+        self.assertEqual(len(expected), 5)
+        self.assertEqual(comparison_argument_inventory(tree, minimum_magnitude=1), expected)
 
     def test_comparison_detector_handles_only_bounded_integer_powers(self):
         small = ast.parse('def scalar(value): return value <= 2 ** 53')

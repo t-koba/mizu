@@ -12,10 +12,11 @@ from .errors import Denied
 
 
 def observe(config, project, driver_name, request: dict) -> dict:
-    """Invoke one declared driver and return the kernel's append receipt.
+    """Invoke one declared driver and return its receipt and observations.
 
-    Schema: ``request`` is a plain JSON object; the receipt is the kernel's
-    ``{"appended": int}``. Bounds and retry: entirely the kernel's, one call
+    Schema: ``request`` is a plain JSON object; the result is
+    ``{"appended": int, "observations": [plain dicts from the response]}``.
+    Bounds and retry: entirely the kernel's, one call
     with no automatic replay. Trust: the driver is operator configuration and
     the request comes from a trusted host caller; the response stays
     external-untrusted until the declared queue schema validates each body.
@@ -31,4 +32,5 @@ def observe(config, project, driver_name, request: dict) -> dict:
     if not isinstance(request, dict):
         raise Denied("Observation driver request must be a dict")
     response = invoke(driver, request)
-    return record_observations(project.kernel_queues, driver, response)
+    receipt = record_observations(project.kernel_queues, driver, response)
+    return {**receipt, "observations": [dict(body) for body in response["observations"]]}

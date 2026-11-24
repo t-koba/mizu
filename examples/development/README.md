@@ -22,6 +22,10 @@ nothing here specially.
   bounded queues to which observation drivers append what they find. Their
   bodies are opaque plain objects; the schemas enforce bounds and required
   fields only. It is stage-5 userland.
+- `observation_drivers.toml` declares the illustrative `ci_costs` driver in
+  `drivers/ci_costs_driver.py`. Including it switches the `vcs_read ci_costs`
+  join to that operator-owned program through the generic host seam; without
+  it the op fails closed.
 - `policies/observations.md` says what an observation in each queue means, who
   reads it and what the reader does. Compose it into the role policies of the
   roles that read those queues.
@@ -29,10 +33,11 @@ nothing here specially.
 `work` is only the stage-3 message form. The dedicated work-item store stays
 authoritative until cutover; declaring the queue changes no runtime authority.
 
-Declaring the observation queues changes no runtime authority either: the
-dedicated version-control and CI code stays authoritative until the later
-stage-5 cutover and deletion slices switch the code paths. These files are
-declarations and policy text only; no driver command is shipped here.
+Declaring the observation queues changes no runtime authority on its own. The
+separate driver declaration does switch the CI cost computation to an
+operator-owned program; the remaining dedicated version-control and CI code
+stays authoritative until later cutover and deletion slices. Only the example
+driver command is shipped here; a deployment supplies its own.
 
 Roles reach the queues with the `queues` capability and the `queue_*` and
 `message_*` tools. The operator and host tooling use
@@ -45,7 +50,8 @@ To use it, include the file and add the policy part:
 
 ```toml
 include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml",
-          "../examples/development/observation_queues.toml"]
+          "../examples/development/observation_queues.toml",
+          "../examples/development/observation_drivers.toml"]
 
 [roles.worker]
 policy = ["policies/shared.md", "policies/worker.md",

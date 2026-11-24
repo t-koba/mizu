@@ -5,6 +5,9 @@ authority. These tests check that the declarations validate, that their schemas
 enforce the stated bounds, and that a host-authenticated driver can append an
 observation the way the generic kernel driver does.
 """
+import json
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -19,6 +22,8 @@ from mizu.kernel.queues import allows
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "development"
 FRAGMENT = EXAMPLE / "observation_queues.toml"
+DRIVER_FRAGMENT = EXAMPLE / "observation_drivers.toml"
+DRIVER = EXAMPLE / "drivers" / "ci_costs_driver.py"
 POLICY = EXAMPLE / "policies" / "observations.md"
 README = EXAMPLE / "README.md"
 
@@ -85,7 +90,8 @@ class ObservationDeclaration(unittest.TestCase):
             text = "".join(kept).replace(
                 'data_dir = "~/.local/state/mizu"',
                 "data_dir = " + repr(str(root / "data")))
-            names = ("queues.toml", "outcomes.toml", "observation_queues.toml")
+            names = ("queues.toml", "outcomes.toml", "observation_queues.toml",
+                     "observation_drivers.toml")
             # Copy the fragments beside the top config and include them by bare
             # relative name, as the README documents. A cross-tree os.path.relpath
             # breaks on platform temp symlinks (macOS /var -> /private/var), where
@@ -98,16 +104,29 @@ class ObservationDeclaration(unittest.TestCase):
             self.assertEqual(set(config.queues), {
                 "proposals", "questions", "notices", "work",
                 "vcs_observations", "ci_observations"})
-            self.assertEqual(config.drivers, {})
+            self.assertEqual(set(config.drivers), {"ci_costs"})
+            driver = config.drivers["ci_costs"]
+            self.assertEqual(driver.command, ("python3", "examples/development/drivers/ci_costs_driver.py"))
+            self.assertEqual((driver.observation_queue, driver.timeout_seconds,
+                              driver.max_bytes, driver.diagnostic_bytes),
+                             ("ci_observations", 20.0, 524288, 0))
             for name in ("vcs_observations", "ci_observations"):
                 self.assertIn("host", config.queues[name].write)
 
     def test_fragment_introduces_only_the_queues_root_key(self):
-        # No new root owner (and no [drivers] table / real driver command):
-        # the example stays declarative and changes no runtime authority.
+        # The queue fragment stays declarative: no owner or command of its own.
         data = tomllib.loads(FRAGMENT.read_text(encoding="utf-8"))
         self.assertEqual(set(data), {"queues"})
         self.assertNotIn("command", FRAGMENT.read_text(encoding="utf-8"))
+        # The separate driver fragment owns only the declared ci_costs command.
+        declared = tomllib.loads(DRIVER_FRAGMENT.read_text(encoding="utf-8"))
+        self.assertEqual(set(declared), {"drivers"})
+        self.assertEqual(declared["drivers"]["ci_costs"], {
+            "command": ["python3", "examples/development/drivers/ci_costs_driver.py"],
+            "observation_queue": "ci_observations",
+            "timeout_seconds": 20,
+            "max_bytes": 524288,
+            "diagnostic_bytes": 0})
 
     def test_schema_bounds_are_enforced_on_host_append(self):
         queues = parse_queues(declarations())
@@ -136,8 +155,25 @@ class ObservationDeclaration(unittest.TestCase):
         self.assertIn("authoritative", policy)
         readme = README.read_text(encoding="utf-8")
         self.assertIn("observation_queues.toml", readme)
+        self.assertIn("observation_drivers.toml", readme)
         self.assertIn("policies/observations.md", readme)
         self.assertIn("changes no runtime authority", readme)
+
+
+class CostObservationAppend(unittest.TestCase):
+    def test_driver_report_validates_against_the_declared_queue(self):
+        payload = {"page": {"items": [], "total": 0, "offset": 0, "limit": 8},
+                   "statuses": {}}
+        result = subprocess.run([sys.executable, str(DRIVER)],
+                                input=json.dumps(payload), text=True,
+                                capture_output=True, check=True)
+        observation = json.loads(result.stdout)["observations"][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = QueueStore(Path(tmp), parse_queues(declarations()))
+            ack = store.append("ci_observations", observation, "host")
+            self.assertEqual(ack["seq"], 1)
+            page = store.read("ci_observations", "role:worker")
+            self.assertEqual(page["messages"][0]["body"], observation)
 
 
 if __name__ == "__main__":

@@ -359,9 +359,12 @@ saving. The adapter contract this product drives exposes
 no provider usage endpoint, so nothing about a provider's billing enters the
 measure.
 
-The read-only `vcs_read ci_costs` projection now derives observed subtotals
-from validated `CiRequests` dispatches and exact publication-ID status reads,
-not another mutable cost store. Its page is 1–8 requests (default 8), offset
+The read-only `vcs_read ci_costs` projection derives observed subtotals from
+validated `CiRequests` dispatches and exact publication-ID status reads, not
+another mutable cost store. The host resolves the receipts and passes the page
+and their results to an operator-owned `ci_costs` observation driver through
+the generic host seam; the kernel no longer contains the join, and an
+unconfigured driver fails closed. Its page is 1–8 requests (default 8), offset
 0–999 (default 0); the shared local scan remains bounded to 10000 directory
 entries and 1000 candidate records. `ci_requests` itself remains provider-free
 and unchanged. Each distinct receipt in a cost page causes at most one status

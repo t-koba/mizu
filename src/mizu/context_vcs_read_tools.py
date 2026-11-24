@@ -4,17 +4,21 @@
 the workspace gate, publication-receipt binding, the trusted adapter call,
 CI-wait diagnostics and lineage observation. The other three methods are the
 local publication-receipt, CI-request and CI-cost listings it delegates to.
+The cost listing gathers exact status evidence itself and asks the operator's
+configured ``ci_costs`` observation driver, through the generic host seam, for
+the page-local report; the returned observation stays external-untrusted.
 ``Context._op_vcs_read_ci_costs`` also calls ``self._op_vcs_read`` back, so all
 four are mixed into ``Context`` to keep the ``vcs_read`` dispatch name and that
-callback resolving unchanged. No behaviour, grant, default or seam changes.
+callback resolving unchanged. Protocol bounds and grants stay unchanged.
 """
 from __future__ import annotations
 
 from . import ci_waits
+from . import host_drivers
 from . import lineage
 from . import vcs as _vcs
-from .errors import Denied
-from .fs import write_json
+from .errors import Denied, LimitExceeded
+from .fs import loads_finite, write_json
 from .publication import Publication
 from .ci_requests import CiRequests
 
@@ -170,13 +174,35 @@ class ContextVcsReadToolsMixin:
         return {**record, **listing}
 
     def _op_vcs_read_ci_costs(self, args: dict) -> dict:
-        from .ci_costs import observed_costs
         if set(args) - {"op", "limit", "offset"}:
             raise Denied("CI costs take only limit and offset")
         page = CiRequests(self.project.root, self.config.ci_requests).page(
             limit=args.get("limit", 8), offset=args.get("offset", 0))
-        listing = observed_costs(page, lambda publication: self._op_vcs_read(
-            {"op": "status", "publication_id": publication}))
+        # The trusted caller resolves each status receipt; the driver receives
+        # only those exact results, with a refused read marked unavailable.
+        statuses = {}
+        for request in page["items"]:
+            publication = request["publication_id"]
+            if request["state"] == "not_dispatched" or publication in statuses:
+                continue
+            try:
+                statuses[publication] = self._op_vcs_read(
+                    {"op": "status", "publication_id": publication})
+            except (Denied, LimitExceeded, OSError):
+                statuses[publication] = None
+        response = host_drivers.observe(self.config, self.project, "ci_costs",
+                                        {"page": page, "statuses": statuses})
+        observations = response.get("observations") if isinstance(response, dict) else None
+        if (not isinstance(observations, list) or len(observations) != 1
+                or type(observations[0]) is not dict
+                or not isinstance(observations[0].get("detail"), str)):
+            raise Denied("CI costs need one driver observation with a JSON detail")
+        try:
+            listing = loads_finite(observations[0]["detail"].encode("utf-8"))
+        except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+            raise Denied("CI cost observation detail is not valid JSON") from exc
+        if not isinstance(listing, dict):
+            raise Denied("CI cost observation detail must be an object")
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "ci_costs", "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": listing}

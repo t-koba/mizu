@@ -1,11 +1,23 @@
 """Bounded synthetic cost observations; no external adapter or CI reruns."""
 import dataclasses
+import importlib.util
+import json
+import subprocess
+import sys
 import unittest
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from support import Fixture
 from mizu import vcs
-from mizu.ci_costs import observed_costs
+
+DRIVER = (Path(__file__).resolve().parents[1] / "examples" / "development"
+          / "drivers" / "ci_costs_driver.py")
+_SPEC = importlib.util.spec_from_file_location("ci_costs_driver", DRIVER)
+ci_costs_driver = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(ci_costs_driver)
+observed_costs = ci_costs_driver.observed_costs
 from mizu.ci_requests import CiRequests, request_id
 from mizu.config import CiRequestEvidence
 from mizu.distribution import public_source_identity
@@ -267,6 +279,20 @@ class CostReadTests(Fixture):
         run.mkdir(parents=True)
         self.ctx = Context(self.config, self.project, role, run,
                            self.project.snapshots.get(), self.project.workspace)
+        patcher = patch("mizu.host_drivers.observe", side_effect=self.observe)
+        self.observed = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def observe(self, config, project, driver_name, request):
+        """One external-untrusted observation from the operator's driver."""
+        self.assertIs(config, self.ctx.config)
+        self.assertIs(project, self.ctx.project)
+        self.assertEqual(driver_name, "ci_costs")
+        report = observed_costs(request["page"], request["statuses"])
+        return {"appended": 1, "observations": [{
+            "driver": "ci_costs", "kind": "ci_costs", "summary": "Observed runner wall time",
+            "observed_at": "2026-07-21T00:00:00+00:00",
+            "detail": json.dumps(report, separators=(",", ":"))}]}
 
     def dispatch(self, workflows=("ci",), publication=None, resolved=True):
         pub = publication or self.receipt["publication_id"]
@@ -378,3 +404,24 @@ class CostReadTests(Fixture):
                 with self.assertRaises(Denied):
                     self.ctx.handle("vcs_read", {"op": op, "limit": 1})
         self.assertEqual(self.store.page(offset=999)["items"], [])
+
+
+class DriverProcessTests(unittest.TestCase):
+    def test_main_reports_one_bounded_schema_observation(self):
+        payload = {"page": page(request()), "statuses": {PUB: status(check())}}
+        result = subprocess.run([sys.executable, str(DRIVER)],
+                                input=json.dumps(payload), text=True,
+                                capture_output=True, check=True)
+        observations = json.loads(result.stdout)["observations"]
+        self.assertEqual(len(observations), 1)
+        observation = observations[0]
+        self.assertEqual((observation["driver"], observation["kind"]), ("ci_costs", "ci_costs"))
+        self.assertNotIn("digest", observation)
+        self.assertLessEqual(len(observation["summary"]), 4096)
+        self.assertLessEqual(len(observation["detail"]), 16384)
+        stamp = datetime.fromisoformat(observation["observed_at"])
+        self.assertIsNotNone(stamp.tzinfo)
+        report = json.loads(observation["detail"])
+        self.assertEqual(report["observed_wall_seconds"], 60)
+        self.assertEqual(report["measure"], "runner_wall_seconds")
+        self.assertEqual(report["coverage"], "partial")

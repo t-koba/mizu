@@ -26,12 +26,16 @@ A message here says what a driver observed in continuous integration — for
 example a check result or a publication outcome. It has the same envelope and the
 same trust rule as `vcs_observations`: bounded fields, external-untrusted, no
 authority. A reader interprets the `driver` and `kind` values under its own
-policy and may refer to the observation from work it is doing.
+policy and may refer to the observation from work it is doing. The declared
+`ci_costs` driver now produces the `vcs_read ci_costs` report: the host passes
+it a dispatch page and receipt-validated status results, and the report in the
+observation's `detail` is external-untrusted evidence, never a billing record.
 
 ## Authority
 
-These queues are declarations only. Adding them to a deployment changes no
-runtime authority: the dedicated version-control and CI code remains
-authoritative until the stage-5 cutover slices switch the code paths and delete
-that code. No driver command is shipped here; an operator supplies one in
-`[drivers.<name>]` configuration when the cutover is complete.
+These queues are declarations only: adding them to a deployment changes no
+runtime authority. Declaring a `[drivers.<name>]` table does select a command;
+the example `ci_costs` driver switches the cost computation out of the kernel,
+while the remaining dedicated version-control and CI code stays authoritative
+until its own cutover slices delete it. The command shipped under `drivers/`
+is illustrative; an operator supplies and reviews the command actually used.

@@ -2,8 +2,9 @@
 # Include from a deployment configuration alongside queues.toml. The bodies are
 # the plain objects a driver reports; the kernel validates only these bounds and
 # required fields and assigns no meaning to them. Declaring a queue changes no
-# runtime authority: the dedicated version-control and CI code stays authoritative
-# until the later cutover and deletion slices.
+# runtime authority: the cost projection now comes from the declared ci_costs
+# driver, while the remaining dedicated version-control and CI code stays
+# authoritative until the later cutover and deletion slices.
 
 [queues.vcs_observations]       # what a driver observed in version control
 write = ["host"]

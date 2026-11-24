@@ -3,7 +3,7 @@
 The three internal helpers keep their filters, defaults, evidence records and
 patch seams while reaching their own modules with the trusted Context.
 """
-import inspect
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -139,31 +139,70 @@ class ContextVcsReadToolsTests(unittest.TestCase):
                 listing = {"observed_wall_seconds": 60, "total": 1}
                 context._op_vcs_read.return_value = {"result": "status"}
 
-                def cost(page, read, _listing=listing):
-                    self.assertEqual(page, "page")
-                    self.assertEqual(read("a" * 64), {"result": "status"})
-                    return _listing
+                publication = "a" * 64
+                page = {"items": [{"state": "resolved", "publication_id": publication}],
+                        "total": 1, "offset": 0, "limit": 8}
+                statuses = {publication: {"result": "status"}}
+
+                def observe(config, project, driver_name, request):
+                    self.assertIs(config, context.config)
+                    self.assertIs(project, context.project)
+                    self.assertEqual(driver_name, "ci_costs")
+                    self.assertEqual(request, {"page": page, "statuses": statuses})
+                    return {"appended": 1, "observations": [{
+                        "driver": "ci_costs", "kind": "ci_costs", "summary": "observed",
+                        "observed_at": "2026-07-21T00:00:00+00:00",
+                        "detail": json.dumps(listing)}]}
 
                 with patch(f"{OWNER}.CiRequests") as requests, \
-                        patch("mizu.ci_costs.observed_costs", side_effect=cost) as observed, \
+                        patch(f"{OWNER}.host_drivers.observe", side_effect=observe) as driver, \
                         patch(f"{OWNER}.write_json") as write:
-                    requests.return_value.page.return_value = "page"
+                    requests.return_value.page.return_value = page
                     result = Context._op_vcs_read_ci_costs(context, args)
                 requests.assert_called_once_with(context.project.root, context.config.ci_requests)
                 requests.return_value.page.assert_called_once_with(limit=limit, offset=offset)
-                observed.assert_called_once()
+                driver.assert_called_once_with(context.config, context.project, "ci_costs",
+                                              {"page": page, "statuses": statuses})
                 context._op_vcs_read.assert_called_once_with(
-                    {"op": "status", "publication_id": "a" * 64})
+                    {"op": "status", "publication_id": publication})
                 context._new_invocation_evidence.assert_called_once_with("vcs-read")
                 expected = {"op": "ci_costs", "trust": "external-untrusted",
                             "evidence_id": "eid-1", "evidence": EVIDENCE, "result": listing}
                 write.assert_called_once_with(context.run_dir / EVIDENCE, expected)
                 self.assertEqual(result, {**expected, **listing})
 
-    def test_ci_costs_keeps_its_local_observation_import(self):
-        source = inspect.getsource(ContextVcsReadToolsMixin._op_vcs_read_ci_costs)
-        self.assertIn("from .ci_costs import observed_costs", source)
+    def test_ci_costs_invokes_the_configured_driver_through_the_host_seam(self):
+        context = _context()
+        page = {"items": [], "total": 0}
+        listing = {"observed_wall_seconds": None, "total": 0}
+        response = {"appended": 1, "observations": [{"detail": json.dumps(listing)}]}
+        with patch(f"{OWNER}.CiRequests") as requests, \
+                patch(f"{OWNER}.host_drivers.observe", return_value=response) as observe, \
+                patch(f"{OWNER}.write_json"):
+            requests.return_value.page.return_value = page
+            Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
+        observe.assert_called_once_with(context.config, context.project, "ci_costs",
+                                       {"page": page, "statuses": {}})
 
+    def test_ci_costs_fails_closed_on_a_driver_without_one_json_report(self):
+        responses = (
+            {"appended": 0, "observations": []},
+            {"appended": 2, "observations": [{"detail": "{}"}, {"detail": "{}"}]},
+            {"appended": 1, "observations": [{}]},
+            {"appended": 1, "observations": [{"detail": "[1]"}]},
+            {"appended": 1, "observations": [{"detail": "{"}]},
+        )
+        for response in responses:
+            context = _context()
+            with self.subTest(response=response), \
+                    patch(f"{OWNER}.CiRequests") as requests, \
+                    patch(f"{OWNER}.host_drivers.observe", return_value=response), \
+                    patch(f"{OWNER}.write_json") as write:
+                requests.return_value.page.return_value = {"items": [], "total": 0}
+                with self.assertRaises(Denied):
+                    Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
+            write.assert_not_called()
+            context._new_invocation_evidence.assert_not_called()
 
     def test_vcs_read_is_mixin_owned_and_dispatched_unchanged(self):
         self.assertIs(Context._op_vcs_read, ContextVcsReadToolsMixin._op_vcs_read)

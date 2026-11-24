@@ -1,32 +1,56 @@
-"""Read-only, page-local observed runner wall time; never billing or a total."""
+"""Read-only, page-local observed runner wall time; never billing or a total.
+
+Operator-owned observation driver: it joins a validated dispatch page to
+status results already verified by the trusted host caller. Its report is
+external-untrusted evidence, not an authoritative cost account.
+"""
 from __future__ import annotations
 
-from .errors import Denied, LimitExceeded
+import json
+import sys
+from datetime import datetime, timezone
 
 IDENTITY = ("namespace", "run", "group", "attempt")
 RUNNING_STATES = frozenset({"running", "in_progress", "queued", "pending"})
+SUMMARY_MAX = 4096
+DETAIL_MAX = 16384
+_READ_REFUSAL_CODES = frozenset({69, 77})
 
 
-def observed_costs(page: dict, status_read) -> dict:
+def _status(statuses, publication):
+    """Resolve one status; a refused read is unavailable evidence, not a retry."""
+    try:
+        return statuses.get(publication) if isinstance(statuses, dict) else statuses(publication)
+    except OSError:
+        return None
+    except Exception as exc:
+        # This driver is stdlib-only and cannot import the kernel's
+        # Denied/LimitExceeded classes; their stable shell exit codes are the
+        # cross-process contract. A callable shim raises those same classes.
+        # Every other failure propagates instead of being hidden as absent.
+        if getattr(type(exc), "code", None) in _READ_REFUSAL_CODES:
+            return None
+        raise
+
+
+def observed_costs(page: dict, statuses) -> dict:
     """Join validated dispatch rows to exact receipt-bound status evidence.
 
-    status_read is the ordinary status(publication_id) path, including its
-    receipt validation and evidence write. One observation per distinct
+    statuses maps publication IDs to status results (None for a failed read),
+    or resolves those IDs through a callable shim. One observation per distinct
     receipt, including failed reads; no retry, branch-head fallback or store.
-    The adapter attests a fixed namespace, not enumeration
-    completeness. Conflicting namespace attestations fail attribution closed.
-    All sums/deduplication are page-local; pages are not additive totals.
+    The adapter attests a fixed namespace, not enumeration completeness.
+    Conflicting namespace attestations fail attribution closed. All
+    sums/deduplication are page-local; pages are not additive totals.
     """
-    statuses = {}
+    resolved = {}
     for request in page["items"]:
         if request["state"] == "not_dispatched":
             continue
         publication = request["publication_id"]
-        if publication not in statuses:
-            try:
-                statuses[publication] = status_read(publication)
-            except (Denied, LimitExceeded, OSError):
-                statuses[publication] = None
+        if publication not in resolved:
+            resolved[publication] = _status(statuses, publication)
+    statuses = resolved
     namespaces = {row["namespace"] for status in statuses.values() if status is not None
                   for row in status["result"]["checks"] if "namespace" in row}
     namespace_conflict = len(namespaces) > 1
@@ -47,8 +71,8 @@ def observed_costs(page: dict, status_read) -> dict:
             continue
         report["status_evidence"] = {key: status[key] for key in ("evidence_id", "evidence")}
         data = status["result"]
-        # The ordinary status read validates the receipt and retains this
-        # binding. The dispatch must name exactly that receipt and SHA too.
+        # The caller validates the receipt and retains this binding. The
+        # dispatch must name exactly that receipt and SHA too.
         publication = data["publication"]
         if (publication["publication_id"] != request["publication_id"]
                 or publication["published_sha"] != request["sha"]):
@@ -108,3 +132,30 @@ def observed_costs(page: dict, status_read) -> dict:
             "deduplication": "page_local", "namespace_conflict": namespace_conflict,
             "namespace": next(iter(namespaces)) if len(namespaces) == 1 else None,
             "conflicting_execution_day_observations": conflicts}
+
+
+def main() -> None:
+    """Read one request and report one bounded observation on stdout."""
+    request = json.load(sys.stdin)
+    if (not isinstance(request, dict) or "page" not in request
+            or "statuses" not in request):
+        raise SystemExit("ci_costs driver needs one object with page and statuses")
+    report = observed_costs(request["page"], request["statuses"])
+    detail = json.dumps(report, separators=(",", ":"), allow_nan=False)
+    if len(detail) > DETAIL_MAX:
+        raise SystemExit("ci cost report exceeds the observation detail bound")
+    summary = (f"Observed {report['observed_wall_seconds']} runner_wall_seconds "
+               f"over {len(report['days'])} day(s)")[:SUMMARY_MAX]
+    observation = {
+        "driver": "ci_costs",
+        "kind": "ci_costs",
+        "summary": summary,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail,
+    }
+    json.dump({"observations": [observation]}, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
