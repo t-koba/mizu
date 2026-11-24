@@ -62,6 +62,11 @@ def _source_digest(src: Path) -> str:
     return digest.hexdigest()
 
 
+def _harness_script_sha256() -> str:
+    """Digest of the measurement harness itself, which computes the window."""
+    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+
+
 def _git_head(tree: Path) -> str | None:
     # A git-less exported tree nested inside some checkout must not inherit that
     # enclosing worktree's HEAD; git -C walks parent directories. Only trust a
@@ -87,7 +92,7 @@ def _provenance(daemon_cmd, *, launched_at=None) -> dict:
         'source_revision': head or SOURCE_REVISION,
         'source_revision_resolved_from_git': head is not None,
         'daemon_src_sha256': _source_digest(SOURCE_ROOT / 'src'),
-        'harness_src_sha256': _source_digest(ROOT / 'src'),
+        'harness_script_sha256': _harness_script_sha256(),
         'python_executable': sys.executable,
         'daemon_command': list(daemon_cmd),
         'launched_at_utc': (launched_at or datetime.now(timezone.utc)).isoformat(),

@@ -92,6 +92,12 @@ class SteadyStateTests(unittest.TestCase):
             self.assertFalse(provenance['source_revision_resolved_from_git'])
             self.assertEqual(provenance['source_root'], str(tree))
             self.assertEqual(provenance['daemon_src_sha256'], digest)
+            # The harness digest names the measurement code, not any loaded
+            # src/mizu tree, so cross-revision pairs show the same method.
+            import hashlib
+            script_digest = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+            self.assertEqual(provenance['harness_script_sha256'], script_digest)
+            self.assertNotIn('harness_src_sha256', provenance)
             self.assertEqual(provenance['daemon_command'], cmd)
             self.assertEqual(provenance['launched_at_utc'], stamp.isoformat())
             # A source edit changes the digest, so a receipt cannot claim a
