@@ -349,13 +349,21 @@ class DaemonRuntimeOwnershipTests(Fixture):
         import tempfile
         import threading
 
-        from mizu import daemon_wake
+        from mizu import daemon_wake, fs
         with tempfile.TemporaryDirectory(prefix="daemon-hint-") as td:
             root = Path(td)
             (root / "wake").mkdir()
             baseline = daemon_wake.fingerprint(root)
             stop = threading.Event()
-            hint = threading.Timer(0.05, lambda: (root / "wake" / "hint").write_text("wake\n"))
+
+            def publish_hint():
+                (root / "wake" / "hint").write_text("wake\n")
+                # NTFS does not reliably move a directory mtime on child
+                # creation; writers publish a hint explicitly and the wait
+                # path watches that hint, not raw filesystem churn.
+                fs.touch_directory(root / "wake")
+
+            hint = threading.Timer(0.05, publish_hint)
             hint.start()
             try:
                 started = time.monotonic()

@@ -38,11 +38,16 @@ class DaemonWakeTests(unittest.TestCase):
         (self.root / "control.json").write_text("[]")
         self._eventually_changed(after_file)
         after_rewrite = daemon_wake.fingerprint(self.root)
-        # A watched directory gaining a child changes the fingerprint.
+        # A watched directory appearing changes the fingerprint directly.
         (self.root / "wake").mkdir()
         self._eventually_changed(after_rewrite)
         after_dir = daemon_wake.fingerprint(self.root)
+        # A nested revision is observed through the writer's published hint.
+        # NTFS does not reliably move a directory mtime on child creation, so
+        # writers call touch_directory explicitly and the fingerprint watches
+        # that hint rather than raw filesystem churn.
         (self.root / "wake" / "worker").write_text("")
+        fs.touch_directory(self.root / "wake")
         self._eventually_changed(after_dir)
 
     def test_fingerprint_stat_count_is_independent_of_retained_inventory(self):
