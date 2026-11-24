@@ -788,7 +788,7 @@ class EngineRunMixin:
                                            row_details=session_row_evidence(context, session_dir, grant))
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
                 if check_wait is not None:
-                    result["next_evaluation_at"] = time.time() + self.config.limits.idle_seconds
+                    result["next_evaluation_at"] = check_wait["wait_until"]
                     result["waiting_for_check"] = check_wait
                 if getattr(context, "wrap_up_attempted", False):
                     result["wrap_up"] = {"bound": context.bound_hit}

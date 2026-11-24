@@ -144,9 +144,12 @@ class RoleCooldownRuntimeTests(Fixture):
             roles={**self.config.roles,
                    "worker": dataclasses.replace(self.config.roles["worker"], cooldown_seconds=60),
                    "searcher": dataclasses.replace(self.config.roles["searcher"], cooldown_seconds=60)})
-        for role_name, workspace, expected_runs in (
-                ("worker", "write", [1000.0]),
-                ("searcher", "read", [1000.0, 1015.0])):
+        # With no idle re-evaluation, the writer's exact cooldown deadline is
+        # the wake: it dispatches again at its own spacing, not before it. The
+        # read role still follows its explicit (15s) spacing.
+        for role_name, workspace, expected_runs, expected_waits, expected_now in (
+                ("worker", "write", [1000.0, 1060.0], [60, 60], 1120.0),
+                ("searcher", "read", [1000.0, 1015.0], [15, 15], 1030.0)):
             with self.subTest(role=role_name):
                 self.assertEqual(config.roles[role_name].workspace, workspace)
                 clock = StopClock()
@@ -160,7 +163,7 @@ class RoleCooldownRuntimeTests(Fixture):
 
                 # Exercise the actual daemon loop, not a copy of its delay
                 # conditional. Readiness stays true, so only ordinary_after
-                # can suppress the writer's second dispatch at t=1015.
+                # gates the writer's next dispatch at its exact cooldown.
                 with (patch("mizu.runtime.threading.Event", return_value=clock),
                       patch("mizu.runtime.signal.signal"),
                       patch("mizu.daemon_runtime.lock", return_value=nullcontext()),
@@ -179,8 +182,8 @@ class RoleCooldownRuntimeTests(Fixture):
                     engine.return_value.run.side_effect = run
                     daemon(config, "sample", role_name)
 
-                self.assertEqual(clock.waits, [15, 15])
-                self.assertEqual(clock.now, 1030.0)
+                self.assertEqual(clock.waits, expected_waits)
+                self.assertEqual(clock.now, expected_now)
                 self.assertEqual(dispatched_at, expected_runs)
                 self.assertEqual(engine.call_args_list,
                                  [call(config, stop=clock)] * len(expected_runs))
@@ -392,7 +395,9 @@ capabilities = ["files", "read", "finish"]
         self.assertEqual(dispatched_at, [])
         self.assertEqual(should_run.call_count, 0)
         engine.return_value.run.assert_not_called()
-        self.assertEqual(clock.waits, [config.limits.idle_seconds] * 2)
+        # An invalid policy arms no real deadline: the wait helper stands in
+        # for an unbounded fingerprint-only wait with its 0.1s no-deadline tick.
+        self.assertEqual(clock.waits, [0.1, 0.1])
 
     def test_loop_deferred_reentry_ignores_explicit_spacing(self):
         config = dataclasses.replace(

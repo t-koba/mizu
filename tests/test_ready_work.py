@@ -288,8 +288,10 @@ class ReadyWorkTests(Fixture):
              patch("mizu.probes.next_deadline", return_value=None), patch("builtins.print"), \
              patch.object(Engine, "run", side_effect=run):
             daemon(config, "sample", "worker")
-        self.assertEqual(starts, [1000, 1100])
-        self.assertEqual(waits, [10] * 12)
+        # With no idle re-evaluation, each pass waits to the exact configured
+        # cooldown and dispatches: spacing stays at 100s, never faster.
+        self.assertEqual(starts, [1000 + 100 * i for i in range(12)])
+        self.assertEqual(waits, [100] * 12)
 
 class SatisfiedWorkWaitTests(Fixture):
     item = ReadyWorkTests.item

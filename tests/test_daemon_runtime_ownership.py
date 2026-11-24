@@ -118,9 +118,9 @@ class DaemonRuntimeOwnershipTests(Fixture):
         self.assertEqual(engine.call_count, 1)
 
     def test_settled_daemon_actually_sleeps(self):
-        # A settled daemon at a short idle cadence must sleep, not re-render on
-        # every pass. Ledger journal churn must not look like a wake: watching
-        # the project root here used to spin the loop at 100% CPU.
+        # A settled daemon has no idle deadline, so it must sleep rather than
+        # re-render on every pass. Ledger journal churn must not look like a
+        # wake: watching the project root here used to spin at 100% CPU.
         import json
         import tempfile
         import time as real_time
@@ -183,9 +183,9 @@ class DaemonRuntimeOwnershipTests(Fixture):
             self.assertLessEqual(passes[0], 5, passes[0])
 
     def test_settled_daemon_does_not_rescan_backlog_each_deadline(self):
-        # A negative admission result is reused across safety observations
-        # while state and configuration are unchanged, so idle cost stays
-        # independent of retained messages. Wakes still re-run admission.
+        # With no fixed idle tick, a settled daemon has no reason to re-check
+        # admission: the backlog is scanned once until a real wake arrives, so
+        # idle cost stays independent of retained messages.
         import json
         import tempfile
         import time as real_time
@@ -315,3 +315,100 @@ class DaemonRuntimeOwnershipTests(Fixture):
                     daemon_runtime.threading.Event.is_set = original_iss
             self.assertGreaterEqual(admissions[0], 3, admissions[0])
 
+    def test_only_real_facts_bound_the_wait_without_an_idle_tick(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, idle_seconds=3600))
+        mono, wall = 1000.0, 2000.0
+        with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
+              patch.object(daemon_runtime.time, "time", return_value=wall),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.check_jobs, "deferral", return_value=None),
+              patch.object(self.project.snapshots, "get", return_value={"state": "run"})):
+            # No fact means no deadline: a quiet daemon waits for a writer hint.
+            self.assertIsNone(
+                daemon_runtime._wake_deadline(config, None, "sample", "worker", 0.0))
+            # Delayed delivery and cooldown are exact facts, not idle samples.
+            delivery = {"baseline": (), "at": 2003.0}
+            self.assertEqual(daemon_runtime._wake_deadline(
+                config, None, "sample", "worker", 0.0, delivery_cache=delivery), 1003.0)
+            self.assertEqual(daemon_runtime._wake_deadline(
+                config, None, "sample", "worker", 1001.5, delivery_cache=delivery), 1001.5)
+            # A persisted check wait survives a restart that reset cooldown.
+            hold = {"id": "job", "wait_until": 2002.0, "status": "queued"}
+            with patch.object(daemon_runtime.check_jobs, "deferral", return_value=hold):
+                self.assertEqual(daemon_runtime._wake_deadline(
+                    config, self.project, "sample", "worker", 0.0), 1002.0)
+            # A malformed hold must not fall back to an idle observation.
+            with patch.object(daemon_runtime.check_jobs, "deferral",
+                              return_value={**hold, "wait_until": float("nan")}):
+                self.assertIsNone(daemon_runtime._wake_deadline(
+                    config, self.project, "sample", "worker", 0.0))
+
+    def test_watched_dir_hint_wakes_before_the_exact_deadline(self):
+        import tempfile
+        import threading
+
+        from mizu import daemon_wake
+        with tempfile.TemporaryDirectory(prefix="daemon-hint-") as td:
+            root = Path(td)
+            (root / "wake").mkdir()
+            baseline = daemon_wake.fingerprint(root)
+            stop = threading.Event()
+            hint = threading.Timer(0.05, lambda: (root / "wake" / "hint").write_text("wake\n"))
+            hint.start()
+            try:
+                started = time.monotonic()
+                reason = daemon_wake.wait(stop, root, baseline, started + 5, poll=0.01)
+            finally:
+                stop.set()
+                hint.join(timeout=1)
+            self.assertEqual(reason, "change")
+            self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_deadline_wake_rechecks_admission_without_a_state_change(self):
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, False, True]
+        with (patch.object(daemon_runtime.threading, "Event", return_value=stop),
+              patch.object(daemon_runtime.signal, "signal"),
+              patch.object(daemon_runtime, "lock", return_value=nullcontext()),
+              patch.object(daemon_runtime, "load", return_value=self.config),
+              patch.object(daemon_runtime, "Project", return_value=self.project),
+              patch.object(daemon_runtime, "should_run", return_value=False) as admission,
+              patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False),
+              patch("mizu.probes.service_due", return_value=None),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
+              patch.object(daemon_runtime.daemon_wake, "wait",
+                           side_effect=["change", "deadline", "stop"]) as wake_wait,
+              patch("builtins.print")):
+            daemon_runtime.daemon(self.config, "sample", "worker")
+        # Without memo invalidation on a deadline, the last pass would reuse the
+        # negative admission and a fact that lapsed could never wake the role.
+        self.assertEqual(admission.call_count, 3)
+        self.assertEqual([call.args[3] for call in wake_wait.call_args_list], [None] * 3)
+
+    def test_check_wait_result_reports_the_real_bound(self):
+        from support import ScriptDriver
+        from mizu import check_jobs
+        from mizu.runtime import Engine
+
+        roles = {name: dataclasses.replace(role, capabilities=(*role.capabilities, "check_job"))
+                 for name, role in self.config.roles.items()}
+        config = dataclasses.replace(
+            self.config, roles=roles,
+            limits=dataclasses.replace(self.config.limits, idle_seconds=3600))
+        self.project.config = config
+
+        def act(ctx, *_):
+            job = ctx._op_verify({})
+            ctx._op_finish({"outcome": "wait", "summary": "Frozen", "state": "Waiting",
+                            "wait_for_check": job["id"], "wait_seconds": 42})
+
+        before = time.time()
+        result = Engine(config, driver=ScriptDriver(act)).run(self.project, "worker")
+        bound = result["waiting_for_check"]["wait_until"]
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(result["next_evaluation_at"], bound)
+        self.assertGreaterEqual(bound, before + 41)
+        self.assertEqual(check_jobs.deferral(self.project, "worker")["wait_until"], bound)

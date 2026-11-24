@@ -1375,6 +1375,9 @@ class RecoveryProbeTests(SelectionFixture):
              patch('mizu.probes.next_deadline', return_value=None), patch('builtins.print'), \
              patch.object(Engine, 'run', return_value={'status': 'completed'}) as run:
             daemon(config, 'sample', 'worker')
-        self.assertEqual(waits, [10, 10, 10])
-        self.assertEqual(run.call_count, 1)
+        # With no idle re-evaluation, each pass waits to the exact cooldown
+        # deadline. Probe servicing still happens every pass, but it cannot
+        # dispatch the role sooner than its own 100s spacing.
+        self.assertEqual(waits, [100, 100, 100])
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(service.call_count, 3)
