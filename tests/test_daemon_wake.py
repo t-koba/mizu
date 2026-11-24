@@ -34,8 +34,10 @@ class DaemonWakeTests(unittest.TestCase):
         (self.root / "control.json").write_text("{}")
         self._eventually_changed(base)
         after_file = daemon_wake.fingerprint(self.root)
-        # Rewriting the same-size content still changes mtime/inode.
-        (self.root / "control.json").write_text("[]")
+        # A same-size rewrite through the product writer changes st_ino
+        # deterministically; an in-place write relies on mtime alone and flakes
+        # on filesystems with coarse timestamp granularity.
+        fs.atomic_write(self.root / "control.json", b"[]")
         self._eventually_changed(after_file)
         after_rewrite = daemon_wake.fingerprint(self.root)
         # A watched directory appearing changes the fingerprint directly.
@@ -166,7 +168,7 @@ class DaemonWakeTests(unittest.TestCase):
     def test_wait_returns_change_already_present(self):
         (self.root / "control.json").write_text("{}")
         baseline = daemon_wake.fingerprint(self.root)
-        (self.root / "control.json").write_text("[]")
+        fs.atomic_write(self.root / "control.json", b"[]")
         self._eventually_changed(baseline)
         stop = threading.Event()
         self.assertEqual(daemon_wake.wait(stop, self.root, baseline, None, poll=0.01), "change")
