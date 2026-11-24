@@ -23,6 +23,11 @@ from .publication import Publication
 from .ci_requests import CiRequests
 
 
+# Keys the kernel owns in a vcs_read record. An external-untrusted driver
+# observation must never set its own trust label, evidence pointer or result.
+_RECORD_ENVELOPE_KEYS = frozenset({"op", "trust", "evidence_id", "evidence", "result"})
+
+
 class ContextVcsReadToolsMixin:
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
@@ -203,8 +208,12 @@ class ContextVcsReadToolsMixin:
             raise Denied("CI cost observation detail is not valid JSON") from exc
         if not isinstance(listing, dict):
             raise Denied("CI cost observation detail must be an object")
+        if _RECORD_ENVELOPE_KEYS.intersection(listing):
+            raise Denied("CI cost observation detail carries a reserved envelope key")
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "ci_costs", "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": listing}
         write_json(self.run_dir / evidence, record)
-        return {**record, **listing}
+        # The kernel-owned envelope is merged last so untrusted data can never
+        # relabel the record or repoint its evidence, even if a key is added later.
+        return {**listing, **record}

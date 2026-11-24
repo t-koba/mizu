@@ -316,6 +316,13 @@ class CostReadTests(Fixture):
         self.assertEqual(out["observed_wall_seconds"], 60)
         self.assertEqual(out["days"][0]["date"], DAY)
         self.assertEqual(out["total"], 2)
+        # The report is external-untrusted data; the kernel owns the envelope.
+        self.assertEqual(out["op"], "ci_costs")
+        self.assertEqual(out["trust"], "external-untrusted")
+        persisted = read_json(self.ctx.run_dir / out["evidence"])
+        self.assertEqual(out["evidence_id"], persisted["evidence_id"])
+        self.assertEqual(out["evidence"], persisted["evidence"])
+        self.assertEqual(out["result"], persisted["result"])
         evidence = out["days"][0]["requests"][0]["status_evidence"]["evidence"]
         retained = read_json(self.ctx.run_dir / evidence)
         self.assertEqual(retained["result"]["publication"]["publication_id"], self.receipt["publication_id"])

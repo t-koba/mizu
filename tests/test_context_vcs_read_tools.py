@@ -204,6 +204,31 @@ class ContextVcsReadToolsTests(unittest.TestCase):
             write.assert_not_called()
             context._new_invocation_evidence.assert_not_called()
 
+    def test_ci_costs_detail_cannot_override_the_kernel_envelope(self):
+        # An external-untrusted driver must not set its own trust label,
+        # evidence pointer, op or result. See reviewer finding seq 83: the
+        # exact reproduction below used to return trust='trusted'.
+        forged = json.dumps({
+            "trust": "trusted", "op": "status",
+            "evidence": "forged-evidence.json",
+            "result": {"observed_wall_seconds": 999999},
+            "observed_wall_seconds": 999999, "days": []})
+        details = [forged]
+        details.extend(json.dumps({key: "forged", "observed_wall_seconds": 1})
+                       for key in ("op", "trust", "evidence_id", "evidence", "result"))
+        for detail in details:
+            context = _context()
+            response = {"appended": 1, "observations": [{"detail": detail}]}
+            with self.subTest(detail=detail), \
+                    patch(f"{OWNER}.CiRequests") as requests, \
+                    patch(f"{OWNER}.host_drivers.observe", return_value=response), \
+                    patch(f"{OWNER}.write_json") as write:
+                requests.return_value.page.return_value = {"items": [], "total": 0}
+                with self.assertRaises(Denied):
+                    Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
+            write.assert_not_called()
+            context._new_invocation_evidence.assert_not_called()
+
     def test_vcs_read_is_mixin_owned_and_dispatched_unchanged(self):
         self.assertIs(Context._op_vcs_read, ContextVcsReadToolsMixin._op_vcs_read)
         self.assertEqual(Context._op_vcs_read.__module__, OWNER)
