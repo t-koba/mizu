@@ -60,7 +60,10 @@ is read from git only when the measured tree is its own worktree root; otherwise
 the explicit label is used, so a git-less exported tree cannot inherit an
 enclosing checkout's HEAD. To measure an earlier revision with the same harness,
 set `MIZU_CPU_SOURCE_ROOT` to that tree and `MIZU_CPU_SOURCE_REVISION` to its git
-label.
+label. The stage-4 before/after receipts are retained path-free in
+`docs/evidence/stage4-cpu-evidence.json`, with a verifiable link from each
+source-tree digest to its named git commit; `scripts/verify-stage4-cpu-evidence.py`
+recomputes the record's internal digests and shape from tracked files only.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|

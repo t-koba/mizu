@@ -1,0 +1,363 @@
+{
+  "schema": "stage4-cpu-evidence-v1",
+  "purpose": "Audit-readable record of the existing stage-4 daemon before/after CPU receipts. Reuses the already-captured measurement; no remeasurement. Relative before/after on one machine, synthetic deployment, not a performance ceiling.",
+  "measurement": {
+    "kind": "local-daemon-cpu",
+    "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
+    "harness": "scripts/daemon-cpu.py",
+    "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+    "harness_recompute": "sha256(git show HEAD:scripts/daemon-cpu.py) == harness_script_sha256",
+    "deployment": {
+      "projects": 2,
+      "retained_messages": 200,
+      "idle_seconds": 1,
+      "window_seconds": 4.0,
+      "warmup_seconds": 3.0,
+      "repeats": 3,
+      "settled": true,
+      "python": "3.14.10",
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36"
+    },
+    "deployment_matches_after": true,
+    "validity": {
+      "method": "proc-per-pid",
+      "steady_state_observed": true
+    },
+    "validity_matches_after": true
+  },
+  "before": {
+    "source_receipt_sha256": "692779284074f6ae15652a5f4f3fafdabdf0cf88905cd2c620be38cc99475e78",
+    "embedded_receipt": {
+      "kind": "local-daemon-cpu",
+      "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
+      "projects": 2,
+      "retained_messages": 200,
+      "idle_seconds": 1,
+      "window_seconds": 4.0,
+      "warmup_seconds": 3.0,
+      "repeats": 3,
+      "settled": true,
+      "python": "3.14.10",
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36",
+      "source": {
+        "source_revision": "8295dba3f6cd913e69ea5014229c766fe5321edc",
+        "source_revision_resolved_from_git": false,
+        "daemon_src_sha256": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
+        "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+        "daemon_command": [
+          "<python>",
+          "-m",
+          "mizu",
+          "--config",
+          "<synthetic>",
+          "daemon",
+          "p0",
+          "--role",
+          "worker"
+        ],
+        "launched_at_utc": "2026-11-24T04:14:10.976610+00:00"
+      },
+      "idle": {
+        "median_seconds": 0.12,
+        "min_seconds": 0.11,
+        "max_seconds": 0.14,
+        "samples": [
+          0.14,
+          0.11,
+          0.12
+        ]
+      },
+      "one_change": {
+        "median_seconds": 0.24,
+        "min_seconds": 0.24,
+        "max_seconds": 0.31,
+        "samples": [
+          0.31,
+          0.24,
+          0.24
+        ]
+      },
+      "validity": {
+        "method": "proc-per-pid",
+        "steady_state_observed": true,
+        "minimum_requested_warmup_seconds": 3.0,
+        "observed_warmup_seconds": {
+          "idle": [
+            3.502,
+            3.502,
+            3.502
+          ],
+          "one_change": [
+            3.503,
+            3.502,
+            3.502
+          ]
+        },
+        "probe_seconds": 0.25,
+        "steady_threshold_cpu_seconds_per_child": 0.01,
+        "consecutive_quiet_probes": 2,
+        "max_settle_seconds": 30.0,
+        "scenarios": [
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 0
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 1
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 2
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.503,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 0
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 1
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 2
+          }
+        ]
+      }
+    },
+    "embedded_receipt_sha256": "9f2d6f60500692f9e5d8dc8924e704a23952ecbe3cbff16d59b249f3c3886605",
+    "source_binding": {
+      "source_revision": "8295dba3f6cd913e69ea5014229c766fe5321edc",
+      "source_revision_resolved_from_git": false,
+      "label_verified_against_git": true,
+      "daemon_src_sha256": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
+      "daemon_src_sha256_recomputed_from_git_tree": "b66660a172deddc5260f9f474079550b1d7a5d571f2bd9b6c33a1876a706fc5c",
+      "recompute": "sha256 over sorted src/mizu/**/*.py of `git archive <source_revision> src` == daemon_src_sha256"
+    }
+  },
+  "after": {
+    "source_receipt_sha256": "2803e61a718490805f3dbd893929fd9b48655bedfc79944493df0091fb6197f0",
+    "embedded_receipt": {
+      "kind": "local-daemon-cpu",
+      "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
+      "projects": 2,
+      "retained_messages": 200,
+      "idle_seconds": 1,
+      "window_seconds": 4.0,
+      "warmup_seconds": 3.0,
+      "repeats": 3,
+      "settled": true,
+      "python": "3.14.10",
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36",
+      "source": {
+        "source_revision": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
+        "source_revision_resolved_from_git": true,
+        "daemon_src_sha256": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
+        "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+        "daemon_command": [
+          "<python>",
+          "-m",
+          "mizu",
+          "--config",
+          "<synthetic>",
+          "daemon",
+          "p0",
+          "--role",
+          "worker"
+        ],
+        "launched_at_utc": "2026-11-24T04:14:58.520320+00:00"
+      },
+      "idle": {
+        "median_seconds": 0.01,
+        "min_seconds": 0.0,
+        "max_seconds": 0.02,
+        "samples": [
+          0.02,
+          0.01,
+          0.0
+        ]
+      },
+      "one_change": {
+        "median_seconds": 0.08,
+        "min_seconds": 0.07,
+        "max_seconds": 0.11,
+        "samples": [
+          0.11,
+          0.07,
+          0.08
+        ]
+      },
+      "validity": {
+        "method": "proc-per-pid",
+        "steady_state_observed": true,
+        "minimum_requested_warmup_seconds": 3.0,
+        "observed_warmup_seconds": {
+          "idle": [
+            3.502,
+            3.502,
+            3.502
+          ],
+          "one_change": [
+            3.502,
+            3.502,
+            3.502
+          ]
+        },
+        "probe_seconds": 0.25,
+        "steady_threshold_cpu_seconds_per_child": 0.01,
+        "consecutive_quiet_probes": 2,
+        "max_settle_seconds": 30.0,
+        "scenarios": [
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 0
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 1
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "idle",
+            "repeat": 2
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 0
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 1
+          },
+          {
+            "method": "proc-per-pid",
+            "steady_state_observed": true,
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "scenario": "one_change",
+            "repeat": 2
+          }
+        ]
+      }
+    },
+    "embedded_receipt_sha256": "112fbbe19b1f6dd810f6bff3a7c948786b4796f2bbefda2610056ebf61acd73f",
+    "source_binding": {
+      "source_revision": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
+      "source_revision_resolved_from_git": true,
+      "daemon_src_sha256": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
+      "daemon_src_sha256_recomputed_from_git_tree": "b8b0c93f24d8541615155ee721252373c747b59eaaca64b2618c6fd02d0bd36d",
+      "recompute": "sha256 over sorted src/mizu/**/*.py of `git archive <source_revision> src` == daemon_src_sha256"
+    }
+  },
+  "result": {
+    "idle_median_seconds": {
+      "before": 0.12,
+      "after": 0.01
+    },
+    "one_change_median_seconds": {
+      "before": 0.24,
+      "after": 0.08
+    }
+  },
+  "no_private_paths": true,
+  "verification": {
+    "verifier_script": "scripts/verify-stage4-cpu-evidence.py",
+    "check_id": "958f14dba1be167a39453b105d7948db4b27eb58629633386f1f6bffd10551a1",
+    "check_command_id": "bccd8f93f0894bdda1eeaec6f3c86109",
+    "check_purpose": "stage4-cpu-evidence-audit-record-verify",
+    "check_result_recompute": "mizu_check_job action=result id=958f14dba1be167a39453b105d7948db4b27eb58629633386f1f6bffd10551a1",
+    "check_log_recompute": "mizu_check_job action=logs with check id and command id bccd8f93f0894bdda1eeaec6f3c86109",
+    "dereferenceable_anchors": {
+      "before_tree_commit": "8295dba3f6cd913e69ea5014229c766fe5321edc",
+      "after_tree_commit": "dfc80042864b4d9b0a5c38516ebae7263fe41a51",
+      "anchor_read": "mizu_vcs_read op=log with exact sha",
+      "tracked_record": "docs/evidence/stage4-cpu-evidence.json",
+      "tracked_verifier": "scripts/verify-stage4-cpu-evidence.py",
+      "tracked_guard_test": "tests/test_stage4_cpu_evidence.py"
+    },
+    "git_recompute_witness": {
+      "command_id": "67a13271bb254a47972c13f643a6808e",
+      "note": "mizu_exec git archive recompute of both source-tree digests from the named commits; external-untrusted recorded-local evidence"
+    },
+    "note": "The check verifies embedded receipts, harness digest, source-tree digest agreement, shape, validity and no-private-paths. The verification annotations are not among the recomputed fields."
+  }
+}
