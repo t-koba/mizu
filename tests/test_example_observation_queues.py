@@ -12,6 +12,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import support  # noqa: F401  (puts src on the path)
 from mizu.cli import configure
@@ -19,6 +20,7 @@ from mizu.config import load
 from mizu.errors import Denied
 from mizu.kernel import QueueStore, parse_queues
 from mizu.kernel.queues import allows
+from mizu.runtime import Context
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "development"
 FRAGMENT = EXAMPLE / "observation_queues.toml"
@@ -30,6 +32,18 @@ README = EXAMPLE / "README.md"
 
 def declarations():
     return tomllib.loads(FRAGMENT.read_text(encoding="utf-8"))["queues"]
+
+
+def without_tables(text, prefixes):
+    """Drop active TOML tables (and their bodies) under the given prefixes."""
+    kept, dropping = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("["):
+            dropping = any(stripped.startswith("[" + prefix) for prefix in prefixes)
+        if not dropping:
+            kept.append(line)
+    return "".join(kept)
 
 
 OBSERVATION = {
@@ -67,27 +81,17 @@ class ObservationDeclaration(unittest.TestCase):
 
     def test_readme_include_loads_through_the_real_config_loader(self):
         # The README composes all three fragments; prove that include graph
-        # validates with a real top config and leaves drivers default-closed.
+        # validates with a real top config. `configure` now writes its own
+        # ci_observations queue and ci_costs driver, so strip both declarations
+        # before including the example fragments to avoid duplicate keys.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfgdir = root / "config"
             cfgdir.mkdir()
             top = cfgdir / "config.toml"
             configure(top, None)
-            lines = top.read_text(encoding="utf-8").splitlines(keepends=True)
-            kept, in_queues = [], False
-            for line in lines:
-                stripped = line.lstrip()
-                if stripped.startswith("[queues"):
-                    in_queues = True
-                if in_queues:
-                    if stripped.startswith("[") and not stripped.startswith("[queues"):
-                        in_queues = False
-                    else:
-                        continue
-                if not in_queues:
-                    kept.append(line)
-            text = "".join(kept).replace(
+            text = without_tables(top.read_text(encoding="utf-8"),
+                                  ("queues.", "drivers.")).replace(
                 'data_dir = "~/.local/state/mizu"',
                 "data_dir = " + repr(str(root / "data")))
             names = ("queues.toml", "outcomes.toml", "observation_queues.toml",
@@ -174,6 +178,59 @@ class CostObservationAppend(unittest.TestCase):
             self.assertEqual(ack["seq"], 1)
             page = store.read("ci_observations", "role:worker")
             self.assertEqual(page["messages"][0]["body"], observation)
+
+
+class GeneratedDeploymentCosts(unittest.TestCase):
+    """A fresh `mizu configure` deployment serves `vcs_read ci_costs`."""
+
+    def test_generated_config_reports_through_the_real_host_seam(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "config" / "config.toml"
+            configure(config_file, None)
+            text = config_file.read_text(encoding="utf-8").replace(
+                'data_dir = "~/.local/state/mizu"',
+                "data_dir = " + json.dumps(str(root / "data")))
+            config_file.write_text(text, encoding="utf-8")
+            config = load(config_file)
+
+            driver = config.drivers["ci_costs"]
+            self.assertEqual(driver.command, (sys.executable, str(EXAMPLE / "drivers" / "ci_costs_driver.py")))
+            self.assertEqual(driver.observation_queue, "ci_observations")
+            self.assertTrue(all(Path(arg).is_absolute() for arg in driver.command))
+            example = tomllib.loads(DRIVER_FRAGMENT.read_text(encoding="utf-8"))["drivers"]["ci_costs"]
+            self.assertEqual((driver.observation_queue, driver.timeout_seconds,
+                              driver.max_bytes, driver.diagnostic_bytes),
+                             (example["observation_queue"], example["timeout_seconds"],
+                              example["max_bytes"], example["diagnostic_bytes"]))
+            queue = config.queues["ci_observations"]
+            self.assertEqual(queue, parse_queues(declarations())["ci_observations"])
+            self.assertTrue(allows(queue.write, "host"))
+            self.assertIn("role:*", queue.read)
+            self.assertEqual(queue.wake, ("role:worker",))
+            self.assertEqual(queue.fields["detail"].max, 16384)
+
+            # Real config and real host seam: only the Context shell is a shim.
+            project = SimpleNamespace(root=root, kernel_queues=QueueStore(root, config.queues))
+            run_dir = root / "run"
+            (run_dir / "vcs-read").mkdir(parents=True)
+            context = SimpleNamespace(
+                config=config, project=project, run_dir=run_dir,
+                _new_invocation_evidence=lambda op: ("eid-1", "vcs-read/eid-1.json"))
+            result = Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
+
+            self.assertEqual(result["op"], "ci_costs")
+            self.assertEqual(result["trust"], "external-untrusted")
+            self.assertEqual(result["days"], [])
+            self.assertIsNone(result["observed_wall_seconds"])
+            self.assertEqual(result["measure"], "runner_wall_seconds")
+            self.assertEqual(result["coverage"], "partial")
+            self.assertTrue((run_dir / "vcs-read" / "eid-1.json").is_file())
+            page = project.kernel_queues.read("ci_observations", "role:worker")
+            self.assertEqual((page["head"], len(page["messages"])), (1, 1))
+            self.assertEqual(page["messages"][0]["author"], "host")
+            body = page["messages"][0]["body"]
+            self.assertEqual((body["driver"], body["kind"]), ("ci_costs", "ci_costs"))
 
 
 if __name__ == "__main__":

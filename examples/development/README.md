@@ -21,11 +21,16 @@ nothing here specially.
 - `observation_queues.toml` declares `vcs_observations` and `ci_observations`:
   bounded queues to which observation drivers append what they find. Their
   bodies are opaque plain objects; the schemas enforce bounds and required
-  fields only. It is stage-5 userland.
+  fields only. It is stage-5 userland. A config written by `mizu configure`
+  already declares `ci_observations`, so including this fragment there would
+  duplicate that key.
 - `observation_drivers.toml` declares the illustrative `ci_costs` driver in
   `drivers/ci_costs_driver.py`. Including it switches the `vcs_read ci_costs`
   join to that operator-owned program through the generic host seam; without
-  it the op fails closed.
+  it the op fails closed. A config written by `mizu configure` already carries
+  a working `ci_costs` declaration with an absolute, CWD-independent command,
+  so including this fragment there would duplicate the key. Use it for a
+  manually authored config or when migrating an existing one.
 - `policies/observations.md` says what an observation in each queue means, who
   reads it and what the reader does. Compose it into the role policies of the
   roles that read those queues.
@@ -46,7 +51,10 @@ Roles reach the queues with the `queues` capability and the `queue_*` and
 roles is the `wake` list of each declaration; a reply also wakes the author of
 the message it refers to.
 
-To use it, include the file and add the policy part:
+To use it in a manually authored config, include the files and add the policy
+part. For a config created by `mizu configure`, omit the two observation
+fragments: its `ci_observations` queue and `ci_costs` driver are already
+declared and including them again is a duplicate-key error.
 
 ```toml
 include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml",

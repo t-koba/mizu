@@ -121,12 +121,15 @@ wake = ["role:worker"]
 [queues.notices.schema]
 body = {type = "string", max = 16384, required = true}
 
-# Observation drivers default closed here (no [drivers.*] table is shipped).
-# The development example declares an illustrative ci_costs driver in
-# examples/development/observation_drivers.toml; include it only when that
-# reviewed command is available, otherwise vcs_read ci_costs fails closed.
-# An operator may declare a bounded command that appends observations to a
-# declared queue; see docs/kernel.md#drivers for schema, bounds and trust.
+# Observation drivers are declared [drivers.<name>] tables. `mizu configure`
+# writes a working ci_costs declaration and its bounded ci_observations queue
+# into the private config it creates, with an absolute CWD-independent command;
+# this static template ships no active driver table so that including the
+# development example fragments cannot duplicate a key. A manually authored
+# config may declare its own bounded command that appends observations to a
+# declared queue, or omit the driver: vcs_read ci_costs then fails closed, and
+# an unknown driver name always fails closed. See docs/configuration.md and
+# docs/kernel.md#drivers for schema, bounds and trust.
 # [drivers]
 
 # Host publisher outcomes for publication_ci waits default closed (record_kinds
