@@ -59,22 +59,29 @@ def command(*argv, seconds=10, codes=(0,), maximum=8192, diagnostic_bytes=0):
     return result
 
 
-# A shared CI runner's apt mirror can stall past a single command bound. Retry
-# only the idempotent package-list refresh; every attempt keeps the same hard
-# bound and fail-closed rule (a timeout/overflow is never read as absence).
-# Exhausting the retries re-raises the last failure, so an unanswered mirror
-# aborts --prepare rather than letting --recover run against an empty fixture.
+# A shared CI runner's apt mirror can stall past a single command bound or
+# fail a fetch with a transient error (exit 100). Retry only the idempotent
+# package-list refresh: apt retries individual fetches itself, and a short
+# bounded wait between whole attempts lets a momentary mirror fault clear.
+# Every attempt keeps the same hard bound and fail-closed rule (a timeout or
+# overflow is never read as absence). Exhausting the retries re-raises the last
+# failure, so an unanswered mirror aborts --prepare rather than letting
+# --recover run against an empty fixture.
 APT_UPDATE_ATTEMPTS = 2
+APT_UPDATE_RETRY_DELAY_SECONDS = 3
 
 
 def provision_package_lists():
     last = None
-    for _ in range(APT_UPDATE_ATTEMPTS):
+    for attempt in range(APT_UPDATE_ATTEMPTS):
         try:
-            command('sudo', '-n', 'apt-get', '-qq', 'update', seconds=60, maximum=32768)
+            command('sudo', '-n', 'apt-get', '-qq', '-o', 'Acquire::Retries=3',
+                    'update', seconds=60, maximum=32768)
             return
         except RuntimeError as exc:
             last = exc
+            if attempt + 1 < APT_UPDATE_ATTEMPTS:
+                time.sleep(APT_UPDATE_RETRY_DELAY_SECONDS)
     raise last
 
 
@@ -505,20 +512,25 @@ class RecoveryReservationTests(unittest.TestCase):
         module = sys.modules[__name__]
         stall = RuntimeError('sudo failed: timeout/-9')
         with mock.patch.object(module, 'command',
-                               side_effect=[stall, mock.Mock()]) as invoke:
+                               side_effect=[stall, mock.Mock()]) as invoke, \
+             mock.patch.object(module.time, 'sleep') as sleep:
             module.provision_package_lists()
         self.assertEqual(invoke.call_count, 2)
+        sleep.assert_called_once_with(module.APT_UPDATE_RETRY_DELAY_SECONDS)
         invoke.assert_called_with(
-            'sudo', '-n', 'apt-get', '-qq', 'update', seconds=60, maximum=32768)
+            'sudo', '-n', 'apt-get', '-qq', '-o', 'Acquire::Retries=3',
+            'update', seconds=60, maximum=32768)
 
     def test_provision_package_lists_fails_closed_when_exhausted(self):
         module = sys.modules[__name__]
         stall = RuntimeError('sudo failed: timeout/-9')
         with mock.patch.object(module, 'command',
-                               side_effect=[stall, stall]) as invoke:
+                               side_effect=[stall, stall]) as invoke, \
+             mock.patch.object(module.time, 'sleep') as sleep:
             with self.assertRaises(RuntimeError):
                 module.provision_package_lists()
         self.assertEqual(invoke.call_count, module.APT_UPDATE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, module.APT_UPDATE_ATTEMPTS - 1)
 
     @unittest.skipUnless(os.name == 'posix', 'host preflight is POSIX-only')
     def test_host_preflight_uses_supported_podman_template_fields(self):
