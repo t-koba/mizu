@@ -188,7 +188,11 @@ class GeneratedDeploymentCosts(unittest.TestCase):
 
     def test_generated_config_reports_through_the_real_host_seam(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # configure() canonicalizes the config path before baking the
+            # driver command. macOS tempfile returns a symlinked
+            # /var/folders/... path, so resolve the root once and derive every
+            # expected path from it to match what configure bakes.
+            root = Path(tmp).resolve()
             config_file = root / "config" / "config.toml"
             configure(config_file, None)
             text = config_file.read_text(encoding="utf-8").replace(
@@ -243,7 +247,7 @@ class GeneratedDeploymentCosts(unittest.TestCase):
     def test_migrated_config_reports_from_a_foreign_cwd(self):
         """An existing config with the documented durable argv needs no source tree."""
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             generated = root / "generated" / "config.toml"
             configure(generated, None)
             existing_dir = root / "existing"
