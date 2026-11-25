@@ -7,7 +7,7 @@ those inputs into bounded prompt facts through the generic host seam; this
 module never recomputes or repairs the returned rows.
 
 Schema: ``ci_head_state_facts(project, config=None)`` returns a list of at most
-eight plain row objects with exactly
+one plain row object per configured branch with exactly
 ``{subject, revision, runs, requests, no_head, no_evidence, may_be_incomplete}``;
 each identity array holds at most eight unique strings. Bounds: the request
 carries at most eight configured branches, one newest-first receipt page, one
@@ -25,7 +25,7 @@ from __future__ import annotations
 import datetime as dt
 
 from . import ci_observation, host_drivers
-from .ci_observation import _valid_ci_run
+from .ci_observation import MAX_CI_WAKE_BRANCHES, _valid_ci_run
 from .ci_requests import CiRequests
 from .context_vcs_read_tools import _RECORD_ENVELOPE_KEYS
 from .fs import loads_finite, read_json
@@ -33,7 +33,7 @@ from .publication import Publication
 from .vcs import REF_STORE_NAME, read_ref
 
 #: Matches the example driver's projection and response bounds.
-MAX_BRANCHES = 8
+MAX_BRANCHES = MAX_CI_WAKE_BRANCHES
 MAX_IDENTITIES = 8
 _ROW_KEYS = frozenset({"subject", "revision", "runs", "requests", "no_head",
                        "no_evidence", "may_be_incomplete"})
@@ -263,12 +263,16 @@ def ci_head_state_facts(project, config=None) -> list:
                     or any(type(row[key]) is not bool for key in
                            ("no_head", "no_evidence", "may_be_incomplete"))):
                 return []
-            for key in ("runs", "requests"):
-                values = row[key]
-                if (not isinstance(values, list) or len(values) > MAX_IDENTITIES
-                        or any(not _identity(value) for value in values)
-                        or len(set(values)) != len(values)):
-                    return []
+            runs = row["runs"]
+            if (not isinstance(runs, list) or len(runs) > MAX_IDENTITIES
+                    or any(_valid_ci_run(value) is None for value in runs)
+                    or len(set(runs)) != len(runs)):
+                return []
+            requests = row["requests"]
+            if (not isinstance(requests, list) or len(requests) > MAX_IDENTITIES
+                    or any(not _identity(value) for value in requests)
+                    or len(set(requests)) != len(requests)):
+                return []
         return rows
     except Exception:
         return []

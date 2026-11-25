@@ -373,8 +373,8 @@ DECLARATIONS = {
     },
     'head_state_observation.py': {
         'MAX_BRANCHES': (
-            '8', 'safety',
-            'head-state observation / fixed branch-set ceiling for the driver request and returned rows'),
+            'MAX_CI_WAKE_BRANCHES', 'safety',
+            'head-state observation / configured branch-set ceiling for the driver request and returned rows'),
         'MAX_IDENTITIES': (
             '8', 'safety',
             'head-state observation / fixed unique run and request identity ceiling per returned row'),
@@ -2092,6 +2092,18 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_head_state_driver.py', '_recordings', 1, 0): (
         '2', 'format',
         'head-state driver / one publication recording pairs an identity with its recorded_at instant'),
+    ('ci_head_state_driver.py', '_run_identity', 0, 0): (
+        '128', 'safety',
+        'head-state driver / run-identity length matches the host CI validator'),
+    ('ci_head_state_driver.py', '_run_identity', 1, 0): (
+        '32', 'safety',
+        'head-state driver / reject C0 controls in run identities'),
+    ('ci_head_state_driver.py', '_run_identity', 1, 1): (
+        '127', 'safety',
+        'head-state driver / reject DEL in run identities'),
+    ('ci_head_state_driver.py', '_run_identity', 2, 0): (
+        '159', 'safety',
+        'head-state driver / reject C1 controls in run identities'),
     ('head_state_observation.py', '_identity', 1, 0): (
         '128', 'safety',
         'head-state observation / bound untrusted identities before passing them through the host seam'),
@@ -3153,6 +3165,9 @@ SYMBOLIC_BOUNDS = {
         '_SNAPSHOT_AUDIT_BYTES': frozenset({
             '_AUDIT_JSON_BYTES', 'MAX_PROJECT_GOAL_BYTES', 'MAX_SNAPSHOT_GOAL_JSON_EXPANSION'}),
     },
+    'head_state_observation.py': {
+        'MAX_BRANCHES': frozenset({'MAX_CI_WAKE_BRANCHES'}),
+    },
     'ci_observation.py': {
         'MAX_CI_WAKE_BRANCHES': frozenset({'MAX_CI_WAKE_EXTRA_BRANCHES'}),
         'MAX_CI_CHECKS_PER_BRANCH': frozenset({'DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH'}),
@@ -3484,13 +3499,13 @@ def sibling():
                   / 'drivers' / 'ci_head_state_driver.py')
         tree = ast.parse(driver.read_text(encoding='utf-8'))
         self.assertEqual(inventory(tree), {
-            'MAX_BRANCHES': '8', 'MAX_IDENTITIES': '8', 'MAX_TEXT': '128',
+            'MAX_BRANCHES': '65', 'MAX_IDENTITIES': '8', 'MAX_TEXT': '128',
             'MAX_RECEIPTS': '100', 'SUMMARY_MAX': '4096', 'DETAIL_MAX': '16384'})
         expected = {(scope, argument, occurrence): entry[0]
                     for (filename, scope, argument, occurrence), entry
                     in COMPARISON_BOUND_ARGUMENTS.items()
                     if filename == 'ci_head_state_driver.py'}
-        self.assertEqual(len(expected), 2)
+        self.assertEqual(len(expected), 6)
         self.assertEqual(comparison_argument_inventory(tree, minimum_magnitude=1), expected)
 
     def test_comparison_detector_handles_only_bounded_integer_powers(self):

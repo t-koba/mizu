@@ -10,7 +10,9 @@ import json
 import sys
 from datetime import datetime, timezone
 
-MAX_BRANCHES = 8
+# Mirrors config.MAX_CI_WAKE_EXTRA_BRANCHES + 1; this stdlib-only
+# driver cannot import the kernel configuration module.
+MAX_BRANCHES = 65
 MAX_IDENTITIES = 8
 MAX_TEXT = 128
 MAX_RECEIPTS = 100
@@ -35,6 +37,23 @@ def _text(value, *, allow_empty=False):
 def _flag(value):
     if type(value) is not bool:
         raise ValueError("Invalid head evidence flag")
+    return value
+
+
+# Same terminal-control rule as the host's ci_observation._valid_ci_run;
+# ordinary spaces are valid run identities and must survive the projection.
+_BIDI_CONTROLS = frozenset(
+    "\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069\ufeff")
+
+
+def _run_identity(value):
+    if not isinstance(value, str) or not value or len(value) > MAX_TEXT:
+        raise ValueError("Invalid CI run identity")
+    for char in value:
+        code = ord(char)
+        if code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F or char in _BIDI_CONTROLS:
+            raise ValueError("Invalid CI run identity")
     return value
 
 
@@ -143,7 +162,7 @@ def _project(branch):
     if not isinstance(run_values, list):
         raise ValueError("Invalid cleaned run identities")
     for value in run_values:
-        _text(value)
+        _run_identity(value)
     runs, runs_capped = _identity_ids(run_values)
     requests, requests_capped = _identity_ids(request_values)
     return _row(subject, head, runs, requests,

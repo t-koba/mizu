@@ -453,6 +453,9 @@ class CiHeadStateTests(Fixture):
         broken = json.loads(canonical(request))
         broken["branches"][0]["requests"] = {"items": ["x"], "incomplete": "yes"}
         bad_requests.append(broken)
+        broken = json.loads(canonical(request))
+        broken["branches"][0]["runs"] = ["run\u200b"]
+        bad_requests.append(broken)
         for bad in bad_requests:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 driver.observed_head_state(bad)
@@ -502,16 +505,27 @@ class CiHeadStateTests(Fixture):
                     self.assertEqual(head_state_observation.ci_head_state_facts(
                         self.project, self.config), [])
 
-    def test_extra_configured_branches_are_not_partially_projected(self):
-        self.receipt(SHA)
+    def test_every_configured_branch_is_projected_up_to_the_ceiling(self):
+        receipt = self.receipt(SHA)
+        identity = self.request(SHA, receipt)
+        extras = [f"branch-{index}" for index in range(64)]
         config = dataclasses.replace(self.config, vcs={
             **self.config.vcs, "ci_branch": "main",
-            "ci_wake_extra_branches": [f"branch-{index}" for index in range(8)]})
-        self.assertEqual(head_state_observation.head_state_request(self.project, config), {})
-        with patch("mizu.host_drivers.observe") as observe:
-            self.assertEqual(head_state_observation.ci_head_state_facts(
-                self.project, config), [])
-            observe.assert_not_called()
+            "ci_wake_extra_branches": extras})
+        rows = self.facts_through_host(config)
+        self.assertEqual(len(rows), 65)
+        self.assertEqual([row["subject"] for row in rows], sorted(["main", *extras]))
+        main = next(row for row in rows if row["subject"] == "main")
+        self.assertEqual(main, driver._row("main", SHA, requests=[identity]))
+        self.assertTrue(all(row["no_head"] for row in rows if row is not main))
+        self.assertLessEqual(len(canonical({"branches": rows})), driver.DETAIL_MAX)
+
+    def test_valid_run_identity_with_a_space_is_projected(self):
+        self.receipt(SHA)
+        self.cache(successes={"main": [
+            {"sha": SHA, "check": "unit", "run": "run one"}]})
+        self.assertEqual(self.facts_through_host(), [driver._row(
+            "main", SHA, runs=["run one"])])
 
     def test_prompt_consumes_the_observation_wake_edge_it_creates(self):
         from mizu.runtime import Context
