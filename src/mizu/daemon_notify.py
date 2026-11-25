@@ -331,18 +331,34 @@ class _Inotify:
             self._fd = -1
 
 
+_KQ_NOTE_NAMES = (
+    "KQ_NOTE_DELETE", "KQ_NOTE_WRITE", "KQ_NOTE_EXTEND", "KQ_NOTE_ATTRIB",
+    "KQ_NOTE_LINK", "KQ_NOTE_RENAME", "KQ_NOTE_REVOKE",
+)
+
+
+def kqueue_vnode_flags(select_module=select) -> tuple[int, int]:
+    """Return (flags, fflags) for a kqueue EVFILT_VNODE registration.
+
+    Python exposes vnode notes as KQ_NOTE_*; the KQ_VNODE_* spelling has no
+    attributes, which silently registers no change events. The select namespace
+    is an argument so the mapping can be tested without a macOS kqueue.
+    """
+    flags = (select_module.KQ_EV_ADD | select_module.KQ_EV_ENABLE
+             | select_module.KQ_EV_CLEAR)
+    fflags = 0
+    for name in _KQ_NOTE_NAMES:
+        fflags |= getattr(select_module, name, 0)
+    return flags, fflags
+
+
 class _Kqueue:
     def __init__(self, directories, files, stop):
         self._kq = select.kqueue()
         self._fds: list[int] = []
         self._stop_fd = stop.fileno()
         failed: list[Path] = []
-        flags = select.KQ_EV_ADD | select.KQ_EV_CLEAR
-        fflags = 0
-        for name in ("KQ_VNODE_DELETE", "KQ_VNODE_WRITE", "KQ_VNODE_EXTEND",
-                     "KQ_VNODE_ATTRIB", "KQ_VNODE_LINK", "KQ_VNODE_RENAME",
-                     "KQ_VNODE_REVOKE"):
-            fflags |= getattr(select, name, 0)
+        flags, fflags = kqueue_vnode_flags(select)
         try:
             for path in (*directories, *files):
                 fd = None

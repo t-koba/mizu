@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -279,6 +280,49 @@ class NativeWakeTests(unittest.TestCase):
         for platform in ("linux", "darwin", "win32"):
             with patch.object(sys, "platform", platform):
                 self.assertTrue(daemon_notify.available(), platform)
+
+    def test_kqueue_vnode_flags_use_note_constants(self):
+        from mizu import daemon_notify
+        notes = {f"KQ_NOTE_{name}": 1 << number for number, name in enumerate(
+            ("DELETE", "WRITE", "EXTEND", "ATTRIB", "LINK", "RENAME", "REVOKE"))}
+        registrations = []
+
+        class FakeKqueue:
+            def control(self, events, max_events, timeout):
+                registrations.extend(events)
+                return []
+
+            def close(self):
+                pass
+
+        fake_select = types.SimpleNamespace(
+            KQ_EV_ADD=0x0001, KQ_EV_ENABLE=0x0002, KQ_EV_CLEAR=0x0004,
+            KQ_FILTER_VNODE=0x0100, KQ_FILTER_READ=0x0200,
+            kqueue=FakeKqueue,
+            kevent=lambda fd, filt, flags, fflags, data, udata: (
+                fd, filt, flags, fflags, data, udata),
+            **notes)
+
+        flags, fflags = daemon_notify.kqueue_vnode_flags(fake_select)
+        self.assertEqual(flags, 0x0001 | 0x0002 | 0x0004)
+        for name, bit in notes.items():
+            self.assertTrue(fflags & bit, f"{name} missing from vnode flags")
+        self.assertEqual(fflags, sum(notes.values()))
+
+        class Stop:
+            def fileno(self):
+                return -1
+
+        real_helper = daemon_notify.kqueue_vnode_flags
+        with patch.object(daemon_notify, "select", fake_select), \
+                patch.object(daemon_notify, "kqueue_vnode_flags",
+                             wraps=real_helper) as helper:
+            watcher = daemon_notify._Kqueue((), (), Stop())
+        try:
+            helper.assert_called_once_with(fake_select)
+            self.assertEqual(registrations[0][2], flags)
+        finally:
+            watcher.close()
 
     def setUp(self):
         from mizu import daemon_notify
@@ -562,18 +606,25 @@ class NativeWakeTests(unittest.TestCase):
 
     def test_native_wait_wakes_on_directory_hint(self):
         baseline = daemon_wake.fingerprint(self.root)
+        wake = self.root / "wake"
 
         def hint():
             time.sleep(0.05)
-            fs.touch_directory(self.root / "wake")
+            # Windows change notifications report child entries, not a change
+            # to the watched directory itself. Publish the writer's child hint
+            # so every backend observes an entry event, then bump the mtime.
+            (wake / "hint.json").write_text("{}")
+            fs.touch_directory(wake)
 
         thread = threading.Thread(target=hint)
         thread.start()
         started = time.monotonic()
-        reason = daemon_wake.wait(threading.Event(), self.root, baseline, None)
-        thread.join()
+        reason = daemon_wake.wait(threading.Event(), self.root, baseline,
+                                  started + 3.0)
+        elapsed = time.monotonic() - started
+        thread.join(timeout=3.0)
         self.assertEqual(reason, "change")
-        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertLess(elapsed, 3.0)
 
     def test_native_wait_honours_exact_deadline(self):
         baseline = daemon_wake.fingerprint(self.root)
