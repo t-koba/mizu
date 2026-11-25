@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from support import Fixture
 from mizu import daemon_runtime, runtime
 from mizu.errors import Busy
+from mizu.work_item_waits import next_deadline
 
 
 class DaemonRuntimeOwnershipTests(Fixture):
@@ -561,11 +562,17 @@ class DaemonRuntimeOwnershipTests(Fixture):
             return datetime.fromtimestamp(wall + seconds, timezone.utc).isoformat()
 
         Items.rows = [
-            {"holder": "worker", "wait": {"kind": "deadline", "at": at(600)}},
-            {"holder": "worker", "wait": {"kind": "deadline", "at": at(-60)}},  # already due
-            {"holder": "auditor", "wait": {"kind": "deadline", "at": at(60)}},  # another role's
-            {"holder": "worker", "wait": {"kind": "code_change", "digest": "x"}},
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "deadline", "at": at(600)}},
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "deadline", "at": at(-60)}},  # already due
+            {"status": "blocked", "holder": "auditor",
+             "wait": {"kind": "deadline", "at": at(60)}},  # another role's
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "code_change", "digest": "x"}},
         ]
+        expected = next_deadline(Items(), "worker", now=wall)
+        self.assertIsNotNone(expected)
         with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
               patch.object(daemon_runtime.time, "time", return_value=wall),
               patch("mizu.probes.next_deadline", return_value=None),
@@ -573,7 +580,42 @@ class DaemonRuntimeOwnershipTests(Fixture):
               patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
               patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False)):
             self.assertEqual(daemon_runtime._wake_deadline(
-                self.config, Stub(), "sample", "worker", 0.0), 1600.0)
+                self.config, Stub(), "sample", "worker", 0.0),
+                mono + (expected - wall))
+
+    def test_work_item_deadline_helper_owns_kind_time_and_visibility(self):
+        wall = 1795600000.0
+
+        def at(seconds):
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(wall + seconds, timezone.utc).isoformat()
+
+        class Store:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def current_items(self, *, statuses=None):
+                self.statuses = statuses
+                return self.rows
+
+        rows = [
+            {"status": "blocked", "holder": None,
+             "wait": {"kind": "deadline", "at": at(90)}},
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "deadline", "at": at(30)}},
+            {"status": "blocked", "holder": "auditor",
+             "wait": {"kind": "deadline", "at": at(1)}},
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "code_change", "digest": "x"}},
+            {"status": "blocked", "holder": "worker",
+             "wait": {"kind": "deadline", "at": at(-5)}},
+        ]
+        store = Store(rows)
+        self.assertEqual(next_deadline(store, "worker", now=wall), wall + 30)
+        self.assertEqual(store.statuses, ("blocked",))
+        self.assertEqual(next_deadline(store, "auditor", now=wall), wall + 1)
+        self.assertEqual(next_deadline(store, "observer", now=wall), wall + 90)
+        self.assertEqual(next_deadline(store, None, now=wall), wall + 1)
 
     def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
         # A paused deployment with a due wait used to reload config and re-arm a

@@ -31,7 +31,8 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import work_item_retirement
 from .work_item_waits import (normalize_wait, stored_wait, liveness, blocked_start,
-                              blocked_age, holder_only, ci_wait_identity)
+                              blocked_age, holder_only, ci_wait_identity,
+                              visible_to_role)
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      CompletionEvidence, PublicationEvidence)
@@ -1512,13 +1513,8 @@ class WorkItems:
             if order_fingerprint:
                 leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope")])
                 order_sum = (order_sum + int(digest(leaf), 16)) % (1 << 256)
-            if ready_only and role_name is not None:
-                if item["status"] == "open":
-                    if item.get("holder") not in (None, role_name):
-                        continue
-                elif item.get("holder") != role_name and not (
-                        item["status"] == "blocked" and item.get("holder") is None):
-                    continue
+            if ready_only and not visible_to_role(item, role_name):
+                continue
             # Operational effective status only: the raw ledger record stays
             # blocked with its wait, but holder-only waits have no external
             # resolver, so read projections treat the item as ordinary

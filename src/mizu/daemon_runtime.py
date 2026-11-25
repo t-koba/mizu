@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-from datetime import datetime
 import math
 import signal
 import threading
@@ -28,6 +27,7 @@ from .vcs_poll_policy import (upstream_fetch_due, vcs_poll_enabled,
 from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_proposal_poll import poll_proposals
 from .vcs_upstream_poll import poll_upstream
+from .work_item_waits import next_deadline as next_work_item_deadline
 
 #: Shared per-project poll lock name (state filename lives in ci_observation).
 POLL_LOCK_NAME = "vcs-poll.lock"
@@ -207,20 +207,14 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
                     and wake_at > now_wall):
                 candidates.append(now_mono + (wake_at - now_wall))
             # A work item blocked on a deadline becomes ready when the clock
-            # passes it, with no file change; its time is an exact deadline.
+            # passes it, with no file change. The wait module owns the kind,
+            # timestamp format and role visibility; this is only a wake fact.
             try:
                 if control.get("armed") and not control.get("paused"):
-                    for item in project.work_items.current_items(statuses=("blocked",)):
-                        wait = item.get("wait") or {}
-                        if (wait.get("kind") != "deadline"
-                                or item.get("holder") not in (None, role_name)):
-                            continue
-                        try:
-                            at = datetime.fromisoformat(wait["at"]).timestamp()
-                        except (KeyError, TypeError, ValueError):
-                            continue
-                        if at > now_wall:
-                            candidates.append(now_mono + (at - now_wall))
+                    at = next_work_item_deadline(
+                        project.work_items, role_name, now=now_wall)
+                    if at is not None and at > now_wall:
+                        candidates.append(now_mono + (at - now_wall))
             except (MizuError, OSError, ValueError, TypeError, AttributeError):
                 pass
             # The one bounded external observation (docs/kernel.md): CI and

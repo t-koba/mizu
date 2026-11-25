@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .smoke_refs import validate_refs
@@ -27,6 +28,58 @@ def evaluated(wait) -> bool:
     return True
 
 
+def visible_to_role(item, role_name) -> bool:
+    """Whether a named role may see this item's readiness in a bounded page."""
+    if role_name is None:
+        return True
+    if item["status"] == "open":
+        return item.get("holder") in (None, role_name)
+    return item.get("holder") == role_name or (
+        item["status"] == "blocked" and item.get("holder") is None)
+
+
+def deadline_moment(wait):
+    """The timezone-aware ISO instant of a stored deadline, or None if invalid."""
+    if not isinstance(wait, dict):
+        return None
+    at = wait.get("at")
+    try:
+        moment = dt.datetime.fromisoformat(at) if isinstance(at, str) else None
+    except (ValueError, TypeError):
+        return None
+    return moment if moment is not None and moment.tzinfo is not None else None
+
+
+def next_deadline(store, role_name, *, now=None) -> float | None:
+    """Earliest future deadline epoch instant among blocked items visible to a role.
+
+    Owns the deadline kind, timestamp format and role visibility so callers
+    never reinterpret a stored wait. Unreadable state yields None; this is a
+    wake candidate, never completion authority.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        rows = store.current_items(statuses=("blocked",))
+    except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError,
+            TypeError, AttributeError, KeyError, RecursionError):
+        return None
+    earliest = None
+    for item in rows:
+        if not isinstance(item, dict) or not visible_to_role(item, role_name):
+            continue
+        wait = item.get("wait")
+        if not isinstance(wait, dict) or wait.get("kind") != "deadline":
+            continue
+        moment = deadline_moment(wait)
+        if moment is None:
+            continue
+        at = moment.timestamp()
+        if at > now and (earliest is None or at < earliest):
+            earliest = at
+    return earliest
+
+
 def _normalize_wait(wait, baseline=None) -> dict | None:
     """Normalize a raw work-item wait; capture the code baseline only on creation."""
     if wait is None:
@@ -37,12 +90,8 @@ def _normalize_wait(wait, baseline=None) -> dict | None:
     if kind not in WAIT_KINDS:
         raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
     if kind == "deadline":
-        at = wait.get("at")
-        try:
-            moment = dt.datetime.fromisoformat(at) if isinstance(at, str) else None
-        except (ValueError, TypeError):
-            moment = None
-        if moment is None or moment.tzinfo is None:
+        moment = deadline_moment(wait)
+        if moment is None:
             raise Denied("A deadline wait needs a timezone-aware ISO timestamp in 'at'")
         if set(wait) - {"kind", "at"}:
             raise Denied("A deadline wait takes only at")
@@ -217,7 +266,10 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreach
             state, reason = work_item_state(store, wait["subject"])
             return result(state, reason)
         if kind == "deadline":
-            due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
+            moment = deadline_moment(wait)
+            if moment is None:
+                return result("unknown", "unreadable")
+            due = dt.datetime.now(dt.timezone.utc) >= moment
             if holder is not None and writer_roles == {holder}:
                 self_resolvable = "sole_holder_deadline"
         else:
