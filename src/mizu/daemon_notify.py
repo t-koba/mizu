@@ -169,8 +169,14 @@ class _StopBridge:
 
         # A raw thread avoids Thread.__init__'s own Event() allocation: some
         # callers replace threading.Event wholesale, and a shared "started"
-        # Event would make Thread.start() raise spuriously.
-        self._thread = _thread.start_new_thread(monitor, ())
+        # Event would make Thread.start() raise spuriously. Ownership starts at
+        # the first acquisition: a failed start must release the pipe or event
+        # rather than leaving it to a context manager that was never entered.
+        try:
+            self._thread = _thread.start_new_thread(monitor, ())
+        except BaseException:
+            self.close()
+            raise
 
     def fileno(self) -> int:
         return self._read_fd
@@ -210,31 +216,36 @@ class _Inotify:
         libc.inotify_add_watch.restype = ctypes.c_int
         libc.inotify_rm_watch.argtypes = (ctypes.c_int, ctypes.c_int)
         self._libc = libc
-        self._fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
-        if self._fd < 0:
-            raise OSError(ctypes.get_errno(), "inotify_init1")
+        self._fd = -1
         self._wds: set[int] = set()
         self._filtered: dict[int, frozenset] = {}
-        failed: list[Path] = []
-        for directory in directories:
-            names = interesting.get(os.fspath(directory))
-            mask = _IN_FILTERED if names is not None else _IN_ALL
-            wd = libc.inotify_add_watch(self._fd, os.fsencode(directory), mask)
-            if wd < 0:
-                failed.append(directory)
-            else:
-                self._wds.add(wd)
-                if names is not None:
-                    self._filtered[wd] = names
-        for path in files:
-            wd = libc.inotify_add_watch(self._fd, os.fsencode(path), _IN_ALL)
-            if wd < 0:
-                failed.append(path)
-            else:
-                self._wds.add(wd)
-        self.unwatchable = tuple(failed)
-        self._stop = stop_bridge(stop)
-        self._stop_fd = self._stop.fileno()
+        self._stop_fd = stop.fileno()
+        fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1")
+        self._fd = fd
+        try:
+            failed: list[Path] = []
+            for directory in directories:
+                names = interesting.get(os.fspath(directory))
+                mask = _IN_FILTERED if names is not None else _IN_ALL
+                wd = libc.inotify_add_watch(self._fd, os.fsencode(directory), mask)
+                if wd < 0:
+                    failed.append(directory)
+                else:
+                    self._wds.add(wd)
+                    if names is not None:
+                        self._filtered[wd] = names
+            for path in files:
+                wd = libc.inotify_add_watch(self._fd, os.fsencode(path), _IN_ALL)
+                if wd < 0:
+                    failed.append(path)
+                else:
+                    self._wds.add(wd)
+            self.unwatchable = tuple(failed)
+        except BaseException:
+            self.close()
+            raise
 
     def _drain(self) -> bool:
         """Consume all pending events; report only a relevant one."""
@@ -293,6 +304,7 @@ class _Kqueue:
     def __init__(self, directories, files, stop):
         self._kq = select.kqueue()
         self._fds: list[int] = []
+        self._stop_fd = stop.fileno()
         failed: list[Path] = []
         flags = select.KQ_EV_ADD | select.KQ_EV_CLEAR
         fflags = 0
@@ -300,23 +312,28 @@ class _Kqueue:
                      "KQ_VNODE_ATTRIB", "KQ_VNODE_LINK", "KQ_VNODE_RENAME",
                      "KQ_VNODE_REVOKE"):
             fflags |= getattr(select, name, 0)
-        for path in (*directories, *files):
-            try:
-                fd = os.open(os.fspath(path),
-                             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                             | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK)
-                event = select.kevent(fd, select.KQ_FILTER_VNODE, flags, fflags, 0, 0)
-                self._kq.control([event], 0, 0)
-            except OSError:
-                if path in directories:
-                    failed.append(path)
-                continue
-            self._fds.append(fd)
-        self.unwatchable = tuple(failed)
-        self._stop = stop_bridge(stop)
-        self._stop_fd = self._stop.fileno()
-        self._kq.control([select.kevent(self._stop_fd, select.KQ_FILTER_READ,
-                                        flags, 0, 0, 0)], 0, 0)
+        try:
+            for path in (*directories, *files):
+                fd = None
+                try:
+                    fd = os.open(os.fspath(path),
+                                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                 | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK)
+                    event = select.kevent(fd, select.KQ_FILTER_VNODE, flags, fflags, 0, 0)
+                    self._kq.control([event], 0, 0)
+                except OSError:
+                    if fd is not None:
+                        os.close(fd)
+                    if path in directories:
+                        failed.append(path)
+                    continue
+                self._fds.append(fd)
+            self.unwatchable = tuple(failed)
+            self._kq.control([select.kevent(self._stop_fd, select.KQ_FILTER_READ,
+                                            flags, 0, 0, 0)], 0, 0)
+        except BaseException:
+            self.close()
+            raise
 
     def wait(self, deadline):
         timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -367,24 +384,27 @@ class _WinChange:
         k32.WaitForMultipleObjects.restype = wintypes.DWORD
         self._k32 = k32
         self._handles: list[int] = []
-        failed: list[Path] = []
-        # MAXIMUM_WAIT_OBJECTS is 64; reserve one slot for the stop event.
-        for directory in directories[:62]:
-            is_narrow = os.fspath(directory) in narrow
-            notify_filter = self._ENTRY_FILTER if is_narrow else self._FILTER
-            subtree = False if is_narrow else True
-            handle = k32.FindFirstChangeNotificationW(
-                os.fspath(directory), subtree, notify_filter)
-            if handle in (None, self._INVALID):
-                failed.append(directory)
-            else:
-                self._handles.append(handle)
-        failed.extend(directories[62:])
-        self.unwatchable = tuple(failed)
-        self._stop = stop_bridge(stop)
-        self._stop_event = self._stop.event()
-        self._wait_handles = (wintypes.HANDLE * (len(self._handles) + 1))(
-            *self._handles, self._stop_event)
+        self._stop_event = stop.event()
+        try:
+            failed: list[Path] = []
+            # MAXIMUM_WAIT_OBJECTS is 64; reserve one slot for the stop event.
+            for directory in directories[:62]:
+                is_narrow = os.fspath(directory) in narrow
+                notify_filter = self._ENTRY_FILTER if is_narrow else self._FILTER
+                subtree = False if is_narrow else True
+                handle = k32.FindFirstChangeNotificationW(
+                    os.fspath(directory), subtree, notify_filter)
+                if handle in (None, self._INVALID):
+                    failed.append(directory)
+                else:
+                    self._handles.append(handle)
+            failed.extend(directories[62:])
+            self.unwatchable = tuple(failed)
+            self._wait_handles = (wintypes.HANDLE * (len(self._handles) + 1))(
+                *self._handles, self._stop_event)
+        except BaseException:
+            self.close()
+            raise
 
     def wait(self, deadline):
         if deadline is None:
@@ -414,12 +434,16 @@ class Watcher:
         files = watch_files(root, config_file, config_files)
         interesting = _interesting_names(root, config_file, config_files)
         narrow = frozenset({os.fspath(root)}) if root is not None else frozenset()
+        # The bridge is the daemon's shared lifetime resource: acquire it before
+        # any backend descriptor so a failure at either boundary can be rolled
+        # back by its own owner without leaking a HANDLE or fd.
+        bridge = stop_bridge(stop)
         if sys.platform.startswith("linux"):
-            self._backend = _Inotify(directories, files, stop, interesting)
+            self._backend = _Inotify(directories, files, bridge, interesting)
         elif sys.platform == "darwin":
-            self._backend = _Kqueue(directories, files, stop)
+            self._backend = _Kqueue(directories, files, bridge)
         elif sys.platform == "win32":
-            self._backend = _WinChange(directories, files, stop, narrow)
+            self._backend = _WinChange(directories, files, bridge, narrow)
         else:
             raise OSError(f"no native change-notification backend for {sys.platform}")
         self.unwatchable = self._backend.unwatchable

@@ -377,6 +377,89 @@ class NativeWakeTests(unittest.TestCase):
             interior = [m for m in marks if marks[0] + 0.05 < m < marks[-1] - 0.05]
             self.assertEqual(interior, [])
 
+    def _fd_count(self):
+        for candidate in ("/proc/self/fd", "/dev/fd"):
+            directory = Path(candidate)
+            if directory.is_dir():
+                return len(os.listdir(directory))
+        self.skipTest("no descriptor inventory on this platform")
+
+    def test_stop_bridge_acquired_before_any_backend_descriptor(self):
+        # A constructor that fails before acquiring the bridge must not have
+        # opened a backend descriptor at all, on any supported platform.
+        from mizu import daemon_notify
+        order = []
+
+        def fail(stop):
+            order.append("bridge")
+            raise OSError("boom")
+
+        class Backend:
+            def __init__(self, *args, **kwargs):
+                order.append("backend")
+
+        with patch.object(daemon_notify, "stop_bridge", fail):
+            for platform_name, backend in (
+                    ("linux", "_Inotify"), ("darwin", "_Kqueue"),
+                    ("win32", "_WinChange")):
+                order.clear()
+                with patch.object(sys, "platform", platform_name), \
+                        patch.object(daemon_notify, backend, Backend):
+                    with self.assertRaises(OSError):
+                        daemon_notify.Watcher(self.root, None, (), threading.Event())
+                self.assertEqual(order, ["bridge"], platform_name)
+
+    def test_thread_start_failure_releases_stop_bridge_descriptors(self):
+        if sys.platform.startswith("win32"):
+            self.skipTest("POSIX descriptors only")
+        from mizu import daemon_notify
+        self._fd_count()
+        gc.collect()
+        before = self._fd_count()
+        with patch.object(daemon_notify._thread, "start_new_thread",
+                          side_effect=OSError("no thread")):
+            for _ in range(5):
+                with self.assertRaises(OSError):
+                    daemon_notify.stop_bridge(threading.Event())
+        gc.collect()
+        self.assertLessEqual(self._fd_count() - before, 1)
+
+    def test_failed_inotify_registration_releases_descriptor(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("Linux inotify only")
+        import ctypes
+        from mizu import daemon_notify
+        self._fd_count()
+        before = self._fd_count()
+        real_cdll = ctypes.CDLL
+
+        class FailingWatch:
+            argtypes = None
+            restype = None
+
+            def __call__(self, *args):
+                raise OSError("watch registration failed")
+
+        class FailingLibc:
+            def __init__(self, *args, **kwargs):
+                self._real = real_cdll(*args, **kwargs)
+
+            def __getattr__(self, name):
+                if name == "inotify_add_watch":
+                    return FailingWatch()
+                return getattr(self._real, name)
+
+        class Bridge:
+            def fileno(self):
+                return -1
+
+        bridge = Bridge()
+        with patch.object(daemon_notify.ctypes, "CDLL", FailingLibc):
+            for _ in range(5):
+                with self.assertRaises(OSError):
+                    daemon_notify._Inotify((self.root,), (), bridge, {})
+        self.assertLessEqual(self._fd_count() - before, 1)
+
     def test_watcher_rotations_share_one_stop_bridge(self):
         from mizu import daemon_notify
         stop = threading.Event()
