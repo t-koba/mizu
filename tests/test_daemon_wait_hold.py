@@ -98,5 +98,53 @@ class WaitingHoldTests(Fixture):
         self.assertEqual(dispatched_at[:2], [1000.0, 1060.0])
 
 
+class AdmissionQueueWakeTests(Fixture):
+    def test_busy_dispatch_watches_the_admission_queue_until_it_runs(self):
+        from mizu.errors import Busy
+        config = self.config
+        clock = StopClock(limit=3)
+        project = Mock()
+        project.control.return_value = {"armed": True}
+        outcomes = [Busy("Older execution admission is ready"), {"status": "done"}]
+        watched = []
+
+        def run(*args, **kwargs):
+            outcome = outcomes.pop(0) if outcomes else {"status": "done"}
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        def wait(stop, root, baseline, deadline, poll=None, config_file=None, config_files=()):
+            watched.append(tuple(config_files))
+            stop.wait(1.0)
+            return "stop" if stop.is_set() else "change"
+
+        with (patch("mizu.runtime.threading.Event", return_value=clock),
+              patch("mizu.runtime.signal.signal"),
+              patch("mizu.daemon_runtime.lock", return_value=nullcontext()),
+              patch("mizu.daemon_runtime.load", return_value=config),
+              patch("mizu.daemon_runtime.Project", return_value=project),
+              patch("mizu.runtime.editor.ingest"),
+              patch("mizu.daemon_runtime.should_run", return_value=True),
+              patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
+              patch("mizu.probes.service_due", return_value=None),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
+              patch("mizu.daemon_runtime.daemon_wake.fingerprint", return_value=("state",)),
+              patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=wait),
+              patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
+              patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
+              patch("mizu.runtime.Engine") as engine,
+              patch("builtins.print")):
+            engine.return_value.run.side_effect = run
+            daemon(config, "sample", "worker")
+        queue = config.data / "slots" / "queue.json"
+        # Refused as Busy: the next wait also watches the admission queue.
+        self.assertIn(queue, watched[0])
+        # The pass that runs still waits on the inputs it armed with; after
+        # it, the queue is no longer one of the daemon's inputs.
+        self.assertNotIn(queue, watched[2])
+
+
 if __name__ == "__main__":
     unittest.main()

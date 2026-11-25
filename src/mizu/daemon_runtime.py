@@ -233,6 +233,11 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             # deadline. Without a change, the role is not re-dispatched early.
             hold_fingerprint = None
             spacing_after = 0.0
+            # A dispatch refused as Busy waits its turn in the shared execution
+            # admission queue, which lives outside the project root. While it
+            # waits, the queue file joins the watched inputs, so a peer leaving
+            # the queue wakes this daemon instead of a wait deadline hours away.
+            admission_wait = False
             while not stop.is_set():
                 # Arm before the first state read: anything that changes during
                 # the read/render/pass leaves a fingerprint difference that ends
@@ -244,6 +249,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 # fingerprint also covers edits that add or remove includes.
                 config_path = config.file
                 input_files = tuple(config.input_files) or (config_path,)
+                if admission_wait:
+                    input_files += (config.data / "slots" / "queue.json",)
                 baseline = daemon_wake.fingerprint(root, config_path,
                                                    config_files=input_files)
                 if hold_fingerprint is not None and baseline != hold_fingerprint:
@@ -302,6 +309,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
                                         enqueue_busy=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
+                        admission_wait = False
                         delay = role_daemon_spacing_seconds(config, role)
                         # Cooldown gates dispatch, never just a state read.
                         spacing_after = time.monotonic() + delay
@@ -316,6 +324,12 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                             hold_fingerprint = daemon_wake.fingerprint(
                                 project.root, config_path, config_files=input_files)
                 except (MizuError, OSError, ValueError) as exc:
+                    admission_wait = isinstance(exc, Busy)
+                    queue_file = config.data / "slots" / "queue.json"
+                    if admission_wait and queue_file not in input_files:
+                        # This pass's baseline predates the queue watch, so the
+                        # wait below returns at once and the next pass arms it.
+                        input_files += (queue_file,)
                     print(json.dumps({"event": "run_deferred", "error": str(exc), "time": now()}), flush=True)
                 # A single interruptible wait covers every idle path: a state
                 # change, an explicit deadline, or a stop request ends it.
