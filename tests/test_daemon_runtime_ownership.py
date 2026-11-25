@@ -435,7 +435,8 @@ class DaemonRuntimeOwnershipTests(Fixture):
         mono, wall = 1000.0, 2000.0
 
         class Snaps:
-            state = {"state": "wait", "wake_at": wall - 5.0}
+            # The real shape: the outcome is in `outcome`; `state` is the role's free-text note.
+            state = {"outcome": "wait", "state": "Now: waiting for CI.", "wake_at": wall - 5.0}
 
             @classmethod
             def get(cls):
@@ -460,7 +461,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
             self.assertIsNone(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0))
             # Future wait while paused: unactionable, block on a real change.
-            Snaps.state = {"state": "wait", "wake_at": wall + 30.0}
+            Snaps.state = {"outcome": "wait", "state": "Now: waiting for CI.", "wake_at": wall + 30.0}
             Stub.control_value = {"armed": True, "paused": True}
             self.assertIsNone(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0))
@@ -472,6 +473,10 @@ class DaemonRuntimeOwnershipTests(Fixture):
             Stub.control_value = {"armed": True, "paused": False}
             self.assertEqual(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0), 1030.0)
+            # Only a wait outcome sets that deadline, whatever the free-text state says.
+            Snaps.state = {"outcome": "continue", "state": "wait", "wake_at": wall + 30.0}
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
 
     def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
         # A paused deployment with a due wait used to reload config and re-arm a

@@ -200,7 +200,7 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
             snapshot = project.snapshots.get()
             wake_at = snapshot.get("wake_at")
             if (control.get("armed") and not control.get("paused")
-                    and snapshot.get("state") == "wait"
+                    and snapshot.get("outcome") == "wait"
                     and type(wake_at) in (int, float) and math.isfinite(wake_at)
                     and wake_at > now_wall):
                 candidates.append(now_mono + (wake_at - now_wall))
