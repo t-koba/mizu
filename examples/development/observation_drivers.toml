@@ -3,10 +3,19 @@
 # operator owns its argv and decides whether to declare it in a deployment.
 # Declaring it switches the vcs_read ci_costs projection to the generic host
 # seam; without it that op fails closed.
+# Declaring ci_head_state moves the fixed prompt head facts to this
+# operator-owned program; without it those facts stay empty.
 
 [drivers.ci_costs]
 command = ["python3", "examples/development/drivers/ci_costs_driver.py"]
 observation_queue = "ci_observations"
+timeout_seconds = 20
+max_bytes = 524288
+diagnostic_bytes = 0
+
+[drivers.ci_head_state]
+command = ["python3", "examples/development/drivers/ci_head_state_driver.py"]
+observation_queue = "ci_head_state_observations"
 timeout_seconds = 20
 max_bytes = 524288
 diagnostic_bytes = 0

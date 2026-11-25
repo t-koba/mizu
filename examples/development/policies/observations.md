@@ -31,11 +31,22 @@ policy and may refer to the observation from work it is doing. The declared
 it a dispatch page and receipt-validated status results, and the report in the
 observation's `detail` is external-untrusted evidence, never a billing record.
 
+## `ci_head_state_observations`
+
+A message here says what a driver observed about CI branch heads: the head
+revision, exact-head run and request identities, and whether the evidence is
+incomplete. It has the same envelope and trust rule as the other queues. The
+declared `ci_head_state` driver projects the fixed `ci_head_state` prompt rows
+from raw host evidence; its `detail` is external-untrusted evidence, never a
+verdict or a CI request, and the prompt key is empty when the driver is absent
+or refuses.
+
 ## Authority
 
 These queues are declarations only: adding them to a deployment changes no
 runtime authority. Declaring a `[drivers.<name>]` table does select a command;
-the example `ci_costs` driver switches the cost computation out of the kernel,
-while the remaining dedicated version-control and CI code stays authoritative
+the example `ci_costs` and `ci_head_state` drivers switch the cost computation
+and head-state facts out of the kernel, while the remaining dedicated
+version-control and CI code stays authoritative
 until its own cutover slices delete it. The command shipped under `drivers/`
 is illustrative; an operator supplies and reviews the command actually used.

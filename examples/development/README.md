@@ -18,20 +18,21 @@ nothing here specially.
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4
   userland: the runtime reads these names from configuration, not source.
-- `observation_queues.toml` declares `vcs_observations` and `ci_observations`:
-  bounded queues to which observation drivers append what they find. Their
-  bodies are opaque plain objects; the schemas enforce bounds and required
-  fields only. It is stage-5 userland. A config written by `mizu configure`
-  already declares `ci_observations`, so including this fragment there would
-  duplicate that key.
-- `observation_drivers.toml` declares the illustrative `ci_costs` driver in
-  `drivers/ci_costs_driver.py`. Including it switches the `vcs_read ci_costs`
-  join to that operator-owned program through the generic host seam; without
-  it the op fails closed. A config written by `mizu configure` already carries
-  a working `ci_costs` declaration with an absolute, CWD-independent command
-  pointing at a durable copy of the program in the config dir, so including
-  this fragment there would duplicate the key. A manually authored or migrated
-  config must copy the reviewed program into a durable location that survives
+- `observation_queues.toml` declares `vcs_observations`, `ci_observations` and
+  `ci_head_state_observations`: bounded queues to which observation drivers
+  append what they find. Their bodies are opaque plain objects; the schemas
+  enforce bounds and required fields only. It is stage-5 userland. A config
+  written by `mizu configure` already declares the two CI queues, so including
+  this fragment there would duplicate those keys.
+- `observation_drivers.toml` declares the illustrative `ci_costs` and
+  `ci_head_state` drivers in `drivers/`. Including them switches the
+  `vcs_read ci_costs` join and the fixed `ci_head_state` prompt facts to those
+  operator-owned programs through the generic host seam; without them the op
+  fails closed and those facts are empty. A config written by `mizu configure`
+  already carries working declarations with absolute, CWD-independent commands
+  pointing at durable copies of the programs in the config dir, so including
+  this fragment there would duplicate the keys. A manually authored or migrated
+  config must copy each reviewed program into a durable location that survives
   upgrades (the config dir) and declare an absolute argv of its Python
   interpreter and that copy, as `mizu configure` generates; the relative argv
   here is illustrative only, not a usable deployment command.
@@ -43,10 +44,11 @@ nothing here specially.
 authoritative until cutover; declaring the queue changes no runtime authority.
 
 Declaring the observation queues changes no runtime authority on its own. The
-separate driver declaration does switch the CI cost computation to an
-operator-owned program; the remaining dedicated version-control and CI code
-stays authoritative until later cutover and deletion slices. Only the example
-driver command is shipped here; a deployment supplies its own.
+separate driver declarations do switch the CI cost computation and the fixed
+head-state facts to operator-owned programs; their dedicated kernel modules are
+gone. The remaining dedicated version-control and CI code stays authoritative
+until later cutover and deletion slices. Only the example driver commands are
+shipped here; a deployment supplies its own.
 
 Roles reach the queues with the `queues` capability and the `queue_*` and
 `message_*` tools. The operator and host tooling use
@@ -57,8 +59,8 @@ the message it refers to.
 
 To use it in a manually authored config, include the files and add the policy
 part. For a config created by `mizu configure`, omit the two observation
-fragments: its `ci_observations` queue and `ci_costs` driver are already
-declared and including them again is a duplicate-key error.
+fragments: its CI observation queues and drivers are already declared and
+including them again is a duplicate-key error.
 
 ```toml
 include = ["../examples/development/queues.toml", "../examples/development/outcomes.toml",

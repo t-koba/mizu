@@ -219,8 +219,11 @@ fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
 `model_catalog.py` includes its observation-store schema version at magnitude 1.
 The operator-owned example `ci_costs_driver.py` keeps its five join-conflict
-comparisons under the focused magnitude-1 slice, and its observation envelope
-bounds are inventoried from the driver file itself. This is not a global
+comparisons under the focused magnitude-1 slice, and `ci_head_state_driver.py`
+keeps its two evidence-pair arity comparisons there; both drivers' observation
+envelope bounds are inventoried from their files. The new
+`head_state_observation.py` host caller inventories its branch/identity ceilings
+and its focused identity and observation-shape comparisons. This is not a global
 numeric comparison linter.
 """
 import ast
@@ -367,6 +370,14 @@ DECLARATIONS = {
         'MAX_CI_WAKE_ROWS': (
             'MAX_CI_CACHE_ROWS', 'safety',
             'CI observation / wake projection covers the entire fixed per-map safety envelope'),
+    },
+    'head_state_observation.py': {
+        'MAX_BRANCHES': (
+            '8', 'safety',
+            'head-state observation / fixed branch-set ceiling for the driver request and returned rows'),
+        'MAX_IDENTITIES': (
+            '8', 'safety',
+            'head-state observation / fixed unique run and request identity ceiling per returned row'),
     },
     'web_worker.py': {
         'MAX_WEB_WORKER_INPUT_BYTES': (
@@ -1578,7 +1589,7 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
-    'ci_head_state.py': {},
+    'head_state_observation.py': {},
     'process.py': {
         ('_stop_io', 'thread.join', 'timeout', 0): (
             'max(0.0, deadline - time.monotonic())', 'safety',
@@ -2075,6 +2086,18 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_costs_driver.py', 'observed_costs', 1, 4): (
         '1', 'safety',
         'CI cost projection / expose a namespace only when exactly one is attested'),
+    ('ci_head_state_driver.py', '_page', 1, 0): (
+        '2', 'format',
+        'head-state driver / one exact-head receipt pair holds one publication identity and SHA'),
+    ('ci_head_state_driver.py', '_recordings', 1, 0): (
+        '2', 'format',
+        'head-state driver / one publication recording pairs an identity with its recorded_at instant'),
+    ('head_state_observation.py', '_identity', 1, 0): (
+        '128', 'safety',
+        'head-state observation / bound untrusted identities before passing them through the host seam'),
+    ('head_state_observation.py', 'ci_head_state_facts', 1, 0): (
+        '1', 'format',
+        'head-state observation / one driver observation with one JSON detail is required'),
     ('ci_observation.py', 'ci_cache_limits', 0, 0): (
         '1', 'configured policy',
         'CI cache / branch retention follows the positive [vcs].ci_cache_max_branches range'),
@@ -3454,6 +3477,20 @@ def sibling():
                     in COMPARISON_BOUND_ARGUMENTS.items()
                     if filename == 'ci_costs_driver.py'}
         self.assertEqual(len(expected), 5)
+        self.assertEqual(comparison_argument_inventory(tree, minimum_magnitude=1), expected)
+
+    def test_ci_head_state_driver_keeps_its_projection_and_envelope_bounds(self):
+        driver = (Path(__file__).resolve().parents[1] / 'examples' / 'development'
+                  / 'drivers' / 'ci_head_state_driver.py')
+        tree = ast.parse(driver.read_text(encoding='utf-8'))
+        self.assertEqual(inventory(tree), {
+            'MAX_BRANCHES': '8', 'MAX_IDENTITIES': '8', 'MAX_TEXT': '128',
+            'MAX_RECEIPTS': '100', 'SUMMARY_MAX': '4096', 'DETAIL_MAX': '16384'})
+        expected = {(scope, argument, occurrence): entry[0]
+                    for (filename, scope, argument, occurrence), entry
+                    in COMPARISON_BOUND_ARGUMENTS.items()
+                    if filename == 'ci_head_state_driver.py'}
+        self.assertEqual(len(expected), 2)
         self.assertEqual(comparison_argument_inventory(tree, minimum_magnitude=1), expected)
 
     def test_comparison_detector_handles_only_bounded_integer_powers(self):

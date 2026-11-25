@@ -103,9 +103,11 @@ class ConfigWiring(Fixture):
     def test_config_carries_parsed_drivers(self):
         from dataclasses import fields, replace
         self.assertIn("drivers", {field.name for field in fields(type(self.config))})
-        # A generated config carries the working ci_costs declaration.
-        self.assertEqual(set(self.config.drivers), {"ci_costs"})
+        # A generated config carries both working observation declarations.
+        self.assertEqual(set(self.config.drivers), {"ci_costs", "ci_head_state"})
         self.assertEqual(self.config.drivers["ci_costs"].observation_queue, "ci_observations")
+        self.assertEqual(self.config.drivers["ci_head_state"].observation_queue,
+                         "ci_head_state_observations")
         parsed = parse_drivers({"probe": declaration(observation_queue="notices")},
                                self.config.queues)
         config = replace(self.config, drivers=parsed)
@@ -131,7 +133,7 @@ class ConfigWiring(Fixture):
         with self.assertRaisesRegex(ConfigError, "observation_queue"):
             load(self.file)
         self.file.write_text(original + '\n[drivers]\n')
-        self.assertEqual(set(load(self.file).drivers), {"ci_costs"})
+        self.assertEqual(set(load(self.file).drivers), {"ci_costs", "ci_head_state"})
 
 
 class Invocation(Fixture):
