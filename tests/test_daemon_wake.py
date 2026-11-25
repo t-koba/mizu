@@ -9,7 +9,7 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mizu import daemon_wake, fs
 
@@ -580,6 +580,27 @@ class NativeWakeTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     daemon_notify._Inotify((self.root,), (), bridge, {})
         self.assertLessEqual(self._fd_count() - before, 1)
+
+    def test_windows_wait_does_not_rearm_a_discarded_handle(self):
+        from mizu import daemon_notify
+
+        watcher = object.__new__(daemon_notify._WinChange)
+        watcher._handles = [11]
+        watcher._wait_handles = (11, 12)
+        watcher._k32 = Mock(spec=("WaitForMultipleObjects",))
+        watcher._k32.WaitForMultipleObjects.return_value = \
+            watcher._WAIT_OBJECT_0
+        watcher.wait(time.monotonic() + 0.01)
+        self.assertEqual([name for name, _, _ in watcher._k32.mock_calls],
+                         ["WaitForMultipleObjects"])
+
+        watcher._k32 = Mock(spec=("WaitForMultipleObjects",))
+        watcher._k32.WaitForMultipleObjects.return_value = \
+            watcher._WAIT_FAILED
+        with patch.object(daemon_notify.ctypes, "get_last_error",
+                          lambda: 5, create=True):
+            with self.assertRaises(OSError):
+                watcher.wait(None)
 
     def test_watcher_rotations_share_one_stop_bridge(self):
         from mizu import daemon_notify

@@ -427,8 +427,6 @@ class _WinChange:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.FindFirstChangeNotificationW.argtypes = (wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD)
         k32.FindFirstChangeNotificationW.restype = wintypes.HANDLE
-        k32.FindNextChangeNotification.argtypes = (wintypes.HANDLE,)
-        k32.FindNextChangeNotification.restype = wintypes.BOOL
         k32.FindCloseChangeNotification.argtypes = (wintypes.HANDLE,)
         k32.CloseHandle.argtypes = (wintypes.HANDLE,)
         k32.WaitForMultipleObjects.argtypes = (
@@ -467,9 +465,12 @@ class _WinChange:
             len(self._wait_handles), self._wait_handles, False, millis)
         if result == self._WAIT_FAILED:
             raise OSError(ctypes.get_last_error(), "WaitForMultipleObjects")
-        index = result - self._WAIT_OBJECT_0
-        if 0 <= index < len(self._handles):
-            self._k32.FindNextChangeNotification(self._handles[index])
+        # One wait per watcher: daemon_wake closes this watcher and registers
+        # fresh handles before the next fingerprint reconciliation, so the
+        # signalled handle is never waited on again. FindFirstChangeNotification
+        # registrations remain one-shot by design; re-arming here would target
+        # a discarded handle and turn a healthy watch into a false degraded
+        # sleep.
 
     def close(self):
         # The stop event belongs to the shared bridge, not to this watcher.
