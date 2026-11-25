@@ -432,7 +432,8 @@ class DaemonRuntimeOwnershipTests(Fixture):
         mono, wall = 1000.0, 2000.0
 
         class Snaps:
-            state = {"state": "wait", "wake_at": wall - 5.0}
+            # The real shape: the outcome is in `outcome`; `state` is the role's free-text note.
+            state = {"outcome": "wait", "state": "Now: waiting for CI.", "wake_at": wall - 5.0}
 
             @classmethod
             def get(cls):
@@ -457,7 +458,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
             self.assertIsNone(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0))
             # Future wait while paused: unactionable, block on a real change.
-            Snaps.state = {"state": "wait", "wake_at": wall + 30.0}
+            Snaps.state = {"outcome": "wait", "state": "Now: waiting for CI.", "wake_at": wall + 30.0}
             Stub.control_value = {"armed": True, "paused": True}
             self.assertIsNone(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0))
@@ -469,6 +470,54 @@ class DaemonRuntimeOwnershipTests(Fixture):
             Stub.control_value = {"armed": True, "paused": False}
             self.assertEqual(daemon_runtime._wake_deadline(
                 self.config, project, "sample", "worker", 0.0), 1030.0)
+            # Only a wait outcome sets that deadline, whatever the free-text state says.
+            Snaps.state = {"outcome": "continue", "state": "wait", "wake_at": wall + 30.0}
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
+
+    def test_next_vcs_poll_is_a_wake_deadline(self):
+        import json
+        import tempfile
+        from mizu.ci_observation import POLL_STATE_FILE
+        mono, wall = 1000.0, 2000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class Snaps:
+                @classmethod
+                def get(cls):
+                    return {"outcome": "continue", "state": "Now: waiting for CI."}
+
+            class Stub:
+                snapshots = Snaps()
+                control_value = {"armed": True, "paused": False}
+
+                @classmethod
+                def control(cls):
+                    return cls.control_value
+
+            Stub.root = root
+            with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
+                  patch.object(daemon_runtime.time, "time", return_value=wall),
+                  patch("mizu.probes.next_deadline", return_value=None),
+                  patch.object(daemon_runtime.check_jobs, "deferral", return_value=None),
+                  patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
+                  patch.object(daemon_runtime, "vcs_poll_enabled", return_value=True),
+                  patch.object(daemon_runtime, "vcs_poll_interval", return_value=300.0)):
+                # Never polled: due now (one-second floor).
+                self.assertEqual(daemon_runtime._wake_deadline(
+                    self.config, Stub(), "sample", "worker", 0.0), 1001.0)
+                # Polled 100 s ago with a 300 s interval: wake in 200 s.
+                (root / POLL_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+                (root / POLL_STATE_FILE).write_text(json.dumps(
+                    {"last_fetch": wall - 100, "last_poll": wall - 100,
+                     "last_ci_wait_poll": wall - 100, "last_proposal_poll": None}))
+                self.assertEqual(daemon_runtime._wake_deadline(
+                    self.config, Stub(), "sample", "worker", 0.0), 1200.0)
+                # Paused: no poll runs, so no poll deadline.
+                Stub.control_value = {"armed": True, "paused": True}
+                self.assertIsNone(daemon_runtime._wake_deadline(
+                    self.config, Stub(), "sample", "worker", 0.0))
 
     def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
         # A paused deployment with a due wait used to reload config and re-arm a
