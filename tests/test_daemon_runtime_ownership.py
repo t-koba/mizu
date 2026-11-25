@@ -522,6 +522,49 @@ class DaemonRuntimeOwnershipTests(Fixture):
                 self.assertIsNone(daemon_runtime._wake_deadline(
                     self.config, Stub(), "sample", "worker", 0.0))
 
+    def test_blocked_deadline_item_is_a_wake_deadline(self):
+        mono, wall = 1000.0, 1795600000.0
+
+        class Snaps:
+            @classmethod
+            def get(cls):
+                return {"outcome": "continue", "state": "Now."}
+
+        class Items:
+            rows = []
+
+            def current_items(self, *, statuses=None):
+                assert statuses == ("blocked",)
+                return self.rows
+
+        class Stub:
+            root = None
+            snapshots = Snaps()
+            work_items = Items()
+
+            @staticmethod
+            def control():
+                return {"armed": True, "paused": False}
+
+        def at(seconds):
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(wall + seconds, timezone.utc).isoformat()
+
+        Items.rows = [
+            {"holder": "worker", "wait": {"kind": "deadline", "at": at(600)}},
+            {"holder": "worker", "wait": {"kind": "deadline", "at": at(-60)}},  # already due
+            {"holder": "auditor", "wait": {"kind": "deadline", "at": at(60)}},  # another role's
+            {"holder": "worker", "wait": {"kind": "code_change", "digest": "x"}},
+        ]
+        with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
+              patch.object(daemon_runtime.time, "time", return_value=wall),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch.object(daemon_runtime.check_jobs, "deferral", return_value=None),
+              patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
+              patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False)):
+            self.assertEqual(daemon_runtime._wake_deadline(
+                self.config, Stub(), "sample", "worker", 0.0), 1600.0)
+
     def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
         # A paused deployment with a due wait used to reload config and re-arm a
         # 0.1s deadline ~10x/s with zero admissions. It must settle instead.
