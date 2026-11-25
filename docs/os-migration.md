@@ -83,6 +83,14 @@ before/after CPU receipts for this change are retained path-free in
 `docs/evidence/native-wake-cpu-evidence.json`; verify them with
 `scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json --repo <checkout>`.
 
+The stage-5 cutover that moves fixed `ci_head_state` prompt facts to an
+operator observation driver was measured on the same settled shape and
+harness digest before and after; both receipts report `proc-per-pid`
+`steady_state_observed=true` idle medians of 0.0 s and one-change medians of
+0.08 s and 0.07 s. They are retained path-free in
+`docs/evidence/ci-head-state-cpu-evidence.json`; verify them with
+`scripts/verify-stage4-cpu-evidence.py --record docs/evidence/ci-head-state-cpu-evidence.json --repo <checkout>`.
+
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
 | 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader cursors and acknowledgement, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |
