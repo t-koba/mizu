@@ -517,6 +517,19 @@ class DaemonRuntimeOwnershipTests(Fixture):
                      "last_ci_wait_poll": wall - 100, "last_proposal_poll": None}))
                 self.assertEqual(daemon_runtime._wake_deadline(
                     self.config, Stub(), "sample", "worker", 0.0), 1200.0)
+                # A stale proposal stamp is only a deadline while that stream is
+                # enabled: a disabled proposal poll never advances it.
+                (root / POLL_STATE_FILE).write_text(json.dumps(
+                    {"last_fetch": wall - 100, "last_poll": wall - 100,
+                     "last_ci_wait_poll": wall - 100, "last_proposal_poll": wall - 1000}))
+                with patch.object(daemon_runtime, "vcs_poll_proposals_enabled",
+                                  return_value=False):
+                    self.assertEqual(daemon_runtime._wake_deadline(
+                        self.config, Stub(), "sample", "worker", 0.0), 1200.0)
+                with patch.object(daemon_runtime, "vcs_poll_proposals_enabled",
+                                  return_value=True):
+                    self.assertEqual(daemon_runtime._wake_deadline(
+                        self.config, Stub(), "sample", "worker", 0.0), 1001.0)
                 # Paused: no poll runs, so no poll deadline.
                 Stub.control_value = {"armed": True, "paused": True}
                 self.assertIsNone(daemon_runtime._wake_deadline(
