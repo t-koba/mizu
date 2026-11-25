@@ -17,9 +17,10 @@ MAX_IDENTITIES = 8
 MAX_TEXT = 128
 MAX_RECEIPTS = 100
 SUMMARY_MAX = 4096
-# 65 branches x 16 identities x 128 characters plus JSON overhead, rounded
-# up to a power of two; the kernel call envelope is 512 KiB by default.
-DETAIL_MAX = 262144
+# 65 branches x 16 identities x 128 characters x 4 UTF-8 bytes plus JSON
+# overhead; serialized as UTF-8, not escaped ASCII. The example driver
+# declares a 2 MiB kernel call envelope.
+DETAIL_MAX = 1048576
 _BRANCH_KEYS = frozenset({
     "subject", "head", "head_unreadable", "head_page_scan_stopped", "exact_page",
     "recordings", "runs", "cache_incomplete", "branch_incomplete", "requests"})
@@ -190,8 +191,9 @@ def main() -> None:
     """Read one request and report one bounded observation on stdout."""
     request = json.load(sys.stdin)
     report = observed_head_state(request)
-    detail = json.dumps(report, separators=(",", ":"), allow_nan=False)
-    if len(detail) > DETAIL_MAX:
+    detail = json.dumps(report, ensure_ascii=False, separators=(",", ":"),
+                        allow_nan=False)
+    if len(detail.encode("utf-8")) > DETAIL_MAX:
         raise SystemExit("head-state report exceeds the observation detail bound")
     identities = sum(len(row["runs"]) + len(row["requests"]) for row in report["branches"])
     summary = (f"Observed {identities} head evidence identities "

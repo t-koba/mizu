@@ -3500,7 +3500,7 @@ def sibling():
         tree = ast.parse(driver.read_text(encoding='utf-8'))
         self.assertEqual(inventory(tree), {
             'MAX_BRANCHES': '65', 'MAX_IDENTITIES': '8', 'MAX_TEXT': '128',
-            'MAX_RECEIPTS': '100', 'SUMMARY_MAX': '4096', 'DETAIL_MAX': '262144'})
+            'MAX_RECEIPTS': '100', 'SUMMARY_MAX': '4096', 'DETAIL_MAX': '1048576'})
         expected = {(scope, argument, occurrence): entry[0]
                     for (filename, scope, argument, occurrence), entry
                     in COMPARISON_BOUND_ARGUMENTS.items()

@@ -69,7 +69,7 @@ diagnostic_bytes = 0
 command = ["python3", "examples/development/drivers/ci_head_state_driver.py"]
 observation_queue = "ci_head_state_observations"
 timeout_seconds = 20
-max_bytes = 524288
+max_bytes = 2097152
 diagnostic_bytes = 0
 """
 

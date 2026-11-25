@@ -17,5 +17,6 @@ diagnostic_bytes = 0
 command = ["python3", "examples/development/drivers/ci_head_state_driver.py"]
 observation_queue = "ci_head_state_observations"
 timeout_seconds = 20
-max_bytes = 524288
+# The 65-branch worst case is 128-char UTF-8 identities across two arrays.
+max_bytes = 2097152
 diagnostic_bytes = 0

@@ -126,7 +126,7 @@ class ObservationDeclaration(unittest.TestCase):
                 "python3", "examples/development/drivers/ci_head_state_driver.py"))
             self.assertEqual((head.observation_queue, head.timeout_seconds,
                               head.max_bytes, head.diagnostic_bytes),
-                             (HEAD_QUEUE, 20.0, 524288, 0))
+                             (HEAD_QUEUE, 20.0, 2097152, 0))
             for name in ("vcs_observations", "ci_observations", HEAD_QUEUE):
                 self.assertIn("host", config.queues[name].write)
 
@@ -148,7 +148,7 @@ class ObservationDeclaration(unittest.TestCase):
             "command": ["python3", "examples/development/drivers/ci_head_state_driver.py"],
             "observation_queue": HEAD_QUEUE,
             "timeout_seconds": 20,
-            "max_bytes": 524288,
+            "max_bytes": 2097152,
             "diagnostic_bytes": 0})
 
     def test_schema_bounds_are_enforced_on_host_append(self):
