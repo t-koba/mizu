@@ -355,6 +355,9 @@ class NativeWakeTests(unittest.TestCase):
             missing = root / "missing.json"
             opened = []
             next_fd = [1000]
+            # Windows has no O_DIRECTORY; the fake namespace supplies a
+            # non-zero sentinel so the derived flag is testable everywhere.
+            directory_bit = 0x10000
 
             def synthetic_open(path, flags, *args, **kwargs):
                 opened.append((Path(path), flags))
@@ -367,7 +370,7 @@ class NativeWakeTests(unittest.TestCase):
             def fake_os_namespace(with_nonblock):
                 values = dict(O_RDONLY=os.O_RDONLY,
                               O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
-                              O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
+                              O_DIRECTORY=directory_bit,
                               open=synthetic_open, close=lambda fd: None,
                               fspath=os.fspath)
                 if with_nonblock:
@@ -384,7 +387,6 @@ class NativeWakeTests(unittest.TestCase):
                                            if path == root)
                     file_flags = next(flags for path, flags in opened
                                       if path == regular)
-                    directory_bit = getattr(os, "O_DIRECTORY", 0)
                     self.assertTrue(directory_flags & directory_bit)
                     self.assertFalse(file_flags & directory_bit)
                 finally:
