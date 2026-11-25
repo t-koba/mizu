@@ -103,20 +103,35 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
         # notification so a settled daemon does no periodic work. An explicit
         # poll keeps the portable loop below (and every existing assertion).
         from . import daemon_notify
-        if daemon_notify.available():
-            try:
-                return _wait_native(stop, root, baseline, deadline,
-                                    config_file, config_files)
-            except OSError as exc:
-                # A backend that cannot be armed at all is reported as a fact;
-                # only then is the portable loop used, never as a silent default.
-                print(json.dumps({"event": "native_wake_unavailable",
-                                  "error": str(exc)}), flush=True)
-    else:
-        return _wait_portable(stop, root, baseline, deadline, poll,
-                              config_file, config_files)
-    return _wait_portable(stop, root, baseline, deadline, POLL_SECONDS,
+        if not daemon_notify.available():
+            print(json.dumps({"event": "native_wake_unavailable",
+                              "reason": "unsupported_platform"}), flush=True)
+            return _wait_signal_only(stop, deadline)
+        try:
+            return _wait_native(stop, root, baseline, deadline,
+                                config_file, config_files)
+        except OSError as exc:
+            # An unusable backend is a reported fact, never a reason to start
+            # the fixed-cadence loop: that would restore the idle overhead this
+            # wait exists to remove. Stop and the exact deadline still apply.
+            print(json.dumps({"event": "native_wake_unavailable",
+                              "error": str(exc)}), flush=True)
+            return _wait_signal_only(stop, deadline)
+    return _wait_portable(stop, root, baseline, deadline, poll,
                           config_file, config_files)
+
+
+def _wait_signal_only(stop, deadline) -> str:
+    """Block on stop or the exact deadline alone: no change detection, no ticks."""
+    while not stop.is_set():
+        if deadline is None:
+            stop.wait()
+            return "stop"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "deadline"
+        stop.wait(remaining)
+    return "stop"
 
 
 def _wait_portable(stop, root, baseline, deadline, poll, config_file, config_files) -> str:

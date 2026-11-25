@@ -450,6 +450,45 @@ class NativeWakeTests(unittest.TestCase):
         self.assertEqual(reason, "deadline")
         self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
 
+    def test_arming_failure_does_not_resume_periodic_polling(self):
+        # A reported native failure must not silently become the one-second
+        # loop: an idle daemon still makes no interior stat calls or wakeups.
+        from mizu import daemon_notify
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+        deadline = time.monotonic() + 0.25
+        original = Path.stat
+        marks = []
+
+        def counting(self, *a, **k):
+            marks.append(time.monotonic())
+            return original(self, *a, **k)
+
+        with patch.object(daemon_notify, "stop_bridge",
+                          side_effect=OSError("boom")), \
+                patch.object(daemon_wake, "POLL_SECONDS", 0.02), \
+                patch.object(Path, "stat", counting):
+            reason = daemon_wake.wait(stop, self.root, baseline, deadline)
+        self.assertEqual(reason, "deadline")
+        self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
+        self.assertLessEqual(len(marks), 1, "interior fingerprint reads after arming failure")
+
+    def test_arming_failure_still_honours_stop(self):
+        from mizu import daemon_notify
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+
+        def stopper():
+            time.sleep(0.05)
+            stop.set()
+
+        thread = threading.Thread(target=stopper)
+        thread.start()
+        with patch.object(daemon_notify, "stop_bridge", side_effect=OSError("boom")):
+            reason = daemon_wake.wait(stop, self.root, baseline, None)
+        thread.join()
+        self.assertEqual(reason, "stop")
+
     def test_native_wait_wakes_on_stop(self):
         baseline = daemon_wake.fingerprint(self.root)
         stop = threading.Event()
