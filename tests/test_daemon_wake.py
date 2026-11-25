@@ -496,6 +496,55 @@ class NativeWakeTests(unittest.TestCase):
         after = len(os.listdir(fd_dir))
         self.assertLessEqual(after - before, 1)
 
+    def test_restored_include_parent_and_file_wake_without_deadline(self):
+        # The parent is absent when the daemon settles. Creating it must wake
+        # and re-arm coverage of the new directory; restoring the fragment
+        # inside it must then wake on its own, with no timer or unrelated hint.
+        from mizu import daemon_notify
+        cfg = self.root / "config.toml"
+        cfg.write_text("idle_seconds = 60\n")
+        fragment = self.root / "inc" / "fragment.toml"
+        baseline = daemon_wake.fingerprint(self.root, cfg, config_files=(cfg, fragment))
+        self.assertIn(("config", str(fragment), None), baseline)
+
+        stop = threading.Event()
+        result = []
+        bridges = []
+        real = daemon_notify.Watcher
+        armed = threading.Event()
+        arms = []
+
+        class Spy(real):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                bridges.append(daemon_notify.stop_bridge(stop))
+                arms.append(1)
+                armed.set()
+
+        self.addCleanup(stop.set)
+        # This test owns its bridge explicitly so a later descriptor-retirement
+        # test is not racing the finalizer of a stop event kept alive by a thread.
+        self.addCleanup(lambda: bridges[0].close() if bridges else None)
+
+        def waiter():
+            result.append(daemon_wake.wait(stop, self.root, baseline, None,
+                                           config_file=cfg, config_files=(cfg, fragment)))
+
+        thread = threading.Thread(target=waiter)
+        with patch.object(daemon_notify, "Watcher", Spy):
+            thread.start()
+            self.assertTrue(armed.wait(3.0), "initial watcher was not armed")
+            first_arms = len(arms)
+            (self.root / "inc").mkdir()
+            deadline = time.monotonic() + 3.0
+            while len(arms) <= first_arms and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(len(arms), first_arms, "no re-arm after parent appeared")
+            fragment.write_text("[limits]\nidle_seconds = 15\n")
+            thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive(), "wait did not wake on restored fragment")
+        self.assertEqual(result, ["change"])
+
     def test_native_wait_wakes_on_watched_file_change(self):
         baseline = daemon_wake.fingerprint(self.root)
 

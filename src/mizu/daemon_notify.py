@@ -64,6 +64,31 @@ def available() -> bool:
     return sys.platform.startswith(("linux", "darwin", "win32"))
 
 
+def config_ancestors(config_file: Path | None, config_files=()) -> dict[str, frozenset]:
+    """Existing ancestors of config inputs whose next component is missing.
+
+    A config parent that does not exist at settle time cannot itself be
+    watched. The nearest existing ancestor can: its first missing component is
+    the name that, once created, extends watch coverage into the restored
+    subtree. Genuinely unwatchable ancestors are reported by the backend.
+    """
+    out: dict[str, set[str]] = {}
+    for path in (config_file, *config_files):
+        if path is None:
+            continue
+        current = Path(path).parent
+        missing: list[str] = []
+        while not current.is_dir():
+            missing.append(current.name)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        if missing and current.is_dir():
+            out.setdefault(os.fspath(current), set()).add(missing[-1])
+    return {key: frozenset(names) for key, names in out.items()}
+
+
 def watch_dirs(root: Path | None, config_file: Path | None,
                config_files=()) -> tuple[Path, ...]:
     """Directories whose entry changes can perturb the fingerprint."""
@@ -78,6 +103,10 @@ def watch_dirs(root: Path | None, config_file: Path | None,
         if key not in seen:
             seen.add(key)
             out.append(parent)
+    for key in config_ancestors(config_file, config_files):
+        if key not in seen:
+            seen.add(key)
+            out.append(Path(key))
     if root is not None:
         for path in (root, *(root / name for name in WATCHED_DIRS)):
             key = os.fspath(path)
@@ -124,6 +153,8 @@ def _interesting_names(root, config_file, config_files) -> dict[str, frozenset]:
         key = os.fspath(Path(path).parent)
         name = os.fspath(Path(path).name)
         names[key] = names.get(key, frozenset()) | {name}
+    for key, missing in config_ancestors(config_file, config_files).items():
+        names[key] = names.get(key, frozenset()) | missing
     return names
 
 
@@ -433,7 +464,9 @@ class Watcher:
         directories = watch_dirs(root, config_file, config_files)
         files = watch_files(root, config_file, config_files)
         interesting = _interesting_names(root, config_file, config_files)
-        narrow = frozenset({os.fspath(root)}) if root is not None else frozenset()
+        ancestors = config_ancestors(config_file, config_files)
+        narrow = (frozenset({os.fspath(root)}) if root is not None else frozenset())
+        narrow = narrow | frozenset(ancestors)
         # The bridge is the daemon's shared lifetime resource: acquire it before
         # any backend descriptor so a failure at either boundary can be rolled
         # back by its own owner without leaking a HANDLE or fd.

@@ -152,16 +152,21 @@ def _wait_portable(stop, root, baseline, deadline, poll, config_file, config_fil
 
 def _wait_native(stop, root, baseline, deadline, config_file, config_files) -> str:
     from . import daemon_notify
-    with daemon_notify.Watcher(root, config_file, config_files, stop) as watcher:
-        if watcher.unwatchable:
-            print(json.dumps({"event": "native_wake_unwatchable",
-                              "paths": [p.name for p in watcher.unwatchable]}),
-                  flush=True)
-        while not stop.is_set():
-            if fingerprint(root, config_file, config_files=config_files) != baseline:
-                return "change"
-            now = time.monotonic()
-            if deadline is not None and now >= deadline:
-                return "deadline"
-            watcher.wait(deadline)
+    while not stop.is_set():
+        # A wake is a hint, not authority. Re-arm before blocking again: a
+        # directory that first appeared on this wake must be watched before
+        # the daemon can see a file restored inside it.
+        with daemon_notify.Watcher(root, config_file, config_files, stop) as watcher:
+            if watcher.unwatchable:
+                print(json.dumps({"event": "native_wake_unwatchable",
+                                  "paths": [p.name for p in watcher.unwatchable]}),
+                      flush=True)
+            while not stop.is_set():
+                if fingerprint(root, config_file, config_files=config_files) != baseline:
+                    return "change"
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    return "deadline"
+                watcher.wait(deadline)
+                break
     return "stop"
