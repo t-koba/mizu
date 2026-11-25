@@ -617,6 +617,45 @@ class DaemonRuntimeOwnershipTests(Fixture):
         self.assertEqual(next_deadline(store, "observer", now=wall), wall + 90)
         self.assertEqual(next_deadline(store, None, now=wall), wall + 1)
 
+    def test_paused_project_has_no_overdue_probe_timer(self):
+        mono, wall = 1000.0, 1795600000.0
+
+        class Snaps:
+            @classmethod
+            def get(cls):
+                return {"outcome": "continue", "state": "Now."}
+
+        class Items:
+            @staticmethod
+            def current_items(*, statuses=None):
+                return []
+
+        class Stub:
+            snapshots = Snaps()
+            work_items = Items()
+            control_state = {"armed": True, "paused": True}
+            control_reads = 0
+
+            def control(self):
+                self.control_reads += 1
+                return self.control_state
+
+        project = Stub()
+        with (patch.object(daemon_runtime.time, "monotonic", return_value=mono),
+              patch.object(daemon_runtime.time, "time", return_value=wall),
+              patch("mizu.probes.next_deadline", return_value=wall - 10),
+              patch.object(daemon_runtime.queue_facts, "next_delivery_at", return_value=None),
+              patch.object(daemon_runtime.check_jobs, "deferral", return_value=None),
+              patch.object(daemon_runtime, "next_work_item_deadline", return_value=None),
+              patch.object(daemon_runtime, "vcs_poll_enabled", return_value=False)):
+            self.assertIsNone(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0))
+            self.assertEqual(project.control_reads, 1)
+            project.control_state = {"armed": True, "paused": False}
+            self.assertEqual(daemon_runtime._wake_deadline(
+                self.config, project, "sample", "worker", 0.0), mono + 0.1)
+            self.assertEqual(project.control_reads, 2)
+
     def test_paused_elapsed_wait_does_not_reload_in_a_busy_loop(self):
         # A paused deployment with a due wait used to reload config and re-arm a
         # 0.1s deadline ~10x/s with zero admissions. It must settle instead.

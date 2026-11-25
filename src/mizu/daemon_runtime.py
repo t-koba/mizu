@@ -147,13 +147,23 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
     candidates: list[float] = []
     if ordinary_after > now_mono:
         candidates.append(ordinary_after)
-    try:
-        from .probes import next_deadline
-        probe_at = next_deadline(config, name)
-        if probe_at is not None:
-            candidates.append(now_mono + max(0.1, probe_at - now_wall))
-    except (MizuError, OSError, ValueError):
-        pass
+    control = {}
+    if project is not None:
+        try:
+            control = project.control()
+        except (MizuError, OSError, ValueError, TypeError, AttributeError):
+            control = {}
+    # A paused or disarmed project cannot service a recovery probe, so its
+    # overdue contribution must not supply a wake deadline. control.json is
+    # watched; resuming re-enters admission and re-arms this exact deadline.
+    if project is None or (control.get("armed") and not control.get("paused")):
+        try:
+            from .probes import next_deadline
+            probe_at = next_deadline(config, name)
+            if probe_at is not None:
+                candidates.append(now_mono + max(0.1, probe_at - now_wall))
+        except (MizuError, OSError, ValueError):
+            pass
     if delivery_cache is not None:
         cached = delivery_cache.get("baseline") == baseline
         delivery_at = delivery_cache.get("at") if cached else None
@@ -198,7 +208,6 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
             # disarmed) there is no admission to wake, so block on a real input
             # change instead: control.json is watched and a resume re-enters
             # admission, which still honours a due wait.
-            control = project.control()
             snapshot = project.snapshots.get()
             wake_at = snapshot.get("wake_at")
             if (control.get("armed") and not control.get("paused")
