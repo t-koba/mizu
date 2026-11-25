@@ -118,7 +118,12 @@ class NativeWakeCpuEvidenceTests(unittest.TestCase):
             verifier = root / copied[0]
             record = root / copied[1]
             harness = root / copied[2]
-            harness.write_bytes(harness.read_bytes().replace(b"\n", b"\r\n"))
+            # A Windows checkout may already hold CRLF bytes. Canonicalize
+            # before converting so the fixture is a CRLF copy of the
+            # script, not a double-converted one.
+            harness.write_bytes(harness.read_bytes()
+                                .replace(b"\r\n", b"\n")
+                                .replace(b"\n", b"\r\n"))
             cmd = [sys.executable, str(verifier), "--record", str(record)]
 
             first = subprocess.run(cmd, cwd=root, capture_output=True, text=True)

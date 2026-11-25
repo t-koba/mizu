@@ -22,7 +22,8 @@ from .errors import Busy, ConfigError, Denied, MizuError
 from .fs import lock, now, read_json, write_json
 from .project import Project
 from .role_admission import should_run
-from .vcs_poll_policy import upstream_fetch_due, vcs_poll_enabled, vcs_poll_interval
+from .vcs_poll_policy import (upstream_fetch_due, vcs_poll_enabled,
+                              vcs_poll_interval, vcs_poll_proposals_enabled)
 from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_proposal_poll import poll_proposals
 from .vcs_upstream_poll import poll_upstream
@@ -211,8 +212,10 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
             if (control.get("armed") and not control.get("paused")
                     and vcs_poll_enabled(config)):
                 polled = read_json(project.root / POLL_STATE_FILE, {})
-                stamps = [polled.get(key) for key in
-                          ("last_fetch", "last_poll", "last_ci_wait_poll", "last_proposal_poll")]
+                keys = ("last_fetch", "last_poll", "last_ci_wait_poll")
+                if vcs_poll_proposals_enabled(config):
+                    keys += ("last_proposal_poll",)
+                stamps = [polled.get(key) for key in keys]
                 stamps = [s for s in stamps if type(s) in (int, float) and math.isfinite(s)]
                 due = (min(stamps) + vcs_poll_interval(config)) if stamps else now_wall
                 # A poll skipped under another poller's lock leaves the stamps
