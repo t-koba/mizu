@@ -19,6 +19,7 @@ enumerates directories.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -98,7 +99,27 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
     immediately, so a change that happens during a state read cannot be lost.
     """
     if poll is None:
-        poll = POLL_SECONDS
+        # Production callers leave poll unset: use the platform's native change
+        # notification so a settled daemon does no periodic work. An explicit
+        # poll keeps the portable loop below (and every existing assertion).
+        from . import daemon_notify
+        if daemon_notify.available():
+            try:
+                return _wait_native(stop, root, baseline, deadline,
+                                    config_file, config_files)
+            except OSError as exc:
+                # A backend that cannot be armed at all is reported as a fact;
+                # only then is the portable loop used, never as a silent default.
+                print(json.dumps({"event": "native_wake_unavailable",
+                                  "error": str(exc)}), flush=True)
+    else:
+        return _wait_portable(stop, root, baseline, deadline, poll,
+                              config_file, config_files)
+    return _wait_portable(stop, root, baseline, deadline, POLL_SECONDS,
+                          config_file, config_files)
+
+
+def _wait_portable(stop, root, baseline, deadline, poll, config_file, config_files) -> str:
     while not stop.is_set():
         if fingerprint(root, config_file, config_files=config_files) != baseline:
             return "change"
@@ -111,4 +132,21 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
         if sleep_for <= 0:
             continue
         stop.wait(sleep_for)
+    return "stop"
+
+
+def _wait_native(stop, root, baseline, deadline, config_file, config_files) -> str:
+    from . import daemon_notify
+    with daemon_notify.Watcher(root, config_file, config_files, stop) as watcher:
+        if watcher.unwatchable:
+            print(json.dumps({"event": "native_wake_unwatchable",
+                              "paths": [p.name for p in watcher.unwatchable]}),
+                  flush=True)
+        while not stop.is_set():
+            if fingerprint(root, config_file, config_files=config_files) != baseline:
+                return "change"
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                return "deadline"
+            watcher.wait(deadline)
     return "stop"

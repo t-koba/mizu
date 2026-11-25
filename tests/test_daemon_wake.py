@@ -1,6 +1,8 @@
 """Portable daemon wake detection: metadata fingerprint and interruptible wait."""
 import contextlib
+import gc
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -266,6 +268,203 @@ class DaemonWakeTests(unittest.TestCase):
             daemon_wake.wait(stop, self.root, baseline, None, poll=0.01,
                              config_file=primary, config_files=(fragment,)),
             "change")
+
+
+
+class NativeWakeTests(unittest.TestCase):
+    """The no-poll path: kernel notification plus exact deadline and stop."""
+
+    def test_all_supported_platforms_have_a_backend(self):
+        from mizu import daemon_notify
+        for platform in ("linux", "darwin", "win32"):
+            with patch.object(sys, "platform", platform):
+                self.assertTrue(daemon_notify.available(), platform)
+
+    def setUp(self):
+        from mizu import daemon_notify
+        if not daemon_notify.available():
+            self.skipTest("no native wake backend on this platform")
+        self.tmp = tempfile.TemporaryDirectory(prefix="native-wake-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "wake").mkdir()
+
+    @contextlib.contextmanager
+    def _watcher_spy(self):
+        """Record whether the production native wait actually consumed a watcher."""
+        from mizu import daemon_notify
+        calls = []
+        real = daemon_notify.Watcher
+
+        class Spy(real):
+            def __init__(self, *args, **kwargs):
+                calls.append("armed")
+                super().__init__(*args, **kwargs)
+
+            def wait(self, deadline):
+                calls.append("wait")
+                return super().wait(deadline)
+
+        with patch.object(daemon_notify, "Watcher", Spy):
+            yield calls
+
+    def _assert_native_idle_wait(self):
+        # A settled daemon blocked on a notification must not stat the watched
+        # set on a timer; only the boundary fingerprint reads may touch it.
+        baseline = daemon_wake.fingerprint(self.root)
+        original = Path.stat
+        marks = []
+
+        def counting(self, *a, **k):
+            marks.append(time.monotonic())
+            return original(self, *a, **k)
+
+        stop = threading.Event()
+        deadline = time.monotonic() + 0.5
+        with self._watcher_spy() as calls, patch.object(Path, "stat", counting):
+            reason = daemon_wake.wait(stop, self.root, baseline, deadline)
+        self.assertEqual(reason, "deadline")
+        # Output equality cannot tell the native wait from the portable loop:
+        # both produce two boundary reads with this deadline. Assert the native
+        # watcher actually blocked, so the fallback cannot satisfy this test.
+        self.assertIn("wait", calls, "native watcher was not consumed (fallback ran)")
+        if len(marks) >= 2:
+            span = marks[-1] - marks[0]
+            self.assertGreater(span, 0.4)
+            interior = [m for m in marks if marks[0] + 0.05 < m < marks[-1] - 0.05]
+            self.assertEqual(interior, [])
+
+    def test_idle_native_wait_makes_no_periodic_stat_calls(self):
+        self._assert_native_idle_wait()
+
+    def test_idle_wait_assertion_rejects_forced_fallback(self):
+        # Known-bad control: with the backend declared unavailable the same
+        # assertion must fail, proving it is not satisfied by the portable loop.
+        from mizu import daemon_notify
+        with patch.object(daemon_notify, "available", return_value=False):
+            with self.assertRaises(AssertionError):
+                self._assert_native_idle_wait()
+
+    def test_native_wait_ignores_unwatched_root_churn(self):
+        # The project root churns with ledger journals. Writes to an unwatched
+        # root child must not wake the daemon or recompute the fingerprint.
+        junk = self.root / "ledger-journal.jsonl"
+        junk.write_bytes(b"x" * 10)
+        baseline = daemon_wake.fingerprint(self.root)
+        original = Path.stat
+        marks = []
+
+        def counting(self, *a, **k):
+            marks.append(time.monotonic())
+            return original(self, *a, **k)
+
+        deadline = time.monotonic() + 0.6
+
+        def churn():
+            while time.monotonic() < deadline - 0.05:
+                with open(junk, "ab") as stream:
+                    stream.write(b"x" * 10)
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=churn)
+        thread.start()
+        with patch.object(Path, "stat", counting):
+            reason = daemon_wake.wait(threading.Event(), self.root, baseline, deadline)
+        thread.join()
+        self.assertEqual(reason, "deadline")
+        self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
+        if len(marks) >= 2:
+            interior = [m for m in marks if marks[0] + 0.05 < m < marks[-1] - 0.05]
+            self.assertEqual(interior, [])
+
+    def test_watcher_rotations_share_one_stop_bridge(self):
+        from mizu import daemon_notify
+        stop = threading.Event()
+        first = daemon_notify.stop_bridge(stop)
+        self.assertIs(daemon_notify.stop_bridge(stop), first)
+        # Closing a watcher releases its native handles, not the daemon bridge.
+        baseline = daemon_wake.fingerprint(self.root)
+        with daemon_notify.Watcher(self.root, None, (), stop) as watcher:
+            watcher.wait(time.monotonic() + 0.01)
+        self.assertIs(daemon_notify.stop_bridge(stop), first)
+        stop.set()
+
+    def test_stop_bridge_descriptors_released_on_retirement(self):
+        if sys.platform.startswith("win32"):
+            self.skipTest("POSIX descriptors only")
+        fd_dir = Path("/proc/self/fd")
+        if not fd_dir.is_dir():
+            fd_dir = Path("/dev/fd")
+        if not fd_dir.is_dir():
+            self.skipTest("no descriptor inventory on this platform")
+        from mizu import daemon_notify
+        gc.collect()
+        before = len(os.listdir(fd_dir))
+        for _ in range(5):
+            stop = threading.Event()
+            with tempfile.TemporaryDirectory(prefix="native-rotate-") as d:
+                root = Path(d)
+                (root / "wake").mkdir()
+                daemon_wake.wait(stop, root, daemon_wake.fingerprint(root),
+                                 time.monotonic() + 0.01)
+            stop.set()
+            del stop
+        gc.collect()
+        after = len(os.listdir(fd_dir))
+        self.assertLessEqual(after - before, 1)
+
+    def test_native_wait_wakes_on_watched_file_change(self):
+        baseline = daemon_wake.fingerprint(self.root)
+
+        def mutate():
+            time.sleep(0.05)
+            (self.root / "control.json").write_text("{}")
+
+        thread = threading.Thread(target=mutate)
+        thread.start()
+        started = time.monotonic()
+        reason = daemon_wake.wait(threading.Event(), self.root, baseline, None)
+        thread.join()
+        self.assertEqual(reason, "change")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_native_wait_wakes_on_directory_hint(self):
+        baseline = daemon_wake.fingerprint(self.root)
+
+        def hint():
+            time.sleep(0.05)
+            fs.touch_directory(self.root / "wake")
+
+        thread = threading.Thread(target=hint)
+        thread.start()
+        started = time.monotonic()
+        reason = daemon_wake.wait(threading.Event(), self.root, baseline, None)
+        thread.join()
+        self.assertEqual(reason, "change")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_native_wait_honours_exact_deadline(self):
+        baseline = daemon_wake.fingerprint(self.root)
+        deadline = time.monotonic() + 0.2
+        reason = daemon_wake.wait(threading.Event(), self.root, baseline, deadline)
+        self.assertEqual(reason, "deadline")
+        self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
+
+    def test_native_wait_wakes_on_stop(self):
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+
+        def stopper():
+            time.sleep(0.05)
+            stop.set()
+
+        thread = threading.Thread(target=stopper)
+        thread.start()
+        started = time.monotonic()
+        reason = daemon_wake.wait(stop, self.root, baseline, None)
+        thread.join()
+        self.assertEqual(reason, "stop")
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 if __name__ == "__main__":

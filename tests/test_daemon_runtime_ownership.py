@@ -1,6 +1,7 @@
 """Daemon runtime ownership: re-export seams and delegation behavior."""
 import ast
 import dataclasses
+import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -206,20 +207,20 @@ class DaemonRuntimeOwnershipTests(Fixture):
             def counting_load(*args, **kwargs):
                 passes[0] += 1
                 return original_load(*args, **kwargs)
-            start = [0.0]
-            original_iss = daemon_runtime.threading.Event.is_set
-            def timed_is_set(self):
-                return real_time.monotonic() - start[0] > 1.2
+            stop_handlers = []
+            def capture_signal(sig, handler):
+                if callable(handler):
+                    stop_handlers.append(handler)
+                return None
             with (patch.object(daemon_runtime, "load", side_effect=counting_load),
-                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
-                  patch.object(daemon_runtime.signal, "signal"),
+                  
+                  patch.object(daemon_runtime.signal, "signal", side_effect=capture_signal),
                   patch.object(daemon_runtime, "lock", return_value=nullcontext()),
                   patch("builtins.print")):
-                start[0] = real_time.monotonic()
-                try:
-                    daemon_runtime.daemon(config, "p0", "worker")
-                finally:
-                    daemon_runtime.threading.Event.is_set = original_iss
+                stopper = threading.Timer(1.2, lambda: stop_handlers[0](None, None))
+                stopper.start()
+                daemon_runtime.daemon(config, "p0", "worker")
+                stopper.join()
             self.assertLessEqual(passes[0], 5, passes[0])
 
     def test_settled_daemon_does_not_rescan_backlog_each_deadline(self):
@@ -270,20 +271,20 @@ class DaemonRuntimeOwnershipTests(Fixture):
             real_admission = daemon_runtime.should_run
             counted = lambda *a, **k: (admissions.__setitem__(0, admissions[0] + 1),
                                        real_admission(*a, **k))[1]
-            start = [0.0]
-            original_iss = daemon_runtime.threading.Event.is_set
-            def timed_is_set(self):
-                return real_time.monotonic() - start[0] > 3.2
+            stop_handlers = []
+            def capture_signal(sig, handler):
+                if callable(handler):
+                    stop_handlers.append(handler)
+                return None
             with (patch.object(daemon_runtime, "should_run", side_effect=counted),
-                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
-                  patch.object(daemon_runtime.signal, "signal"),
+                  
+                  patch.object(daemon_runtime.signal, "signal", side_effect=capture_signal),
                   patch.object(daemon_runtime, "lock", return_value=nullcontext()),
                   patch("builtins.print")):
-                start[0] = real_time.monotonic()
-                try:
-                    daemon_runtime.daemon(config, "p0", "worker")
-                finally:
-                    daemon_runtime.threading.Event.is_set = original_iss
+                stopper = threading.Timer(3.2, lambda: stop_handlers[0](None, None))
+                stopper.start()
+                daemon_runtime.daemon(config, "p0", "worker")
+                stopper.join()
             self.assertLessEqual(admissions[0], 2, admissions[0])
 
     def test_goal_edit_wakes_a_settled_daemon(self):
@@ -333,28 +334,26 @@ class DaemonRuntimeOwnershipTests(Fixture):
                                        real_admission(*a, **k))[1]
             waits = [0]
             real_wait = daemon_runtime.daemon_wake.wait
+            # Terminate the daemon by setting its real stop event, so the
+            # native notification wait is released the same way a SIGTERM
+            # would release it in production.
+            stop_seen = []
             def edited_wait(stop, watched_root, baseline, deadline, poll=None,
                             config_file=None, config_files=()):
+                if not stop_seen:
+                    stop_seen.append(stop)
+                    threading.Timer(2.2, stop.set).start()
                 waits[0] += 1
                 if waits[0] == 2:
                     (watched_root / "PROJECT.md").write_text("a different goal\n")
                 return real_wait(stop, watched_root, baseline, deadline, poll,
                                  config_file=config_file, config_files=config_files)
-            start = [0.0]
-            original_iss = daemon_runtime.threading.Event.is_set
-            def timed_is_set(self):
-                return real_time.monotonic() - start[0] > 2.2
             with (patch.object(daemon_runtime, "should_run", side_effect=counted),
                   patch.object(daemon_runtime.daemon_wake, "wait", side_effect=edited_wait),
-                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
                   patch.object(daemon_runtime.signal, "signal"),
                   patch.object(daemon_runtime, "lock", return_value=nullcontext()),
                   patch("builtins.print")):
-                start[0] = real_time.monotonic()
-                try:
-                    daemon_runtime.daemon(config, "p0", "worker")
-                finally:
-                    daemon_runtime.threading.Event.is_set = original_iss
+                daemon_runtime.daemon(config, "p0", "worker")
             self.assertGreaterEqual(admissions[0], 3, admissions[0])
 
     def test_config_edit_wakes_a_settled_daemon(self):
@@ -403,29 +402,27 @@ class DaemonRuntimeOwnershipTests(Fixture):
                                        real_admission(*a, **k))[1]
             waits = [0]
             real_wait = daemon_runtime.daemon_wake.wait
+            # Terminate the daemon by setting its real stop event, so the
+            # native notification wait is released the same way a SIGTERM
+            # would release it in production.
+            stop_seen = []
             def edited_wait(stop, watched_root, baseline, deadline, poll=None,
                             config_file=None, config_files=()):
+                if not stop_seen:
+                    stop_seen.append(stop)
+                    threading.Timer(2.2, stop.set).start()
                 waits[0] += 1
                 if waits[0] == 2:
                     cfg.write_text(cfg.read_text().replace("idle_seconds = 60",
                                                            "idle_seconds = 6100"))
                 return real_wait(stop, watched_root, baseline, deadline, poll,
                                  config_file=config_file, config_files=config_files)
-            start = [0.0]
-            original_iss = daemon_runtime.threading.Event.is_set
-            def timed_is_set(self):
-                return real_time.monotonic() - start[0] > 2.2
             with (patch.object(daemon_runtime, "should_run", side_effect=counted),
                   patch.object(daemon_runtime.daemon_wake, "wait", side_effect=edited_wait),
-                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
                   patch.object(daemon_runtime.signal, "signal"),
                   patch.object(daemon_runtime, "lock", return_value=nullcontext()),
                   patch("builtins.print")):
-                start[0] = real_time.monotonic()
-                try:
-                    daemon_runtime.daemon(config, "p0", "worker")
-                finally:
-                    daemon_runtime.threading.Event.is_set = original_iss
+                daemon_runtime.daemon(config, "p0", "worker")
             self.assertGreaterEqual(admissions[0], 3, admissions[0])
 
     def test_expired_or_unactionable_wait_contributes_no_deadline(self):
@@ -517,20 +514,20 @@ class DaemonRuntimeOwnershipTests(Fixture):
             def counted_load(*a, **k):
                 loads[0] += 1
                 return real_load(*a, **k)
-            start = [0.0]
-            original_iss = daemon_runtime.threading.Event.is_set
-            def timed_is_set(self):
-                return real_time.monotonic() - start[0] > 2.2
+            stop_handlers = []
+            def capture_signal(sig, handler):
+                if callable(handler):
+                    stop_handlers.append(handler)
+                return None
             with (patch.object(daemon_runtime, "load", side_effect=counted_load),
-                  patch.object(daemon_runtime.threading.Event, "is_set", timed_is_set),
-                  patch.object(daemon_runtime.signal, "signal"),
+                  
+                  patch.object(daemon_runtime.signal, "signal", side_effect=capture_signal),
                   patch.object(daemon_runtime, "lock", return_value=nullcontext()),
                   patch("builtins.print")):
-                start[0] = real_time.monotonic()
-                try:
-                    daemon_runtime.daemon(config, "p0", "worker")
-                finally:
-                    daemon_runtime.threading.Event.is_set = original_iss
+                stopper = threading.Timer(2.2, lambda: stop_handlers[0](None, None))
+                stopper.start()
+                daemon_runtime.daemon(config, "p0", "worker")
+                stopper.join()
             self.assertLessEqual(loads[0], 2, loads[0])
 
     def test_only_real_facts_bound_the_wait_without_an_idle_tick(self):
