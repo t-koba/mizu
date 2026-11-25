@@ -17,7 +17,9 @@ MAX_IDENTITIES = 8
 MAX_TEXT = 128
 MAX_RECEIPTS = 100
 SUMMARY_MAX = 4096
-DETAIL_MAX = 16384
+# 65 branches x 16 identities x 128 characters plus JSON overhead, rounded
+# up to a power of two; the kernel call envelope is 512 KiB by default.
+DETAIL_MAX = 262144
 _BRANCH_KEYS = frozenset({
     "subject", "head", "head_unreadable", "head_page_scan_stopped", "exact_page",
     "recordings", "runs", "cache_incomplete", "branch_incomplete", "requests"})

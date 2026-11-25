@@ -10,7 +10,7 @@ Schema: ``ci_head_state_facts(project, config=None)`` returns a list of at most
 one plain row object per configured branch with exactly
 ``{subject, revision, runs, requests, no_head, no_evidence, may_be_incomplete}``;
 each identity array holds at most eight unique strings. Bounds: the request
-carries at most eight configured branches, one newest-first receipt page, one
+carries at most ``MAX_CI_WAKE_BRANCHES`` configured branches, one newest-first receipt page, one
 exact-head receipt page, one shared CI request scan for all exact heads and one
 cleaned poll-cache read. Trust: refs, receipts, cache rows and driver output are
 untrusted evidence; the kernel-owned queue records the observation as

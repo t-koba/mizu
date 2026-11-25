@@ -4,6 +4,8 @@ import datetime as dt
 import importlib.util
 import itertools
 import json
+import subprocess
+import sys
 import unittest
 import uuid
 from pathlib import Path
@@ -526,6 +528,36 @@ class CiHeadStateTests(Fixture):
             {"sha": SHA, "check": "unit", "run": "run one"}]})
         self.assertEqual(self.facts_through_host(), [driver._row(
             "main", SHA, runs=["run one"])])
+
+    def test_real_driver_envelope_covers_a_dense_maximum_branch_set(self):
+        branches = []
+        for index in range(driver.MAX_BRANCHES):
+            publication_id = (f"p{index:03d}" + "x" * 124)[:driver.MAX_TEXT]
+            head = f"{index + 1:040x}"
+            branches.append({
+                "subject": f"branch-{index}", "head": head,
+                "head_unreadable": False, "head_page_scan_stopped": False,
+                "exact_page": {"pairs": [[publication_id, head]],
+                               "truncated": False, "scan_stopped": False},
+                "recordings": [[publication_id, "2026-10-01T00:00:00+00:00"]],
+                "runs": [(f"run-{index}-{slot}" + "r" * 128)[:driver.MAX_TEXT]
+                         for slot in range(driver.MAX_IDENTITIES)],
+                "requests": {"items": [
+                    (f"request-{index}-{slot}" + "q" * 128)[:driver.MAX_TEXT]
+                    for slot in range(driver.MAX_IDENTITIES)],
+                    "incomplete": False},
+                "cache_incomplete": False, "branch_incomplete": False})
+        completed = subprocess.run(
+            [sys.executable, str(DRIVER)], input=json.dumps({"branches": branches}),
+            capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        observation = json.loads(completed.stdout)["observations"][0]
+        report = json.loads(observation["detail"])
+        self.assertEqual(len(report["branches"]), driver.MAX_BRANCHES)
+        self.assertTrue(all(len(row["runs"]) == driver.MAX_IDENTITIES
+                            and len(row["requests"]) == driver.MAX_IDENTITIES
+                            for row in report["branches"]))
+        self.assertLessEqual(len(observation["detail"]), driver.DETAIL_MAX)
 
     def test_prompt_consumes_the_observation_wake_edge_it_creates(self):
         from mizu.runtime import Context
