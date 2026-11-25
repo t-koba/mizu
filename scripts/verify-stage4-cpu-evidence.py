@@ -15,8 +15,9 @@ Two scopes:
   falsified numbers. A reader reproduces it with a full clone; the named
   commits are ancestors of HEAD in the public history.
 
-Prints one bounded JSON summary; exit 0 only when every reported check passes.
-The already-captured measurement is reused; this never reruns it.
+A named record can be selected with --record; the default stays the stage-4
+record. Prints one bounded JSON summary; exit 0 only when every reported check
+passes. The already-captured measurement is reused; this never reruns it.
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ PRIVATE_MARKERS = ("/tmp/", "/workspace", "/usr/", "/home/", "mizu-before-src")
 PRIVATE_ID_KEYS = ("check_id", "check_command_id", "check_result_recompute",
                    "check_log_recompute", "command_id", "source_receipt_sha256",
                    "daemon_src_sha256_recomputed_from_git_tree")
+SUPPORTED_SCHEMAS = ("stage4-cpu-evidence-v2", "native-wake-cpu-evidence-v1")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -69,14 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=pathlib.Path, default=None,
                         help="full git checkout to recompute source-tree digests from")
+    parser.add_argument("--record", type=pathlib.Path, default=None,
+                        help="evidence record to verify (defaults to stage-4)")
     args = parser.parse_args(argv)
 
-    text = RECORD.read_text(encoding="utf-8")
+    record_path = args.record or RECORD
+    text = record_path.read_text(encoding="utf-8")
     record = json.loads(text)
     checks: dict[str, bool] = {}
 
     checks["no_private_paths"] = not any(m in text for m in PRIVATE_MARKERS)
-    checks["schema"] = record["schema"] == "stage4-cpu-evidence-v2"
+    checks["schema"] = record["schema"] in SUPPORTED_SCHEMAS
     checks["no_worker_private_ids"] = not any(k in text for k in PRIVATE_ID_KEYS)
 
     harness = ROOT / record["measurement"]["harness"]

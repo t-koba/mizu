@@ -69,6 +69,16 @@ verifies record integrity, harness digest, shape and validity and explicitly ski
 the tree checks rather than asserting them from fields in the same file; the record's
 witness block carries the captured outputs and reader recipes, without worker-private IDs.
 
+The resident daemon no longer stats its fixed watched set on a one-second cadence: it blocks on
+the platform change notification (inotify, kqueue or FindFirstChangeNotification) for the same
+paths and on the exact next deadline, and does nothing in between. The project root is watched
+only for entry events, with event names filtered to the fingerprint set where the platform
+reports them, so writes to unwatched root children cannot wake the daemon. A stop bridge is
+owned once per daemon lifetime and released when the stop event is collected. The matched
+before/after CPU receipts for this change are retained path-free in
+`docs/evidence/native-wake-cpu-evidence.json`; verify them with
+`scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json --repo <checkout>`.
+
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
 | 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader cursors and acknowledgement, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |

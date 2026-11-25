@@ -1,0 +1,415 @@
+{
+  "after": {
+    "embedded_receipt": {
+      "idle": {
+        "max_seconds": 0.0,
+        "median_seconds": 0.0,
+        "min_seconds": 0.0,
+        "samples": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "idle_seconds": 1,
+      "kind": "local-daemon-cpu",
+      "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
+      "one_change": {
+        "max_seconds": 0.17,
+        "median_seconds": 0.13,
+        "min_seconds": 0.09,
+        "samples": [
+          0.13,
+          0.17,
+          0.09
+        ]
+      },
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36",
+      "projects": 2,
+      "repeats": 3,
+      "retained_messages": 200,
+      "settled": true,
+      "source": {
+        "daemon_command": [
+          "<python>",
+          "-m",
+          "mizu",
+          "--config",
+          "<synthetic>",
+          "daemon",
+          "p0",
+          "--role",
+          "worker"
+        ],
+        "daemon_src_sha256": "04f3e7f872b967359b4b965c87abbc80b6be836d23e8556da08d3cafde6db62d",
+        "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+        "launched_at_utc": "2026-11-24T23:19:04.325580+00:00",
+        "source_revision": "ea5b0b26a65a2117c660f4882d353ee4eed1d9eb",
+        "source_revision_resolved_from_git": true
+      },
+      "validity": {
+        "consecutive_quiet_probes": 2,
+        "max_settle_seconds": 30.0,
+        "method": "proc-per-pid",
+        "minimum_requested_warmup_seconds": 3.0,
+        "observed_warmup_seconds": {
+          "idle": [
+            3.502,
+            3.502,
+            4.021
+          ],
+          "one_change": [
+            3.502,
+            3.502,
+            3.502
+          ]
+        },
+        "probe_seconds": 0.25,
+        "scenarios": [
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 0,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 1,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 4.021,
+            "probes": [
+              0.12,
+              0.035,
+              0.0,
+              0.0
+            ],
+            "repeat": 2,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 0,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 1,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.502,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 2,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          }
+        ],
+        "steady_state_observed": true,
+        "steady_threshold_cpu_seconds_per_child": 0.01
+      },
+      "warmup_seconds": 3.0,
+      "window_seconds": 4.0
+    },
+    "embedded_receipt_sha256": "cd60c76e70c22521d254b98ae9a91ebded2ee9916ba54d018f02e68d0d2f34c1",
+    "source_binding": {
+      "daemon_src_sha256": "04f3e7f872b967359b4b965c87abbc80b6be836d23e8556da08d3cafde6db62d",
+      "label_verified_against_git": true,
+      "recompute_from_public_commit": {
+        "commit_is_public_ancestor_of_head": true,
+        "harness_function": "scripts/daemon-cpu.py::_source_digest",
+        "method": "git archive <source_revision> src; sha256 over sorted src/mizu/**/*.py of relpath + NUL + file bytes + NUL",
+        "note": "Any reader with a full clone of the public repository at the named source_revision can recompute daemon_src_sha256 independently; the receipt claims the value, this record does not self-assert it."
+      },
+      "source_revision": "ea5b0b26a65a2117c660f4882d353ee4eed1d9eb",
+      "source_revision_resolved_from_git": true
+    }
+  },
+  "before": {
+    "embedded_receipt": {
+      "idle": {
+        "max_seconds": 0.01,
+        "median_seconds": 0.01,
+        "min_seconds": 0.0,
+        "samples": [
+          0.0,
+          0.01,
+          0.01
+        ]
+      },
+      "idle_seconds": 1,
+      "kind": "local-daemon-cpu",
+      "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only, not a performance ceiling.",
+      "one_change": {
+        "max_seconds": 0.17,
+        "median_seconds": 0.11,
+        "min_seconds": 0.1,
+        "samples": [
+          0.17,
+          0.11,
+          0.1
+        ]
+      },
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36",
+      "projects": 2,
+      "repeats": 3,
+      "retained_messages": 200,
+      "settled": true,
+      "source": {
+        "daemon_command": [
+          "<python>",
+          "-m",
+          "mizu",
+          "--config",
+          "<synthetic>",
+          "daemon",
+          "p0",
+          "--role",
+          "worker"
+        ],
+        "daemon_src_sha256": "cd5c4acea7c499ea24c1f886b58909ace383c0ec2c31910fc7130687c2770450",
+        "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+        "launched_at_utc": "2026-11-24T17:31:29.986977+00:00",
+        "source_revision": "1b48d7e8c35083308e79e0184fea653dbd2b6da7",
+        "source_revision_resolved_from_git": true
+      },
+      "validity": {
+        "consecutive_quiet_probes": 2,
+        "max_settle_seconds": 30.0,
+        "method": "proc-per-pid",
+        "minimum_requested_warmup_seconds": 3.0,
+        "observed_warmup_seconds": {
+          "idle": [
+            3.503,
+            3.503,
+            4.513
+          ],
+          "one_change": [
+            4.005,
+            4.007,
+            4.255
+          ]
+        },
+        "probe_seconds": 0.25,
+        "scenarios": [
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.503,
+            "probes": [
+              0.0,
+              0.0
+            ],
+            "repeat": 0,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 3.503,
+            "probes": [
+              0.01,
+              0.0
+            ],
+            "repeat": 1,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 4.513,
+            "probes": [
+              0.19,
+              0.18,
+              0.175,
+              0.015,
+              0.0,
+              0.0
+            ],
+            "repeat": 2,
+            "scenario": "idle",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 4.005,
+            "probes": [
+              0.165,
+              0.05,
+              0.0,
+              0.0
+            ],
+            "repeat": 0,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 4.007,
+            "probes": [
+              0.16,
+              0.05,
+              0.0,
+              0.0
+            ],
+            "repeat": 1,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          },
+          {
+            "method": "proc-per-pid",
+            "observed_warmup_seconds": 4.255,
+            "probes": [
+              0.12,
+              0.11,
+              0.015,
+              0.0,
+              0.0
+            ],
+            "repeat": 2,
+            "scenario": "one_change",
+            "steady_state_observed": true
+          }
+        ],
+        "steady_state_observed": true,
+        "steady_threshold_cpu_seconds_per_child": 0.01
+      },
+      "warmup_seconds": 3.0,
+      "window_seconds": 4.0
+    },
+    "embedded_receipt_sha256": "593a2f8d919fca0429cb0b8fb8e340c6b71e3da457e30bab79997a9567554cc7",
+    "source_binding": {
+      "daemon_src_sha256": "cd5c4acea7c499ea24c1f886b58909ace383c0ec2c31910fc7130687c2770450",
+      "label_verified_against_git": true,
+      "recompute_from_public_commit": {
+        "commit_is_public_ancestor_of_head": true,
+        "harness_function": "scripts/daemon-cpu.py::_source_digest",
+        "method": "git archive <source_revision> src; sha256 over sorted src/mizu/**/*.py of relpath + NUL + file bytes + NUL",
+        "note": "Any reader with a full clone of the public repository at the named source_revision can recompute daemon_src_sha256 independently; the receipt claims the value, this record does not self-assert it."
+      },
+      "source_revision": "1b48d7e8c35083308e79e0184fea653dbd2b6da7",
+      "source_revision_resolved_from_git": true
+    }
+  },
+  "measurement": {
+    "deployment": {
+      "idle_seconds": 1,
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.36",
+      "projects": 2,
+      "python": "3.14.10",
+      "repeats": 3,
+      "retained_messages": 200,
+      "settled": true,
+      "warmup_seconds": 3.0,
+      "window_seconds": 4.0
+    },
+    "deployment_matches_after": true,
+    "harness": "scripts/daemon-cpu.py",
+    "harness_recompute": "sha256(git show HEAD:scripts/daemon-cpu.py) == harness_script_sha256",
+    "harness_script_sha256": "b5a0023448ee7f3915a43d0d084775f066d4a3e94db24e219492f24a01c9c1b4",
+    "kind": "local-daemon-cpu",
+    "note": "Synthetic local deployment; real mizu daemon subprocesses. The window starts only after a quiet per-PID /proc CPU trend, so interpreter startup is excluded only when validity.steady_state_observed is true; the reaped-children getrusage fallback includes startup and cannot evidence a steady window. Relative before/after only.",
+    "validity": {
+      "method": "proc-per-pid",
+      "steady_state_observed": true
+    },
+    "validity_matches_after": true
+  },
+  "no_private_paths": true,
+  "purpose": "Audit-readable record of the resident daemon before/after CPU receipts for the move from a one-second fingerprint loop to kernel change notification on all supported platforms. Reuses two matched, settled measurements taken on one machine; relative before/after only, not a performance ceiling. The no-poll behavior under unwatched root churn and the resource lifetime of the stop bridge are pinned by tests, not by this CPU window.",
+  "result": {
+    "idle_median_seconds": {
+      "after": 0.0,
+      "before": 0.01
+    },
+    "one_change_median_seconds": {
+      "after": 0.13,
+      "before": 0.11
+    }
+  },
+  "schema": "native-wake-cpu-evidence-v1",
+  "verification": {
+    "guard_test": "tests/test_native_wake_cpu_evidence.py",
+    "no_worker_private_ids": true,
+    "record_option": "--record docs/evidence/native-wake-cpu-evidence.json",
+    "scope_note": "The tracked-only verifier checks record integrity, the harness digest against the tracked script, matched shape/validity and the recorded witness; it does not claim to prove the source-tree link from fields in this file. A reader recomputes that link from the public git commits (see witness.reproduce).",
+    "verifier": "scripts/verify-stage4-cpu-evidence.py"
+  },
+  "witness": {
+    "git_recompute": [
+      {
+        "matched_receipt": true,
+        "side": "before",
+        "source_revision": "1b48d7e8c35083308e79e0184fea653dbd2b6da7",
+        "tree_digest": "cd5c4acea7c499ea24c1f886b58909ace383c0ec2c31910fc7130687c2770450"
+      },
+      {
+        "matched_receipt": true,
+        "side": "after",
+        "source_revision": "ea5b0b26a65a2117c660f4882d353ee4eed1d9eb",
+        "tree_digest": "04f3e7f872b967359b4b965c87abbc80b6be836d23e8556da08d3cafde6db62d"
+      }
+    ],
+    "reproduce": {
+      "tree_digest": "git archive <source_revision> src | tar -x -C <tmp>; sha256 over sorted <tmp>/src/mizu/**/*.py of relpath + NUL + bytes + NUL",
+      "verifier_tracked": "python3 scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json",
+      "verifier_with_git": "python3 scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json --repo <full-clone>"
+    },
+    "scope": "Worker-recorded output of the verifier and of a full-clone git recompute; reproducible by any reader with a full clone, not an authenticity proof by itself.",
+    "trust": "external-untrusted",
+    "verifier_output": {
+      "checks": {
+        "after_embedded_receipt_integrity": true,
+        "after_source_hex": true,
+        "after_tree_commit": true,
+        "after_tree_digest_from_git": true,
+        "after_witness_consistent": true,
+        "before_embedded_receipt_integrity": true,
+        "before_source_hex": true,
+        "before_tree_commit": true,
+        "before_tree_digest_from_git": true,
+        "before_witness_consistent": true,
+        "harness_digest": true,
+        "no_private_paths": true,
+        "no_worker_private_ids": true,
+        "schema": true,
+        "shape_matched": true,
+        "validity_flags": true,
+        "validity_matched": true
+      },
+      "passed": true,
+      "schema": "native-wake-cpu-evidence-v1",
+      "scope": "with_git",
+      "skipped": []
+    }
+  }
+}
