@@ -103,6 +103,34 @@ class NativeWakeCpuEvidenceTests(unittest.TestCase):
             self.assertEqual(binding["source_revision"],
                              record["witness"]["git_recompute"][0 if side == "before" else 1]["source_revision"])
 
+    def test_harness_digest_accepts_crlf_but_rejects_content_changes(self):
+        """A CRLF checkout is the same script; an appended comment is not."""
+        copied = ("scripts/verify-stage4-cpu-evidence.py",
+                  "docs/evidence/native-wake-cpu-evidence.json",
+                  "scripts/daemon-cpu.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for relative in copied:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((ROOT / relative).read_bytes())
+
+            verifier = root / copied[0]
+            record = root / copied[1]
+            harness = root / copied[2]
+            harness.write_bytes(harness.read_bytes().replace(b"\n", b"\r\n"))
+            cmd = [sys.executable, str(verifier), "--record", str(record)]
+
+            first = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue(json.loads(first.stdout)["checks"]["harness_digest"])
+
+            with harness.open("ab") as out:
+                out.write(b"\r\n# altered comment\r\n")
+            second = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(second.returncode, 0)
+            self.assertFalse(json.loads(second.stdout)["checks"]["harness_digest"])
+
 
 if __name__ == "__main__":
     unittest.main()

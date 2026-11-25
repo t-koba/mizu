@@ -6,8 +6,10 @@ Two scopes:
   private paths, the schema, the harness digest against the tracked script,
   each embedded receipt's content digest, matched shape/validity flags, the
   recorded witness's consistency with the receipts, and the absence of
-  worker-private IDs. It does NOT claim to prove the source-tree link from
-  fields that live in the record: that would be circular.
+  worker-private IDs. The harness digest is SHA-256 over the script's bytes
+  after normalizing CRLF line endings to LF, so a CRLF checkout passes while
+  any other byte change fails. It does NOT claim to prove the source-tree link
+  from fields that live in the record: that would be circular.
 
 * With git (--repo <checkout>): additionally recomputes each source-tree
   digest from the named git commit with the harness's own recipe. The commit
@@ -44,6 +46,11 @@ HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 def canonical_sha(obj: object) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"))
                           .encode()).hexdigest()
+
+
+def harness_digest(path: pathlib.Path) -> str:
+    """SHA-256 of the harness with CRLF line endings normalized to LF."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def source_digest(src: pathlib.Path) -> str:
@@ -85,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     checks["no_worker_private_ids"] = not any(k in text for k in PRIVATE_ID_KEYS)
 
     harness = ROOT / record["measurement"]["harness"]
-    checks["harness_digest"] = (hashlib.sha256(harness.read_bytes()).hexdigest()
+    checks["harness_digest"] = (harness_digest(harness)
                                 == record["measurement"]["harness_script_sha256"])
 
     witness_rows = {row["side"]: row for row in record["witness"]["git_recompute"]}
