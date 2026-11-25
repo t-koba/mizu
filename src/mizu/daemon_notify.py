@@ -13,7 +13,11 @@ platform reports event names those names are filtered to the fingerprint's
 fixed set. Content writes to unwatched root children (ledger journals, WAL
 files) therefore cannot wake the daemon or make it recompute the fingerprint.
 A path that cannot be watched is returned in ``Watcher.unwatchable`` as a fact;
-it is never a reason to fall back to polling.
+it is never a reason to fall back to polling. This coverage is established for
+local filesystems. A successful registration on a network-backed path does not
+prove that remote changes are observable; there is no reliable cross-platform
+predicate for that, so such coverage is unverified rather than assumed, and a
+registration failure is still reported as a fact.
 
 Backends: inotify on Linux, kqueue EVFILT_VNODE on macOS, and
 FindFirstChangeNotification/WaitForMultipleObjects on Windows, all via the

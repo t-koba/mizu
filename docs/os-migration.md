@@ -74,7 +74,11 @@ the platform change notification (inotify, kqueue or FindFirstChangeNotification
 paths and on the exact next deadline, and does nothing in between. The project root is watched
 only for entry events, with event names filtered to the fingerprint set where the platform
 reports them, so writes to unwatched root children cannot wake the daemon. A stop bridge is
-owned once per daemon lifetime and released when the stop event is collected. The matched
+owned once per daemon lifetime and released when the stop event is collected. This wake
+coverage is established for local filesystems: a successful registration on a network mount
+does not show that changes originating on another host are delivered, and no filesystem-name
+blacklist can prove support. Network-backed coverage is therefore unverified, while a path
+whose registration fails is reported as a fact; neither starts a polling fallback. The matched
 before/after CPU receipts for this change are retained path-free in
 `docs/evidence/native-wake-cpu-evidence.json`; verify them with
 `scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json --repo <checkout>`.
