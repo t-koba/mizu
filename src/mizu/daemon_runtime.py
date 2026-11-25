@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from datetime import datetime
 import math
 import signal
 import threading
@@ -205,6 +206,23 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
                     and type(wake_at) in (int, float) and math.isfinite(wake_at)
                     and wake_at > now_wall):
                 candidates.append(now_mono + (wake_at - now_wall))
+            # A work item blocked on a deadline becomes ready when the clock
+            # passes it, with no file change; its time is an exact deadline.
+            try:
+                if control.get("armed") and not control.get("paused"):
+                    for item in project.work_items.current_items(statuses=("blocked",)):
+                        wait = item.get("wait") or {}
+                        if (wait.get("kind") != "deadline"
+                                or item.get("holder") not in (None, role_name)):
+                            continue
+                        try:
+                            at = datetime.fromisoformat(wait["at"]).timestamp()
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if at > now_wall:
+                            candidates.append(now_mono + (at - now_wall))
+            except (MizuError, OSError, ValueError, TypeError, AttributeError):
+                pass
             # The one bounded external observation (docs/kernel.md): CI and
             # upstream refs cannot notify the host, so the next VCS poll is an
             # exact deadline. Without it an idle daemon never observed a CI
