@@ -22,6 +22,18 @@ def canonical(obj):
                           .encode()).hexdigest()
 
 
+def anchor_commits_available(record):
+    """True when this checkout holds the public commits the record names."""
+    for side in ("before", "after"):
+        revision = record[side]["source_binding"]["source_revision"]
+        probe = subprocess.run(
+            ["git", "-C", str(ROOT), "cat-file", "-e", revision + "^{commit}"],
+            capture_output=True)
+        if probe.returncode:
+            return False
+    return True
+
+
 class NativeWakeCpuEvidenceTests(unittest.TestCase):
     def test_record_is_tracked_path_free_and_id_free(self):
         text = RECORD.read_text(encoding="utf-8")
@@ -44,6 +56,8 @@ class NativeWakeCpuEvidenceTests(unittest.TestCase):
     @unittest.skipUnless((ROOT / ".git").exists(),
                          "source-tree recompute needs a full git checkout")
     def test_with_git_verifier_recomputes_tree_digests(self):
+        if not anchor_commits_available(json.loads(RECORD.read_text(encoding="utf-8"))):
+            self.skipTest("public anchor commits absent from this checkout")
         run = run_verifier(RECORD, ["--repo", str(ROOT)])
         self.assertEqual(run.returncode, 0, run.stderr)
         summary = json.loads(run.stdout)
