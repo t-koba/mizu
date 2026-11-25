@@ -1,10 +1,12 @@
 """A unit's waiting bound holds dispatch only until the watched state changes."""
+import contextlib
 import dataclasses
 import unittest
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 from support import Fixture
+from mizu.admission import queue_state_path
 from mizu.runtime import daemon
 
 
@@ -99,7 +101,12 @@ class WaitingHoldTests(Fixture):
 
 
 class AdmissionQueueWakeTests(Fixture):
-    def test_busy_dispatch_watches_the_admission_queue_until_it_runs(self):
+    def _watched_inputs(self, *, queue_name=None):
+        """Watch sets across a refused dispatch and a succeeding one.
+
+        ``queue_name`` renames the owner's state filename for this run, so a
+        caller that hardcodes a different name cannot pass the assertion.
+        """
         from mizu.errors import Busy
         config = self.config
         clock = StopClock(limit=3)
@@ -119,31 +126,49 @@ class AdmissionQueueWakeTests(Fixture):
             stop.wait(1.0)
             return "stop" if stop.is_set() else "change"
 
-        with (patch("mizu.runtime.threading.Event", return_value=clock),
-              patch("mizu.runtime.signal.signal"),
-              patch("mizu.daemon_runtime.lock", return_value=nullcontext()),
-              patch("mizu.daemon_runtime.load", return_value=config),
-              patch("mizu.daemon_runtime.Project", return_value=project),
-              patch("mizu.runtime.editor.ingest"),
-              patch("mizu.daemon_runtime.should_run", return_value=True),
-              patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
-              patch("mizu.probes.service_due", return_value=None),
-              patch("mizu.probes.next_deadline", return_value=None),
-              patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
-              patch("mizu.daemon_runtime.daemon_wake.fingerprint", return_value=("state",)),
-              patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=wait),
-              patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
-              patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
-              patch("mizu.runtime.Engine") as engine,
-              patch("builtins.print")):
+        patches = [
+            patch("mizu.runtime.threading.Event", return_value=clock),
+            patch("mizu.runtime.signal.signal"),
+            patch("mizu.daemon_runtime.lock", return_value=nullcontext()),
+            patch("mizu.daemon_runtime.load", return_value=config),
+            patch("mizu.daemon_runtime.Project", return_value=project),
+            patch("mizu.runtime.editor.ingest"),
+            patch("mizu.daemon_runtime.should_run", return_value=True),
+            patch("mizu.daemon_runtime.vcs_poll_enabled", return_value=False),
+            patch("mizu.probes.service_due", return_value=None),
+            patch("mizu.probes.next_deadline", return_value=None),
+            patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
+            patch("mizu.daemon_runtime.daemon_wake.fingerprint", return_value=("state",)),
+            patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=wait),
+            patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
+            patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
+        ]
+        if queue_name is not None:
+            patches.append(patch("mizu.admission.QUEUE_STATE_NAME", queue_name))
+        with contextlib.ExitStack() as stack:
+            for context in patches:
+                stack.enter_context(context)
+            engine = stack.enter_context(patch("mizu.runtime.Engine"))
+            stack.enter_context(patch("builtins.print"))
             engine.return_value.run.side_effect = run
             daemon(config, "sample", "worker")
-        queue = config.data / "slots" / "queue.json"
+        return watched
+
+    def test_busy_dispatch_watches_the_admission_queue_until_it_runs(self):
+        watched = self._watched_inputs()
+        queue = queue_state_path(self.config)
         # Refused as Busy: the next wait also watches the admission queue.
         self.assertIn(queue, watched[0])
         # The pass that runs still waits on the inputs it armed with; after
         # it, the queue is no longer one of the daemon's inputs.
         self.assertNotIn(queue, watched[2])
+
+    def test_queue_watch_follows_the_owners_state_filename(self):
+        watched = self._watched_inputs(queue_name="renamed-queue.json")
+        renamed = self.config.data / "slots" / "renamed-queue.json"
+        self.assertIn(renamed, watched[0])
+        self.assertNotIn(self.config.data / "slots" / "queue.json", watched[0])
+        self.assertNotIn(renamed, watched[2])
 
 
 if __name__ == "__main__":

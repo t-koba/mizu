@@ -22,6 +22,32 @@ from .errors import Busy, Denied
 from .fs import DIGEST, ID, canonical, lock, now, write_json
 
 
+#: Admission owns the queue's directory and state filename; every reader and
+#: watcher derives its path from these names.
+QUEUE_ROOT_NAME = "slots"
+QUEUE_STATE_NAME = "queue.json"
+
+
+def queue_root(config) -> Path:
+    """Return the directory holding this configuration's admission queue.
+
+    Bounds: one configuration's data directory. Trust: local state. Failure:
+    never raises.
+    """
+    return config.data / QUEUE_ROOT_NAME
+
+
+def queue_state_path(root_or_config) -> Path:
+    """Return the queue state file for a queue root or a configuration.
+
+    Both a caller holding only a bounded queue root and a caller holding the
+    configuration name the same owner-defined file. Bounds: one root or
+    configuration. Trust: local state. Failure: never raises.
+    """
+    root = root_or_config if isinstance(root_or_config, Path) else queue_root(root_or_config)
+    return root / QUEUE_STATE_NAME
+
+
 def role_exclusion(project: Path, role: str) -> Path:
     """Return the lock a live invocation of ``role`` holds for its whole run.
 
@@ -137,7 +163,7 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     caller never orders admissions from state nobody can read.
     """
     try:
-        path = root / "queue.json"
+        path = queue_state_path(root)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         try:
@@ -228,7 +254,7 @@ class _Queue:
 
     def __init__(self, config, resources, *, reuse_pending=False, observe=False,
                  evidence_source=None, evidence_source_factory=None, capture_choices=True):
-        self.root = config.data / "slots"
+        self.root = queue_root(config)
         self.capacity = config.limits.admission_queue_capacity
         self.slots = config.limits.parallel_runs
         self.projects = config.data / "projects"
@@ -314,7 +340,7 @@ class _Queue:
         return live
 
     def _write(self, tickets):
-        write_json(self.root / "queue.json", {"version": 1, "tickets": tickets})
+        write_json(queue_state_path(self.root), {"version": 1, "tickets": tickets})
 
     def _enqueue(self, tickets):
         if len(tickets) >= self.capacity:
@@ -551,7 +577,7 @@ def has_live_demand(config) -> bool:
     distinguish live owners from stale rows. If queue state, attribution, or
     the observation lock is ambiguous, report no demand.
     """
-    root = config.data / "slots"
+    root = queue_root(config)
     capacity = max(config.limits.admission_queue_capacity, config.limits.parallel_runs)
     try:
         with lock(root / "queue.lock", blocking=False):
@@ -584,7 +610,7 @@ def waiting(config, project: str) -> list:
     Trust: local coordination state. Failure: an unreadable or malformed
     queue reports nothing rather than a waiter nobody can verify.
     """
-    root = config.data / "slots"
+    root = queue_root(config)
     capacity = max(config.limits.admission_queue_capacity, config.limits.parallel_runs)
     try:
         tickets = _read_state(root, capacity, _state_bytes(capacity))

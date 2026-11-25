@@ -14,7 +14,7 @@ import signal
 import threading
 import time
 
-from . import check_jobs, ci_waits, daemon_wake, editor, queue_facts
+from . import admission, check_jobs, ci_waits, daemon_wake, editor, queue_facts
 from .ci_observation import POLL_STATE_FILE, _clean_ci_failures, _clean_ci_successes
 from .ci_polling import _live_ci_branches, poll_ci
 from .config import DAEMON_POLICIES, Config, load, role_daemon_spacing_seconds
@@ -250,7 +250,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 config_path = config.file
                 input_files = tuple(config.input_files) or (config_path,)
                 if admission_wait:
-                    input_files += (config.data / "slots" / "queue.json",)
+                    input_files += (admission.queue_state_path(config),)
                 baseline = daemon_wake.fingerprint(root, config_path,
                                                    config_files=input_files)
                 if hold_fingerprint is not None and baseline != hold_fingerprint:
@@ -325,7 +325,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                 project.root, config_path, config_files=input_files)
                 except (MizuError, OSError, ValueError) as exc:
                     admission_wait = isinstance(exc, Busy)
-                    queue_file = config.data / "slots" / "queue.json"
+                    queue_file = admission.queue_state_path(config)
                     if admission_wait and queue_file not in input_files:
                         # This pass's baseline predates the queue watch, so the
                         # wait below returns at once and the next pass arms it.
