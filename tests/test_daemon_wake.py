@@ -354,42 +354,52 @@ class NativeWakeTests(unittest.TestCase):
             regular.write_text("{}")
             missing = root / "missing.json"
             opened = []
-            real_open = os.open
+            next_fd = [1000]
 
-            def recording_open(path, flags, *args, **kwargs):
+            def synthetic_open(path, flags, *args, **kwargs):
                 opened.append((Path(path), flags))
-                return real_open(path, flags, *args, **kwargs)
+                if not Path(path).exists():
+                    raise FileNotFoundError(path)
+                fd = next_fd[0]
+                next_fd[0] += 1
+                return fd
 
-            with patch.object(daemon_notify, "select", fake_select), \
-                    patch.object(os, "open", side_effect=recording_open):
+            def fake_os_namespace(with_nonblock):
+                values = dict(O_RDONLY=os.O_RDONLY,
+                              O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+                              O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
+                              open=synthetic_open, close=lambda fd: None,
+                              fspath=os.fspath)
+                if with_nonblock:
+                    values["O_NONBLOCK"] = getattr(os, "O_NONBLOCK", 0)
+                return types.SimpleNamespace(**values)
+
+            with patch.object(daemon_notify, "os", fake_os_namespace(True)), \
+                    patch.object(daemon_notify, "select", fake_select):
                 watcher = daemon_notify._Kqueue(
                     (root,), (regular, missing), Stop())
-            try:
-                self.assertEqual(watcher.unwatchable, (missing,))
-                directory_flags = next(flags for path, flags in opened
-                                       if path == root)
-                file_flags = next(flags for path, flags in opened
-                                  if path == regular)
-                directory_bit = getattr(os, "O_DIRECTORY", 0)
-                self.assertTrue(directory_flags & directory_bit)
-                self.assertFalse(file_flags & directory_bit)
-            finally:
-                watcher.close()
+                try:
+                    self.assertEqual(watcher.unwatchable, (missing,))
+                    directory_flags = next(flags for path, flags in opened
+                                           if path == root)
+                    file_flags = next(flags for path, flags in opened
+                                      if path == regular)
+                    directory_bit = getattr(os, "O_DIRECTORY", 0)
+                    self.assertTrue(directory_flags & directory_bit)
+                    self.assertFalse(file_flags & directory_bit)
+                finally:
+                    watcher.close()
 
             # Windows has no O_NONBLOCK; the portable flag derivation must
             # still register the same watched paths with a fake kqueue.
-            fake_os = types.SimpleNamespace(
-                O_RDONLY=os.O_RDONLY, O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
-                O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
-                open=os.open, close=os.close, fspath=os.fspath)
-            with patch.object(daemon_notify, "os", fake_os), \
+            with patch.object(daemon_notify, "os", fake_os_namespace(False)), \
                     patch.object(daemon_notify, "select", fake_select):
                 watcher = daemon_notify._Kqueue((root,), (regular,), Stop())
-            try:
-                self.assertEqual(watcher.unwatchable, ())
-                self.assertEqual(len(watcher._fds), 2)
-            finally:
-                watcher.close()
+                try:
+                    self.assertEqual(watcher.unwatchable, ())
+                    self.assertEqual(len(watcher._fds), 2)
+                finally:
+                    watcher.close()
 
     def setUp(self):
         from mizu import daemon_notify
