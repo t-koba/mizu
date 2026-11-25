@@ -368,7 +368,7 @@ class _Kqueue:
                 fd = None
                 try:
                     open_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                                  | os.O_NONBLOCK)
+                                  | getattr(os, "O_NONBLOCK", 0))
                     if path in directories:
                         open_flags |= getattr(os, "O_DIRECTORY", 0)
                     fd = os.open(os.fspath(path), open_flags)
