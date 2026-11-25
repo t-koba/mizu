@@ -363,16 +363,17 @@ class _Kqueue:
             for path in (*directories, *files):
                 fd = None
                 try:
-                    fd = os.open(os.fspath(path),
-                                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                                 | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK)
+                    open_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                                  | os.O_NONBLOCK)
+                    if path in directories:
+                        open_flags |= getattr(os, "O_DIRECTORY", 0)
+                    fd = os.open(os.fspath(path), open_flags)
                     event = select.kevent(fd, select.KQ_FILTER_VNODE, flags, fflags, 0, 0)
                     self._kq.control([event], 0, 0)
                 except OSError:
                     if fd is not None:
                         os.close(fd)
-                    if path in directories:
-                        failed.append(path)
+                    failed.append(path)
                     continue
                 self._fds.append(fd)
             self.unwatchable = tuple(failed)

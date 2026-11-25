@@ -324,6 +324,58 @@ class NativeWakeTests(unittest.TestCase):
         finally:
             watcher.close()
 
+    def test_kqueue_registers_regular_files_without_directory_flags(self):
+        from mizu import daemon_notify
+
+        class FakeKqueue:
+            def control(self, events, max_events, timeout):
+                return []
+
+            def close(self):
+                pass
+
+        class Stop:
+            def fileno(self):
+                return -1
+
+        notes = {f"KQ_NOTE_{name}": 1 << number for number, name in enumerate(
+            ("DELETE", "WRITE", "EXTEND", "ATTRIB", "LINK", "RENAME", "REVOKE"))}
+        fake_select = types.SimpleNamespace(
+            KQ_EV_ADD=0x0001, KQ_EV_ENABLE=0x0002, KQ_EV_CLEAR=0x0004,
+            KQ_FILTER_VNODE=0x0100, KQ_FILTER_READ=0x0200,
+            kqueue=FakeKqueue,
+            kevent=lambda fd, filt, flags, fflags, data, udata: (
+                fd, filt, flags, fflags, data, udata),
+            **notes)
+
+        with tempfile.TemporaryDirectory(prefix="kqueue-files-") as tmp:
+            root = Path(tmp)
+            regular = root / "config.json"
+            regular.write_text("{}")
+            missing = root / "missing.json"
+            opened = []
+            real_open = os.open
+
+            def recording_open(path, flags, *args, **kwargs):
+                opened.append((Path(path), flags))
+                return real_open(path, flags, *args, **kwargs)
+
+            with patch.object(daemon_notify, "select", fake_select), \
+                    patch.object(os, "open", side_effect=recording_open):
+                watcher = daemon_notify._Kqueue(
+                    (root,), (regular, missing), Stop())
+            try:
+                self.assertEqual(watcher.unwatchable, (missing,))
+                directory_flags = next(flags for path, flags in opened
+                                       if path == root)
+                file_flags = next(flags for path, flags in opened
+                                  if path == regular)
+                directory_bit = getattr(os, "O_DIRECTORY", 0)
+                self.assertTrue(directory_flags & directory_bit)
+                self.assertFalse(file_flags & directory_bit)
+            finally:
+                watcher.close()
+
     def setUp(self):
         from mizu import daemon_notify
         if not daemon_notify.available():
