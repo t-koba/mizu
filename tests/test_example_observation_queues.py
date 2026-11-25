@@ -83,7 +83,8 @@ class ObservationDeclaration(unittest.TestCase):
             self.assertFalse(fields["digest"].required)
             self.assertEqual(fields["driver"].max, 80)
             self.assertEqual(fields["summary"].max, 4096)
-            self.assertEqual(fields["detail"].max, 16384)
+            expected_detail = 1048576 if name == HEAD_QUEUE else 16384
+            self.assertEqual(fields["detail"].max, expected_detail)
             self.assertEqual(fields["digest"].type, "digest")
 
     def test_readme_include_loads_through_the_real_config_loader(self):

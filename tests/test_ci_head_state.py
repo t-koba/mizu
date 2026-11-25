@@ -566,6 +566,32 @@ class CiHeadStateTests(Fixture):
                 self.assertLessEqual(
                     len(observation["detail"].encode("utf-8")), driver.DETAIL_MAX)
 
+    def test_real_host_path_appends_dense_multibranch_detail(self):
+        branches = ["main"] + [f"branch-{index}" for index in range(64)]
+        config = dataclasses.replace(self.config, vcs={
+            **self.config.vcs, "ci_branch": "main",
+            "ci_wake_extra_branches": branches[1:]})
+        successes = {}
+        for index, branch in enumerate(branches):
+            sha = f"{index + 1:040x}"
+            self.inject_ref(sha, branch)
+            self.receipt(sha, branch=branch)
+            successes[branch] = [{
+                "sha": sha, "check": "unit",
+                "run": f"{slot:02d}" + "\u00e9\U0001f600" * 63}
+                for slot in range(driver.MAX_IDENTITIES)]
+        self.cache(successes=successes)
+        rows = head_state_observation.ci_head_state_facts(self.project, config)
+        self.assertEqual(len(rows), len(branches))
+        self.assertTrue(all(len(row["runs"]) == driver.MAX_IDENTITIES
+                            for row in rows))
+        store = self.project.kernel_queues
+        self.assertTrue(store.due("ci_head_state_observations", "role:worker"))
+        page = store.read("ci_head_state_observations", "role:worker")
+        self.assertEqual(len(page["messages"]), 1)
+        detail = json.loads(page["messages"][0]["body"]["detail"])
+        self.assertEqual(len(detail["branches"]), len(branches))
+
     def test_prompt_consumes_the_observation_wake_edge_it_creates(self):
         from mizu.runtime import Context
         self.receipt(SHA)

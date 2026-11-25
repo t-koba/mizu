@@ -56,7 +56,7 @@ kind = {type = "string", max = 80, required = true}
 summary = {type = "string", max = 4096, required = true}
 observed_at = {type = "instant", required = true}
 digest = {type = "digest"}
-detail = {type = "string", max = 16384}
+detail = {type = "string", max = 1048576}
 
 [drivers.ci_costs]
 command = ["python3", "examples/development/drivers/ci_costs_driver.py"]
