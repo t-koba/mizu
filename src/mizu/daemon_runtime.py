@@ -204,7 +204,21 @@ def _wake_deadline(config, project, name, role_name, ordinary_after,
                     and type(wake_at) in (int, float) and math.isfinite(wake_at)
                     and wake_at > now_wall):
                 candidates.append(now_mono + (wake_at - now_wall))
-        except (MizuError, OSError, ValueError):
+            # The one bounded external observation (docs/kernel.md): CI and
+            # upstream refs cannot notify the host, so the next VCS poll is an
+            # exact deadline. Without it an idle daemon never observed a CI
+            # result that a waiting role depends on.
+            if (control.get("armed") and not control.get("paused")
+                    and vcs_poll_enabled(config)):
+                polled = read_json(project.root / POLL_STATE_FILE, {})
+                stamps = [polled.get(key) for key in
+                          ("last_fetch", "last_poll", "last_ci_wait_poll", "last_proposal_poll")]
+                stamps = [s for s in stamps if type(s) in (int, float) and math.isfinite(s)]
+                due = (min(stamps) + vcs_poll_interval(config)) if stamps else now_wall
+                # A poll skipped under another poller's lock leaves the stamps
+                # behind; one second is the floor, not a cadence.
+                candidates.append(now_mono + max(1.0, due - now_wall))
+        except (MizuError, OSError, ValueError, TypeError, AttributeError):
             pass
     return min(candidates) if candidates else None
 
