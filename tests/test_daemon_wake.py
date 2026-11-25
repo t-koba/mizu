@@ -603,7 +603,17 @@ class NativeWakeTests(unittest.TestCase):
             reason = daemon_wake.wait(stop, self.root, baseline, deadline)
         self.assertEqual(reason, "deadline")
         self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
-        self.assertLessEqual(len(marks), 1, "interior fingerprint reads after arming failure")
+        self.assertTrue(marks)
+        self.assertLess(max(marks) - min(marks), 0.05,
+                        "fingerprint recomputed after arming failure")
+
+    def test_arming_failure_reports_change_already_present(self):
+        from mizu import daemon_notify
+        baseline = daemon_wake.fingerprint(self.root)
+        (self.root / "control.json").write_text("{}")
+        with patch.object(daemon_notify, "stop_bridge", side_effect=OSError("boom")):
+            reason = daemon_wake.wait(threading.Event(), self.root, baseline, None)
+        self.assertEqual(reason, "change")
 
     def test_arming_failure_still_honours_stop(self):
         from mizu import daemon_notify

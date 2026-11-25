@@ -106,7 +106,8 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
         if not daemon_notify.available():
             print(json.dumps({"event": "native_wake_unavailable",
                               "reason": "unsupported_platform"}), flush=True)
-            return _wait_signal_only(stop, deadline)
+            return _wait_unwatchable(stop, root, baseline, deadline,
+                                     config_file, config_files)
         try:
             return _wait_native(stop, root, baseline, deadline,
                                 config_file, config_files)
@@ -116,9 +117,17 @@ def wait(stop, root: Path | None, baseline: tuple, deadline: float | None,
             # wait exists to remove. Stop and the exact deadline still apply.
             print(json.dumps({"event": "native_wake_unavailable",
                               "error": str(exc)}), flush=True)
-            return _wait_signal_only(stop, deadline)
+            return _wait_unwatchable(stop, root, baseline, deadline,
+                                     config_file, config_files)
     return _wait_portable(stop, root, baseline, deadline, poll,
                           config_file, config_files)
+
+
+def _wait_unwatchable(stop, root, baseline, deadline, config_file, config_files) -> str:
+    """A backend loss still reports a change already present at call time."""
+    if fingerprint(root, config_file, config_files=config_files) != baseline:
+        return "change"
+    return _wait_signal_only(stop, deadline)
 
 
 def _wait_signal_only(stop, deadline) -> str:
