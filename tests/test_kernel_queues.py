@@ -463,6 +463,41 @@ class QueueStoreTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 call()
 
+    def test_by_id_handoff_honours_deadline_and_grant(self):
+        """A by-id body is handed over only when due; refs remains a listing."""
+        delayed = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        for options in ({}, {"unit": "probe"}):
+            with self.subTest(options=options), self.assertRaises(Denied):
+                self.store.message(delayed["id"], "role:alpha", now=NOW, **options)
+            self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
+        # An authorized reader can still follow a pending reference by id.
+        reply = self.store.append("tasks", BODY, "role:alpha", now=NOW,
+                                  refs=[delayed["id"]])
+        self.assertEqual([m["id"] for m in
+                          self.store.refs(delayed["id"], "to", "role:alpha")["messages"]],
+                         [reply["id"]])
+        self.assertEqual([m["id"] for m in
+                          self.store.refs(reply["id"], "from", "role:alpha")["messages"]],
+                         [delayed["id"]])
+        # No grant bypass at the deadline, with or without a delivery unit.
+        for options in ({}, {"unit": "probe"}):
+            with self.subTest(options=options), self.assertRaises(Denied):
+                self.store.message(delayed["id"], "role:gamma", now=LATER, **options)
+        # Exact deadline is due: a pure read hands the body over but credits
+        # nothing, and the delayed wake is still live until a unit reads it.
+        self.assertEqual(self.store.message(delayed["id"], "role:alpha", now=LATER), delayed)
+        self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
+        self.assertTrue(self.store.due("tasks", "role:alpha", now=LATER))
+        self.assertEqual(self.store.message(delayed["id"], "role:alpha", unit="probe",
+                                            now=LATER), delayed)
+        self.assertEqual(self.store._delivery("tasks", delayed["seq"], "role:alpha"),
+                         {"unit": "probe", "at": LATER})
+        self.assertEqual(self.store.message(delayed["id"], "role:alpha", unit="other",
+                                            now=LATER), delayed)
+        self.assertEqual(self.store._delivery("tasks", delayed["seq"], "role:alpha"),
+                         {"unit": "probe", "at": LATER})
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+
     def test_pages_are_bounded_and_paged(self):
         for index in range(PAGE_MAX + 3):
             self.store.append("notes", {"n": index}, "host", now=NOW)
@@ -626,12 +661,12 @@ class QueueStoreTests(unittest.TestCase):
         self.assertTrue(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
 
     def test_handed_records_future_delivery_but_normal_path_still_refuses(self):
-        """The handoff opt-in records a future body; eligibility paths keep the deadline."""
+        """The handoff opt-in credits a serialized body; eligibility keeps the deadline."""
         future = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
         with self.assertRaises(Denied):
             self.store.record_delivery("tasks", future["seq"], "role:alpha", "read", now=NOW)
         self.assertFalse(self.store.delivered("tasks", future["seq"], "role:alpha"))
-        # Only the handoff path may cross the deadline, and only for a real body.
+        # Only the handoff path may cross the deadline, and only for a body the reader got.
         self.store.record_delivery("tasks", future["seq"], "role:alpha", "opening",
                                    now=NOW, handed=True)
         self.assertTrue(self.store.delivered("tasks", future["seq"], "role:alpha"))

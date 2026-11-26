@@ -112,6 +112,10 @@ body = {type = "string", max = 65536}
   `cursor` is only a page position through history: it chooses where a read
   starts, and the rows any read returns are recorded delivered, cursor or
   not. Messages already removed by retention leave a gap that reads cross.
+  A by-id `message_read` hands over a body only when it is due, including a
+  body embedded in a response's referred thread. `message_refs` stays a
+  listing: an authorized reader can find a pending reference, but the listing
+  records no delivery.
 - Appending a due message, or a delayed message becoming due, touches
   `wake/<role>` for each role in the queue's `wake` list. A queue wakes while it
   holds a due, wake-eligible message with no delivery fact for that reader;
@@ -198,7 +202,7 @@ wait = {readmit = false}
 |---|---|
 | `queue_write(queue, body, refs?, deliver_at?, id?)` | Append a message if the role may write to the queue |
 | `queue_read(queue, cursor?, limit?)` | Read the oldest due messages undelivered to the role, bounded, recording delivery; `cursor` only sets the page start (returned rows are still delivered); returns `next`, `head`, `more`, `delayed` |
-| `message_read(id)` | Read one message the role may read |
+| `message_read(id)` | Read one due message the role may read, recording delivery |
 | `message_refs(id, direction)` | List messages the role may read that refer to `id`, or that `id` refers to, bounded and paged |
 
 Grants: the `queues` capability in the role's capability list, and the

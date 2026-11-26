@@ -893,10 +893,12 @@ class QueueStore:
                 return None  # head-of-line: no later deadline can be reached
         return None
 
-    def message(self, id: str, actor: str, *, unit=None) -> dict:
-        """Resolve one readable message, optionally recording its delivery.
+    def _read_by_id(self, id: str, actor: str) -> dict:
+        """Grant-checked body lookup by id; callers decide its due contract.
 
-        ``unit`` names the consuming operation; without it this read is pure.
+        ``refs`` uses this listing path so an authorized reader can still
+        follow a reference to a pending delayed message; only a reader handoff
+        (``message``, including nested opening bodies) requires the body due.
         """
         message_id = _id(id, "message id")
         actor = self._actor(actor)
@@ -904,16 +906,37 @@ class QueueStore:
         if message is None:
             raise Denied(f"No message {message_id}")
         self._grant(message["queue"], actor, write=False)
+        return message
+
+    def message(self, id: str, actor: str, *, unit=None, now=None) -> dict:
+        """Resolve one readable, due message, optionally recording its delivery.
+
+        ``unit`` names the consuming operation; without it this read is pure.
+        The body is handed over only at or after its ``deliver_at``; a body
+        withheld by the deadline is neither returned nor credited.
+        """
+        message = self._read_by_id(id, actor)
+        actor = self._actor(actor)
         if unit is not None and (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
                                  or "\x00" in unit):
             raise Denied("delivery unit must be a bounded string")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
+        if not self._due(message, stamp):
+            raise Denied("Message is not due yet")
         if unit is not None:
             with self._locked():
-                self._write_delivery(message["queue"], message["seq"], actor, unit, clock())
+                self._write_delivery(message["queue"], message["seq"], actor, unit,
+                                     stamp.isoformat(timespec="seconds"))
         return message
 
     def refs(self, id: str, direction: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT) -> dict:
-        message = self.message(id, actor)
+        """List readable messages referring to ``id``, or those ``id`` refers to.
+
+        Listing is a lookup, not a reader handoff: it stays usable for pending
+        delayed messages, whose bodies only become handoff-eligible by
+        ``message`` once due.
+        """
+        message = self._read_by_id(id, actor)
         if direction not in ("to", "from"):
             raise Denied("direction must be 'to' or 'from'")
         if type(limit) is not int or not 1 <= limit <= PAGE_MAX:

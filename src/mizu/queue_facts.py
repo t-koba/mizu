@@ -93,18 +93,19 @@ def deliver_opening(project, role_name: str, rows: list[dict], unit: str) -> Non
         # A serialized message is credited by its own queue and sequence. A
         # referred body (see _with_thread) is serialized into the same opening
         # and must be credited too, or the next opening shows it again even
-        # though the reader already received it. Bodies that were not
-        # serialized are absent here and stay undelivered.
+        # though the reader already received it. Only due bodies are embedded
+        # there; a future-dated body stays withheld and uncredited. Bodies
+        # that were not serialized are absent here and stay undelivered.
         if not isinstance(message, dict) or type(message.get("seq")) is not int:
             return
         queue = message.get("queue", default_queue)
         if not isinstance(queue, str):
             return
         try:
-            # The handoff establishes the fact even for a future deliver_at:
-            # _with_thread embedded this body into the dispatched opening, so
-            # the reader already received it. Eligibility paths still honour
-            # the deadline; only this credit marks an actually-sent body.
+            # The handoff establishes the fact: this body was serialized into
+            # the dispatched opening, so a deadline crossing between the
+            # projection and this credit cannot make the reader unsee it.
+            # Eligibility paths still honour the deadline.
             store.record_delivery(queue, message["seq"], actor, unit, handed=True)
         except (Denied, OSError, ValueError):
             pass
@@ -143,7 +144,11 @@ def opening(project, role_name: str) -> list[dict]:
 
 
 def _with_thread(store, message: dict, actor: str) -> dict:
-    """A reply arrives with the messages it refers to that the reader may read."""
+    """A reply arrives with the due messages it refers to that the reader may read.
+
+    ``store.message`` gates each body by ``deliver_at``, so a future-dated
+    reference is not serialized into this opening and earns no delivery fact.
+    """
     refers = []
     for ref in message.get("refs") or ():
         try:
