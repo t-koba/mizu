@@ -16,7 +16,8 @@ A path that cannot be watched is returned in ``Watcher.unwatchable`` as a fact;
 it is never a reason to fall back to polling. This coverage is established for
 local filesystems. A successful registration on a network-backed path does not
 prove that remote changes are observable; there is no reliable cross-platform
-predicate for that, so such coverage is unverified rather than assumed, and a
+predicate for that, so remote-origin coverage is reported as unverified by
+``coverage_fact`` (and never silently assumed) for every watched path, and a
 registration failure is still reported as a fact.
 
 Backends: inotify on Linux, kqueue EVFILT_VNODE on macOS, and
@@ -506,6 +507,12 @@ class Watcher:
         else:
             raise OSError(f"no native change-notification backend for {sys.platform}")
         self.unwatchable = self._backend.unwatchable
+        unwatchable = set(self.unwatchable)
+        # The watched fingerprint paths the backend did not reject. Backends
+        # cover these paths (some register a parent subtree rather than each
+        # file), so call them paths, not individually registered descriptors.
+        self.paths = tuple(
+            path for path in (*directories, *files) if path not in unwatchable)
 
     def wait(self, deadline):
         self._backend.wait(deadline)
@@ -518,3 +525,22 @@ class Watcher:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def coverage_fact(watcher) -> dict:
+    """Report what one native-wake arming can and cannot establish.
+
+    A watch being accepted does not prove that a change originating on another
+    host produces a kernel event, and no cross-platform predicate identifies a
+    network mount. Local-origin changes on the watched paths are therefore
+    covered; remote-origin delivery is reported as unverified rather than
+    silently assumed. Paths the backend rejected are reported separately as
+    ``Watcher.unwatchable`` and are not listed here. This is a fact about the
+    arming, not a verdict, and it never starts a polling fallback.
+    """
+    return {
+        "event": "native_wake_coverage",
+        "paths": [path.name for path in watcher.paths],
+        "local_origin": "covered",
+        "remote_origin": "unverified",
+    }

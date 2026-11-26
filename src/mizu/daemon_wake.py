@@ -166,6 +166,11 @@ def _wait_native(stop, root, baseline, deadline, config_file, config_files) -> s
         # directory that first appeared on this wake must be watched before
         # the daemon can see a file restored inside it.
         with daemon_notify.Watcher(root, config_file, config_files, stop) as watcher:
+            # Report the coverage boundary as a fact on every arming: local
+            # writes on watched paths wake the daemon, but an accepted watch
+            # cannot establish remote-origin delivery, so that is reported as
+            # unverified instead of being silently assumed. No polling starts.
+            print(json.dumps(daemon_notify.coverage_fact(watcher)), flush=True)
             if watcher.unwatchable:
                 print(json.dumps({"event": "native_wake_unwatchable",
                                   "paths": [p.name for p in watcher.unwatchable]}),

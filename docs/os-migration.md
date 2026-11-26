@@ -77,8 +77,11 @@ reports them, so writes to unwatched root children cannot wake the daemon. A sto
 owned once per daemon lifetime and released when the stop event is collected. This wake
 coverage is established for local filesystems: a successful registration on a network mount
 does not show that changes originating on another host are delivered, and no filesystem-name
-blacklist can prove support. Network-backed coverage is therefore unverified, while a path
-whose registration fails is reported as a fact; neither starts a polling fallback. The matched
+blacklist can prove support. Every arming therefore emits a `native_wake_coverage` fact
+naming the watched paths whose watch was accepted: local-origin changes are covered, while
+remote-origin delivery is reported as unverified rather than assumed. A path whose
+registration fails is reported separately as a `native_wake_unwatchable` fact; neither
+starts a polling fallback. The matched
 before/after CPU receipts for this change are retained path-free in
 `docs/evidence/native-wake-cpu-evidence.json`; verify them with
 `scripts/verify-stage4-cpu-evidence.py --record docs/evidence/native-wake-cpu-evidence.json --repo <checkout>`.

@@ -746,13 +746,21 @@ class NativeWakeTests(unittest.TestCase):
         self.assertEqual(reason, "deadline")
         self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
 
-    def test_unwatchable_path_is_reported_as_a_fact_without_claiming_coverage(self):
+    def test_registered_path_with_no_remote_events_reports_unverified_coverage(self):
+        """A registered path that never delivers a remote event still reports
+        coverage as unverified: registration alone proves no remote delivery.
+        This exercises the network-mount shape (successful registration, no
+        kernel event) instead of injecting a pre-populated unwatchable tuple.
+        """
         from mizu import daemon_notify
         calls = []
         some_path = self.root / "remote-mount"
 
         class FakeWatcher:
-            unwatchable = (some_path,)
+            # Registration SUCCEEDED: nothing is unwatchable, yet wait() never
+            # observes a remote-origin change (the network-mount condition).
+            unwatchable = ()
+            paths = (some_path,)
 
             def __init__(self, *args, **kwargs):
                 calls.append("armed")
@@ -783,23 +791,82 @@ class NativeWakeTests(unittest.TestCase):
 
         self.assertEqual(reason, "deadline")
         self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
-        # The native watcher was consumed and blocked once. A second arming on
-        # the deadline path is expected, but no second wait means no polling
-        # loop was entered (the portable fallback would have raised).
+        # One arming consumed once; the re-arm on the deadline path does not
+        # add a second wait, so no polling fallback was entered.
         self.assertIn("armed", calls)
         self.assertEqual(calls.count("wait"), 1, calls)
         lines = [line for line in captured.getvalue().splitlines() if line.strip()]
-        self.assertTrue(lines, "unwatchable path was not reported as a fact")
-        # Every emitted line is the same degraded fact, once per arming; no
-        # line claims the path is watched or that coverage was established.
-        for line in lines:
-            event = json.loads(line)
+        events = [json.loads(line) for line in lines]
+        coverage = [e for e in events if e.get("event") == "native_wake_coverage"]
+        self.assertTrue(coverage,
+                        "registered path did not report a coverage fact")
+        for event in coverage:
             self.assertEqual(event,
-                             {"event": "native_wake_unwatchable",
-                              "paths": ["remote-mount"]})
-            name = event.get("event", "")
-            self.assertNotIn("watched", name)
-            self.assertNotIn("coverage", name)
+                             {"event": "native_wake_coverage",
+                              "paths": ["remote-mount"],
+                              "local_origin": "covered",
+                              "remote_origin": "unverified"})
+        # No registration failure here, and no line claims remote coverage.
+        self.assertFalse([e for e in events
+                          if e.get("event") == "native_wake_unwatchable"])
+        for event in events:
+            self.assertNotEqual(event.get("remote_origin"), "covered")
+            self.assertNotEqual(event.get("remote_origin"), "established")
+        self.assertFalse(any("watched" in str(v) for e in events
+                             for v in e.values()),
+                         "a fact claimed the path was watched")
+
+    def test_unwatchable_registration_failure_is_reported_as_a_fact(self):
+        """A failed registration is still reported, alongside the coverage
+        fact that every arming emits.
+        """
+        from mizu import daemon_notify
+        some_path = self.root / "remote-mount"
+
+        class FakeWatcher:
+            unwatchable = (some_path,)
+            paths = ()
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def wait(self, deadline):
+                stop.wait(max(0, deadline - time.monotonic()))
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+        deadline = time.monotonic() + 0.2
+        captured = io.StringIO()
+        with patch.object(daemon_notify, "available", return_value=True), \
+                patch.object(daemon_notify, "Watcher", FakeWatcher), \
+                patch.object(daemon_wake, "_wait_portable",
+                             side_effect=AssertionError("polling fallback ran")), \
+                contextlib.redirect_stdout(captured):
+            reason = daemon_wake.wait(stop, self.root, baseline, deadline)
+
+        self.assertEqual(reason, "deadline")
+        events = [json.loads(line) for line in captured.getvalue().splitlines()
+                  if line.strip()]
+        unwatchable = [e for e in events
+                       if e.get("event") == "native_wake_unwatchable"]
+        self.assertTrue(unwatchable, "registration failure not reported")
+        for event in unwatchable:
+            self.assertEqual(event, {"event": "native_wake_unwatchable",
+                                     "paths": ["remote-mount"]})
+        coverage = [e for e in events if e.get("event") == "native_wake_coverage"]
+        self.assertTrue(coverage)
+        for event in coverage:
+            self.assertEqual(event["paths"], [])
+            self.assertEqual(event["remote_origin"], "unverified")
 
     def test_arming_failure_does_not_resume_periodic_polling(self):
         # A reported native failure must not silently become the one-second
