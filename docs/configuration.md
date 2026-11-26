@@ -2071,6 +2071,7 @@ best-effort daemon periodic fetch.
 | `artifact_page_bytes` | `min(524288, max(1, max_bytes // 8))` | Per-page UTF-8 byte cap (65,536 with default `max_bytes`). Explicit values must be integers from 1 through `max(1, max_bytes // 8)`; reserves worst-case JSON escaping plus envelope headroom within the unchanged invocation budget |
 | `diagnostic_bytes` | `2048` | Maximum stderr tail on a nonzero exit or optional VCS CI typed-outcome diagnostic (0–8192; `0` disables); both are labelled `external-untrusted` and model-visible. The typed text is informational and never changes outcome validation |
 | `ci_branch` | `""` | CI/reporting branch exposed only to `vcs_read` roles and included in the default CI wake set when nonempty |
+| `default_branch` | `""` (shipped example: `"main"`) | Default branch added to the CI live-ref inventory and used as the empty-workspace poll target and for the `sync` receipt `upstream` SHA; empty adds no branch and leaves `upstream` null |
 | `ci_wait_descendants` | `true` | Strict boolean: snapshot-bound `publication_ci` waits may observe retained strict descendants through at most `limits.history_index` immutable parent edges; `false` keeps exact-only matching. Existing receipt-pinned `ci` waits are unchanged; see [CI waits](scheduling.md#exact-sha-work-item-ci-waits) |
 | `ci_wake_extra_branches` | `[]` | Add up to 64 valid branch names to the CI wake set; deduplicated with `ci_branch`; empty preserves existing default behavior |
 | `ci_cache_max_branches` | `128` | Retained branches per failure/success map (integer 1–2048); effective capacity is the maximum of this value, the deduplicated selected wake-branch count, and one |
@@ -2094,8 +2095,9 @@ shell, `maximum=max_bytes`. Trust: operator-owned host program only; never
 model-provided, never run in the sandbox. Retry/cancellation: single
 invocation per call under the configured timeout; no shell retry.
 Evidence: `sync` writes `sync.json` (full refs) and returns a bounded
-summary (`injected`, `prefix`, `trust`, `upstream` for `main`, sorted `refs`
-names); completion still binds to `code_digest` via `verify`. Failure: `ConfigError` on unknown keys, bad argv, or
+summary (`injected`, `prefix`, `trust`, `upstream` for the configured
+`[vcs] default_branch`, sorted `refs` names); completion still binds to
+`code_digest` via `verify`. Failure: `ConfigError` on unknown keys, bad argv, or
 out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON. A normally exited nonzero command may include the configured final stderr tail in its error; typed `not_dispatched` and reconciliation `unknown` responses may also include an optional `diagnostic` string. Both are clipped to `[vcs].diagnostic_bytes`, labelled `external-untrusted`, and may contain private host data; setting it to `0` suppresses both. Typed diagnostics are informational only and never establish identity, spend, settlement, or retry permission.
 

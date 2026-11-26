@@ -429,6 +429,7 @@ change_stream_enabled = false # Opt-in read-only adapter-wide changes; no pollin
 # malformed responses and invocation failures are denied. No retries or cursor storage.
 # Results are external-untrusted; the adapter owns subjects, detection and cursor validity.
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); empty disables exposure.
+default_branch = "main"      # Default branch used when no refs are cached and for the sync receipt upstream SHA; empty disables that fallback.
 ci_wake_extra_branches = [] # Add up to 64 valid branches to CI wake selection; combined with ci_branch (empty default preserves prior behavior).
 ci_cache_max_branches = 128 # Retention per failure/success map (1-2048); effective capacity also fits every selected wake branch.
 ci_cache_max_checks_per_branch = 16 # Retention per branch (1-1024); effective branches * checks must be <= 2048.

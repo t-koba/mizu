@@ -107,13 +107,23 @@ admission) and retains only the newest observation owned by the driver, so it
 adds no daemon periodic work; the daemon code
 and wake paths are untouched and no new CPU receipt is required for this slice.
 
+The three stage-5 behaviour-code branch literals are removed: the CI live-ref
+fallback, the empty-workspace poll target and the sync receipt's `upstream` SHA
+come from `[vcs] default_branch` (empty in the kernel, `"main"` in the shipped
+example config). With no default configured the kernel adds no branch, polls no
+branch and reports a null `upstream`; none of these three paths hardcodes a
+forge branch name. The separate legacy schema-1 lineage validator still pins
+`refs/heads/main` as a declared wire-format constant; schema 2 binds to the
+configured `[vcs.lineage_target]`, and that legacy format is outside this
+cutover.
+
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
 | 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader cursors and acknowledgement, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |
 | 2. Proposals, decisions, questions, answers, notices | Nothing new | Queues for each, and the policy text for who writes and reads them and what a reader does | insights, insight_index, insight_tools, decision_delivery, decision_reconciliation, decision_idle, record_migration, operator_records, operator_record_index, host_records and the insight branches in shared modules |
 | 3. Work items, waits, completion | Nothing new | Work as messages in a queue, waits as delayed messages or as reading for a referring message, completion as policy (the holder's judgement and an independent check) | work_items and work_item_* modules, completion_evidence and completion_* modules, ready-work projection |
 | 4. Wake and scheduling | Daemon sleeps on wakes and the earliest `deliver_at`; outcome effects from configuration | Outcome names and effects per role; which queues wake each role | idle_seconds re-evaluation loop, readiness recheck cadence, event-recovery polls, CI re-wake cadence, fixed wake order in runtime/scheduling, progress outcome lists |
-| 5. Drivers | Driver observations appended to configured queues; generic driver operations | Version control, CI, pull requests, publication and review as driver operations plus queues and policy | ci_* modules, the pull-request model in vcs, reviews, publication-state projection, `"main"` literals, `GO <branch>` title parsing, CI wait kinds |
+| 5. Drivers | Driver observations appended to configured queues; generic driver operations | Version control, CI, pull requests, publication and review as driver operations plus queues and policy; the default branch as `[vcs] default_branch` | ci_* modules, the pull-request model in vcs, reviews, publication-state projection, `GO <branch>` title parsing, CI wait kinds |
 | 6. Child units and the writer | Child units started asynchronously, their result appended to a queue; workspace write is a resource with one holder | Delegation and consultation as role configuration; work order, continuation and parking rules as policy | delegation/consult special cases, work_order, continuations, `workspace == "write"` behavioural branches |
 | 7. Text and periphery | Unit openings and tool descriptions state facts only | Behavioural guidance in role policy files | instructional prompt text, installer source testing, smoke retention and `smoke_refs` in record schemas |
 

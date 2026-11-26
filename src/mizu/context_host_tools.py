@@ -10,6 +10,7 @@ from __future__ import annotations
 from . import vcs as _vcs
 from .errors import Denied
 from .fs import write_json
+from .vcs_poll_policy import vcs_default_branch
 
 
 class ContextHostToolsMixin:
@@ -33,7 +34,7 @@ class ContextHostToolsMixin:
         names = sorted(fetched["refs"])
         record = {"synced": True, "injected": receipt["injected"],
                   "prefix": receipt["prefix"], "trust": "external-untrusted",
-                  "upstream": fetched["refs"].get("main"),
+                  "upstream": fetched["refs"].get(vcs_default_branch(self.config)),
                   "evidence": "sync.json", "refs": names}
         write_json(self.run_dir / "sync.json",
                    {"injected": receipt["injected"], "prefix": receipt["prefix"],

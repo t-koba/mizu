@@ -30,7 +30,8 @@ class VcsSyncTests(Fixture):
             worker, capabilities=tuple(list(worker.capabilities) + ["sync"]))
         config = dataclasses.replace(
             self.config,
-            vcs=adapter_settings(fetch_code(refs_json)),
+            vcs={**adapter_settings(fetch_code(refs_json)),
+                 "default_branch": self.config.vcs["default_branch"]},
             roles={**self.config.roles, "worker": synced})
         from mizu.fs import mkdir
         import uuid
@@ -126,7 +127,8 @@ class VcsSyncTests(Fixture):
             worker, capabilities=tuple(list(worker.capabilities) + ["sync"]))
         config = dataclasses.replace(
             self.config,
-            vcs=adapter_settings(fetch_code('{"main": "%s"}' % SHA_A)),
+            vcs={**adapter_settings(fetch_code('{"main": "%s"}' % SHA_A)),
+                 "default_branch": self.config.vcs["default_branch"]},
             roles={**self.config.roles, "worker": synced})
         before = self.project.snapshots.get()
         project = self.project

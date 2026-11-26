@@ -2128,7 +2128,7 @@ def load(file: Path) -> Config:
         _validate_review_capabilities(name, role.workspace, role.capabilities)
     vcs = data.get("vcs", {})
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
-               "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
+               "max_bytes", "diagnostic_bytes", "ci_branch", "default_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
                "poll_enabled", "poll_proposals_enabled", "observation_queue", "approval_queue", "change_stream_enabled", "ci_wait_descendants",
                "poll_interval_seconds", "poll_max_branches", "poll_max_ci_wait_targets",
                "ci_cache_max_branches", "ci_cache_max_checks_per_branch",
@@ -2138,7 +2138,7 @@ def load(file: Path) -> Config:
     vcs = {"command": [], "timeout_seconds": 20,
            "artifact_full_read_chars": DEFAULT_ARTIFACT_FULL_READ_CHARS,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
-           "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
+           "ci_branch": "", "default_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False, "observation_queue": "", "approval_queue": "",
            "change_stream_enabled": False, "ci_wait_descendants": True,
            "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4, "poll_max_ci_wait_targets": 16,
@@ -2162,6 +2162,10 @@ def load(file: Path) -> Config:
     vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
         raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
+    vcs["default_branch"] = string(vcs["default_branch"], "vcs.default_branch")
+    if vcs["default_branch"] and (len(vcs["default_branch"]) > 256
+                                  or any(c.isspace() for c in vcs["default_branch"])):
+        raise ConfigError("vcs.default_branch must be empty or a branch name without whitespace (at most 256 chars)")
     vcs["ci_wake_extra_branches"] = strings(
         vcs["ci_wake_extra_branches"], "vcs.ci_wake_extra_branches")
     if len(vcs["ci_wake_extra_branches"]) > MAX_CI_WAKE_EXTRA_BRANCHES:

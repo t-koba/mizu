@@ -112,6 +112,20 @@ def vcs_poll_enabled(config) -> bool:
         return False
 
 
+def vcs_default_branch(config) -> str:
+    """Configured `[vcs] default_branch`, or empty when absent or malformed.
+
+    Schema: nonempty branch name or empty string. Trust: operator config, never
+    model input; this helper never invents a branch. Failure: never raises and
+    fails closed to the empty string so callers add no branch at all.
+    """
+    try:
+        value = config.vcs.get("default_branch", "")
+    except (AttributeError, TypeError):
+        return ""
+    return value if isinstance(value, str) and value else ""
+
+
 def vcs_poll_interval(config) -> float:
     """Daemon VCS poll cadence (seconds) from `vcs.poll_interval_seconds`."""
     try:

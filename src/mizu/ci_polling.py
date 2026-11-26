@@ -16,7 +16,8 @@ from .ci_wake import effective_ci_wake_branches
 from .errors import Denied
 from .fs import now as now_iso
 from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
-                              vcs_poll_max_branches, vcs_poll_status_timeout)
+                              vcs_default_branch, vcs_poll_max_branches,
+                              vcs_poll_status_timeout)
 
 
 def _merge_ci_success_rows(existing, incoming, config=None) -> list:
@@ -104,11 +105,13 @@ def _prune_ci_branch_map(mapping: dict, protected_branches, config=None, *,
 
 
 def _live_ci_branches(config, project):
-    """Complete local ref inventory with the CI main fallback; read errors propagate."""
+    """Complete local ref inventory plus the configured default branch; read errors propagate."""
     live = set(_vcs.list_refs(project.root))
-    # Preserve the fresh-workspace/main fallback used by CI target selection.
-    if len(live) <= vcs_poll_max_branches(config):
-        live.add("main")
+    # Preserve the fresh-workspace fallback used by CI target selection only
+    # when an operator has configured a default branch; otherwise add nothing.
+    default_branch = vcs_default_branch(config)
+    if default_branch and len(live) <= vcs_poll_max_branches(config):
+        live.add(default_branch)
     return live
 
 
@@ -156,8 +159,10 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 raise Denied(f"CI polling is unavailable: {exc}") from exc
             branches_total = len(names)
             if len(names) <= max_branches:
-                # Fall back to main so a fresh workspace still polls once configured.
-                targets = names or ["main"]
+                # Fall back to the configured default so a fresh workspace
+                # still polls; no default means no target at all.
+                default_branch = vcs_default_branch(config)
+                targets = names or ([default_branch] if default_branch else [])
             else:
                 offset = state.get("ci_offset", 0)
                 if not isinstance(offset, int) or offset < 0:
