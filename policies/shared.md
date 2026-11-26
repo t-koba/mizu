@@ -45,7 +45,7 @@ do not use this token contract.
 ## Messages
 
 The unit opening's `queues` lists, for each queue you may read, the due
-messages not yet delivered to you: their count and the newest of them. The
+messages not yet delivered to you: their count and the oldest of them. The
 kernel records delivery when it hands content to a dispatched opening or when
 you call `queue_read` or `message_read`; there is no separate acknowledgement
 step, and a `cursor` passed to `queue_read` only pages stored history. Reading
