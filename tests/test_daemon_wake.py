@@ -2,6 +2,8 @@
 import contextlib
 import ctypes
 import gc
+import io
+import json
 import os
 import sys
 import tempfile
@@ -743,6 +745,61 @@ class NativeWakeTests(unittest.TestCase):
         reason = daemon_wake.wait(threading.Event(), self.root, baseline, deadline)
         self.assertEqual(reason, "deadline")
         self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
+
+    def test_unwatchable_path_is_reported_as_a_fact_without_claiming_coverage(self):
+        from mizu import daemon_notify
+        calls = []
+        some_path = self.root / "remote-mount"
+
+        class FakeWatcher:
+            unwatchable = (some_path,)
+
+            def __init__(self, *args, **kwargs):
+                calls.append("armed")
+
+            def wait(self, deadline):
+                calls.append("wait")
+                stop.wait(max(0, deadline - time.monotonic()))
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+        deadline = time.monotonic() + 0.2
+        captured = io.StringIO()
+        with patch.object(daemon_notify, "available", return_value=True), \
+                patch.object(daemon_notify, "Watcher", FakeWatcher), \
+                patch.object(daemon_wake, "_wait_portable",
+                             side_effect=AssertionError("polling fallback ran")), \
+                contextlib.redirect_stdout(captured):
+            reason = daemon_wake.wait(stop, self.root, baseline, deadline)
+
+        self.assertEqual(reason, "deadline")
+        self.assertGreaterEqual(time.monotonic(), deadline - 0.02)
+        # The native watcher was consumed and blocked once. A second arming on
+        # the deadline path is expected, but no second wait means no polling
+        # loop was entered (the portable fallback would have raised).
+        self.assertIn("armed", calls)
+        self.assertEqual(calls.count("wait"), 1, calls)
+        lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+        self.assertTrue(lines, "unwatchable path was not reported as a fact")
+        # Every emitted line is the same degraded fact, once per arming; no
+        # line claims the path is watched or that coverage was established.
+        for line in lines:
+            event = json.loads(line)
+            self.assertEqual(event,
+                             {"event": "native_wake_unwatchable",
+                              "paths": ["remote-mount"]})
+            name = event.get("event", "")
+            self.assertNotIn("watched", name)
+            self.assertNotIn("coverage", name)
 
     def test_arming_failure_does_not_resume_periodic_polling(self):
         # A reported native failure must not silently become the one-second
