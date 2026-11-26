@@ -442,8 +442,12 @@ class _WinChange:
                 is_narrow = os.fspath(directory) in narrow
                 notify_filter = self._ENTRY_FILTER if is_narrow else self._FILTER
                 subtree = False if is_narrow else True
+                # FindFirstChangeNotificationW requires a fully qualified path;
+                # a relative configured directory would fail every registration.
+                # This is an intrinsic Win32 precondition, not watch policy.
+                absolute = os.path.abspath(os.fspath(directory))
                 handle = k32.FindFirstChangeNotificationW(
-                    os.fspath(directory), subtree, notify_filter)
+                    absolute, subtree, notify_filter)
                 if handle in (None, self._INVALID):
                     failed.append(directory)
                 else:

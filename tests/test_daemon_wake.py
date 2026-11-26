@@ -1,5 +1,6 @@
 """Portable daemon wake detection: metadata fingerprint and interruptible wait."""
 import contextlib
+import ctypes
 import gc
 import os
 import sys
@@ -807,6 +808,46 @@ class NativeWakeTests(unittest.TestCase):
         thread.join()
         self.assertEqual(reason, "stop")
         self.assertLess(time.monotonic() - started, 1.0)
+
+
+class WinChangePathTests(unittest.TestCase):
+    """Win32 registration needs a full path; the ABI itself is mocked here."""
+
+    def setUp(self):
+        from mizu import daemon_notify
+        self.daemon_notify = daemon_notify
+        self.kernel = Mock()
+        self.paths = []
+
+        def register(path, subtree, notify_filter):
+            self.paths.append(path)
+            return 123  # a valid, non-INVALID notification handle
+
+        self.kernel.FindFirstChangeNotificationW.side_effect = register
+        patcher = patch.object(ctypes, "WinDLL", Mock(return_value=self.kernel),
+                               create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _watch(self, directory):
+        stop = Mock()
+        stop.event.return_value = 0x5A5A  # sentinel stop handle
+        watcher = self.daemon_notify._WinChange(
+            (directory,), (), stop, frozenset())
+        self.addCleanup(watcher.close)
+        return watcher
+
+    def test_registration_uses_absolute_path(self):
+        relative = Path("relative-watch-dir")
+        watcher = self._watch(relative)
+        self.assertEqual(self.paths, [os.path.abspath(relative)])
+        self.assertEqual(watcher.unwatchable, ())
+
+        absolute = Path(os.path.abspath(relative))
+        self.paths.clear()
+        watcher = self._watch(absolute)
+        self.assertEqual(self.paths, [os.fspath(absolute)])
+        self.assertEqual(watcher.unwatchable, ())
 
 
 if __name__ == "__main__":
