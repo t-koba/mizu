@@ -5,6 +5,7 @@ import unittest
 import support  # noqa: F401
 from support import Fixture
 from mizu.errors import Denied
+from mizu.fs import read_json
 from mizu.kernel import parse_queues
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, operation_allowed, tool_definitions
@@ -40,6 +41,11 @@ class QueueTools(Fixture):
     def granted(self, name="worker"):
         return self.context(name)
 
+    def delivery_unit(self, queue, seq, actor="role:worker"):
+        path = (self.project.root / "queues" / queue / "delivery" / f"{seq:020d}"
+                / (actor.replace(":", "_") + ".json"))
+        return read_json(path)["unit"]
+
     def test_end_to_end_actor_binding_and_bounded_pages(self):
         ctx = self.granted()
         first = ctx.handle("queue_write", {"queue": "notes", "body": {"title": "one"}})
@@ -51,13 +57,25 @@ class QueueTools(Fixture):
         with self.assertRaisesRegex(Denied, "different content"):
             ctx.handle("queue_write", {"queue": "notes", "body": {"title": "two"},
                                        "id": first["id"]})
-        second = ctx.handle("queue_write", {"queue": "notes", "body": {"title": "two"}})
+        store = self.project.kernel_queues
+        # The worker's own append is credited to it, so an operator's message
+        # is what a read actually delivers.
+        second = store.append("notes", {"title": "two"}, "operator")
+        third = store.append("notes", {"title": "three"}, "operator")
+        fourth = store.append("notes", {"title": "four"}, "operator")
         page = ctx.handle("queue_read", {"queue": "notes", "limit": 1})
-        self.assertEqual([item["id"] for item in page["messages"]], [first["id"]])
+        self.assertEqual([item["id"] for item in page["messages"]], [second["id"]])
         self.assertTrue(page["more"])
-        rest = ctx.handle("queue_read", {"queue": "notes", "cursor": page["next"]})
-        self.assertEqual([item["id"] for item in rest["messages"]], [second["id"]])
-        self.assertEqual(ctx.handle("queue_ack", {"queue": "notes", "seq": second["seq"]}), {"seq": 2})
+        self.assertTrue(store.delivered("notes", second["seq"], "role:worker"))
+        self.assertEqual(self.delivery_unit("notes", second["seq"]), ctx.run_dir.name)
+        rest = ctx.handle("queue_read", {"queue": "notes", "cursor": page["next"], "limit": 1})
+        self.assertEqual([item["id"] for item in rest["messages"]], [third["id"]])
+        self.assertTrue(store.delivered("notes", third["seq"], "role:worker"))
+        self.assertEqual(self.delivery_unit("notes", third["seq"]), ctx.run_dir.name)
+        self.assertEqual(ctx.handle("message_read", {"id": fourth["id"]}), fourth)
+        self.assertTrue(store.delivered("notes", fourth["seq"], "role:worker"))
+        self.assertEqual(self.delivery_unit("notes", fourth["seq"]), ctx.run_dir.name)
+        self.assertEqual(ctx.handle("queue_read", {"queue": "notes"})["messages"], [])
         self.assertEqual(ctx.handle("message_read", {"id": first["id"]}), first)
         with self.assertRaises(Denied):
             ctx.handle("message_read", {"id": "0" * 32})
@@ -99,15 +117,18 @@ class QueueTools(Fixture):
             ctx.handle("message_refs", {"id": "0" * 32, "direction": "sideways"})
 
     def test_definitions_grants_and_observational_classification(self):
-        for name in ("queue_write", "queue_read", "queue_ack", "message_read", "message_refs"):
+        for name in ("queue_write", "queue_read", "message_read", "message_refs"):
             self.assertIn(name, DEFINITIONS)
             self.assertTrue(operation_allowed(name, {"queues"}))
             self.assertFalse(operation_allowed(name, set()))
+        self.assertNotIn("queue_ack", DEFINITIONS)
+        self.assertFalse(operation_allowed("queue_ack", {"queues"}))
         self.assertTrue({"queue_read", "message_read", "message_refs"} <= OBSERVATIONAL_OPS)
-        self.assertFalse({"queue_write", "queue_ack"} & OBSERVATIONAL_OPS)
+        self.assertNotIn("queue_write", OBSERVATIONAL_OPS)
         definitions = {tool["operation"] for tool in tool_definitions(("queues",))}
-        self.assertTrue({"queue_write", "queue_read", "queue_ack", "message_read",
+        self.assertTrue({"queue_write", "queue_read", "message_read",
                          "message_refs"} <= definitions)
+        self.assertNotIn("queue_ack", definitions)
 
 
 if __name__ == "__main__":

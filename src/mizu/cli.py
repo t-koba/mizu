@@ -184,10 +184,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", required=True)
     p.add_argument("--subject", required=True, help="Exact snapshot subject as JSON")
     p.add_argument("--payload", required=True, help="Declared bounded payload as JSON")
-    p = sub.add_parser("queue", help="Write, read or acknowledge declared queue messages as operator or host",
+    p = sub.add_parser("queue", help="Write, read or inspect declared queue messages as operator or host",
                        usage="mizu queue PROJECT write QUEUE --body JSON|- [--id ID] [--ref ID ...] [--deliver-at ISO] [--host]\n"
                              "       mizu queue PROJECT read QUEUE [--cursor SEQ] [--limit N] [--host]\n"
-                             "       mizu queue PROJECT ack QUEUE SEQ [--host]\n"
                              "       mizu queue PROJECT message ID [--host]\n"
                              "       mizu queue PROJECT refs ID --direction in|out [--cursor ID] [--limit N] [--host]")
     p.add_argument("project", help="Managed project name")
@@ -198,13 +197,10 @@ def parser() -> argparse.ArgumentParser:
     q.add_argument("--id", default=None, help="Message id (32 hex) for idempotent retries")
     q.add_argument("--ref", action="append", default=None, help="Id of an earlier message this one refers to")
     q.add_argument("--deliver-at", default=None, help="Aware ISO time before which the message is not delivered")
-    q = qsub.add_parser("read", help="Read due messages after the principal's cursor, or after --cursor")
+    q = qsub.add_parser("read", help="Read due messages undelivered to the principal, or page from --cursor")
     q.add_argument("queue")
-    q.add_argument("--cursor", type=int, default=None, help="Read after this sequence instead of the acknowledged cursor")
+    q.add_argument("--cursor", type=int, default=None, help="Page after this sequence; returned rows are recorded delivered")
     q.add_argument("--limit", type=int, default=None, help="Messages per page (1-512; default 64)")
-    q = qsub.add_parser("ack", help="Advance the principal's cursor")
-    q.add_argument("queue")
-    q.add_argument("seq", type=int)
     q = qsub.add_parser("message", help="Read one message by id")
     q.add_argument("id")
     q = qsub.add_parser("refs", help="List messages referring to an id (in) or that it refers to (out)")
@@ -567,9 +563,10 @@ def _cmd_queue(project, args):
     """Operator or host access to declared queues; returns the kernel's JSON result.
 
     The principal is ``operator``, or ``host`` with ``--host``; the queue
-    declaration decides what it may write and read. ``read --cursor SEQ``
-    reads after SEQ without touching the principal's cursor and reports
-    ``head`` (the last sequence), so a caller can page from the end.
+    declaration decides what it may write and read. A read delivers the
+    returned messages to that principal; ``--cursor SEQ`` pages history from
+    SEQ and the rows it returns are recorded delivered too. ``head`` is the
+    last sequence.
     """
     from .fs import loads_finite
     store = project.kernel_queues
@@ -587,11 +584,9 @@ def _cmd_queue(project, args):
         options = {"cursor": args.cursor}
         if args.limit is not None:
             options["limit"] = args.limit
-        return store.read(args.queue, actor, **options)
-    if command == "ack":
-        return {"seq": store.ack(args.queue, actor, args.seq)}
+        return store.read(args.queue, actor, unit="cli", **options)
     if command == "message":
-        return store.message(args.id, actor)
+        return store.message(args.id, actor, unit="cli")
     options = {"cursor": args.cursor}
     if args.limit is not None:
         options["limit"] = args.limit

@@ -2,8 +2,8 @@
 
 Trust: capability and argument validation run before any queue I/O, including
 on the direct dispatch path. The acting author is bound to the trusted Context
-role; no argument can select a principal, another role's cursor, or a queue
-whose declaration denies that author. Queue names, message meanings and
+role; no argument can select a principal, another reader's delivery facts,
+or a queue whose declaration denies that author. Queue names, message meanings and
 references come only from deployment configuration; this module names none of
 them.
 """
@@ -34,21 +34,16 @@ def queue_write(context, args: dict) -> dict:
 
 def queue_read(context, args: dict) -> dict:
     _gate(context, "queue_read", args)
-    options = {"cursor": args.get("cursor")}
+    options = {"cursor": args.get("cursor"), "unit": context.run_dir.name}
     if "limit" in args:
         options["limit"] = args["limit"]
     return context.project.kernel_queues.read(args["queue"], _actor(context), **options)
 
 
-def queue_ack(context, args: dict) -> dict:
-    _gate(context, "queue_ack", args)
-    return {"seq": context.project.kernel_queues.ack(
-        args["queue"], _actor(context), args["seq"])}
-
-
 def message_read(context, args: dict) -> dict:
     _gate(context, "message_read", args)
-    return context.project.kernel_queues.message(args["id"], _actor(context))
+    return context.project.kernel_queues.message(
+        args["id"], _actor(context), unit=context.run_dir.name)
 
 
 def message_refs(context, args: dict) -> dict:

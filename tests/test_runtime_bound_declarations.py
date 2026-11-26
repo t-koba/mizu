@@ -618,6 +618,9 @@ DECLARATIONS = {
         'INTEGER_LIMIT': (
             '(1 << 63) - 1', 'format',
             'kernel queues / TOML signed-64-bit integer representation ceiling for declared fields'),
+        '_DELIVERY_UNIT_MAX': (
+            '128', 'mechanism',
+            'kernel queues / bounded consuming-unit name stored with each delivery fact'),
     },
     'lock_diagnostics.py': {
         'MAX_LOCK_DIAGNOSTIC_ROWS': (
@@ -1902,6 +1905,9 @@ TIMED_WAIT_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
+    ('kernel/queues.py', 'QueueStore._migrate_cursors', 0, 0): (
+        '1', 'format',
+        'kernel queues / cursor migration starts at the first sequence'),
     ('ci_requests.py', 'CiRequests.prior_spend_possible', 0, 0): (
         '1', 'format',
         'CI request attempts / attempt identities start at one; inspect only prior attempts'),
@@ -1949,12 +1955,9 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('kernel/queues.py', 'QueueStore._retain_last', 1, 0): (
         'stop + 1', 'mechanism',
         'kernel queues / count retention window ends at the bounded derived stop sequence'),
-    ('kernel/queues.py', 'QueueStore.ack', 0, 0): (
-        'current + 1', 'mechanism',
-        'kernel queues / acknowledgement checks messages after the durable cursor'),
-    ('kernel/queues.py', 'QueueStore.ack', 1, 0): (
-        'seq + 1', 'mechanism',
-        'kernel queues / acknowledgement checks the requested sequence inclusively'),
+    ('kernel/queues.py', 'QueueStore._migrate_cursors', 1, 0): (
+        'min(seq, self._head(queue)) + 1', 'mechanism',
+        'kernel queues / cursor migration replays up to the cursor without passing the head'),
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT', 'safety',
         'check jobs / reconstruct the bounded legacy sequence space before indexed allocation'),

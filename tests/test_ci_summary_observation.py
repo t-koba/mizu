@@ -331,7 +331,10 @@ class CiSummaryObservationTests(Fixture):
         body = rows[0]["messages"][0]["body"]
         self.assertEqual((body["driver"], body["kind"]), ("ci_summary", "ci_summary"))
         self.assertEqual(json.loads(body["detail"])["facts"], payload["ci_summary"])
-        queue_facts.mark_woken(self.project, "worker", context.queues)
+        queue_facts.deliver_opening(self.project, "worker", context.queues, "observation-unit")
+        self.assertTrue(store.delivered(QUEUE, rows[0]["messages"][0]["seq"], "role:worker"))
+        self.assertEqual([r for r in queue_facts.opening(self.project, "worker")
+                          if r.get("queue") == QUEUE], [])
         self.assertFalse(store.due(QUEUE, "role:worker"))
 
     def test_distinct_reader_gets_no_fact_on_fixed_key_or_queue_opening(self):

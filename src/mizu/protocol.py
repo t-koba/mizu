@@ -585,19 +585,16 @@ DEFINITIONS = {
                          "refs": array(KERNEL_ID_SCHEMA, QUEUE_PAGE_MAX),
                          "deliver_at": text(64), "id": KERNEL_ID_SCHEMA},
                         ("queue", "body"))),
-    "queue_read": ("Read due messages from a declared queue after your role's durable cursor, or "
-                   "after cursor when supplied. Reads are bounded; next, head and more locate the "
-                   "page, including a delayed flag when delivery stops at a not-yet-due message. A read does not advance the cursor. The host binds the role and the queue's "
-                   "read grant is enforced by the kernel.",
+    "queue_read": ("Read undelivered due messages from a declared queue, recording what you read "
+                   "as delivered to your role. Reads are bounded; next, head and more locate the "
+                   "page, including a delayed flag when delivery stops at a not-yet-due message. "
+                   "cursor is only a page position through history; the rows it returns are "
+                   "still recorded delivered, like any read. "
+                   "The host binds the role and the queue's read grant is enforced by the kernel.",
                    obj({"queue": KERNEL_NAME_SCHEMA,
                         "cursor": KERNEL_CURSOR_SCHEMA,
                         "limit": {"type": "integer", "minimum": 1, "maximum": QUEUE_PAGE_MAX}},
                        ("queue",))),
-    "queue_ack": ("Advance your role's durable cursor in a declared queue to seq; a seq above the "
-                  "queue head or whose prefix contains a not-yet-due message is refused, and cursors "
-                  "only move forward. The host binds the role.",
-                  obj({"queue": KERNEL_NAME_SCHEMA, "seq": KERNEL_CURSOR_SCHEMA},
-                      ("queue", "seq"))),
     "message_read": ("Read one message by its 32-hex id if your role may read its queue. The host "
                      "binds the role; no author or queue argument is accepted.",
                      obj({"id": KERNEL_ID_SCHEMA}, ("id",))),
@@ -626,7 +623,6 @@ STATE_READ_CAPABILITIES = {
 KERNEL_CAPABILITIES = {
     "queue_write": frozenset({"queues"}),
     "queue_read": frozenset({"queues"}),
-    "queue_ack": frozenset({"queues"}),
     "message_read": frozenset({"queues"}),
     "message_refs": frozenset({"queues"}),
 }

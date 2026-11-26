@@ -11,7 +11,7 @@ policy files, and the kernel neither knows nor enforces it.
 |---|---|---|
 | Units | Start, stop, interrupt and resume a unit of model work for a configured role; engine drivers, sessions, resource bounds, sandboxed execution, isolation, tool grants; content-addressed workspace snapshots | Which role exists, what it should do, what a good result is |
 | Scheduler | Execution slots, the admission queue, cache-aware placement; wakes a role only when a message arrives in a queue it is woken by, or when a delayed message becomes due | Priorities between kinds of work, what counts as progress |
-| Queues | Named, declared message queues: authenticated append, durable per-reader cursors and acknowledgement, delayed delivery, references between messages | What a queue is for, what a message means, what any message "closes" or "completes" |
+| Queues | Named, declared message queues: authenticated append, durable per-reader delivery facts, delayed delivery, references between messages | What a queue is for, what a message means, what any message "closes" or "completes" |
 | Accounting | Request budgets, token usage, time | Spending policy |
 | Drivers | Opaque operations on external systems (version control, CI, search, dependency materialisation); what they observe arrives as messages in a configured queue | Forge, CI, branch or review semantics |
 | Tools | Model-facing operations over the parts above | How a model should behave |
@@ -25,7 +25,7 @@ Rules for kernel code:
   what to do with their messages.
 - The kernel has no notion of a record's state. Nothing is "open", "accepted",
   "answered" or "done" to the kernel. A message is appended, delivered and
-  acknowledged; anything more is a reading of messages that roles, the
+  delivered; anything more is a reading of messages that roles, the
   dashboard or operator tooling make.
 - Documented defaults for mechanism parameters are fine; example
   configurations ship under `examples/`.
@@ -47,7 +47,7 @@ A queue is declared by the deployment:
 ```toml
 [queues.proposals]
 write = ["role:*", "host", "operator"]   # principals that may append
-read = ["role:writer", "operator"]       # principals that may read and acknowledge
+read = ["role:writer", "operator"]       # principals that may read
 wake = ["role:writer"]                   # readers woken by a new message (subset of read)
 retain_days = 30                         # default 30; see Retention
 # retain_last = 1                        # keep only newest N (not with wake or retain_days)
@@ -92,44 +92,49 @@ body = {type = "string", max = 65536}
   timers: a deferral, a revisit or a deadline is a message to oneself or to
   another role with a delivery time. A delayed revisit is a hint, not
   authority: deployment consumers recheck the current decision chain with
-  `message_refs` and may acknowledge a stale revisit without acting. The kernel
+  `message_refs` and may read a stale revisit without acting. The kernel
   has no withdraw or cancel, so a pending revisit still wakes its readers when
   due and blocks a contiguous read until then.
 
 ### Delivery
 
-- Each reader principal has a durable cursor per queue: the last acknowledged
-  `seq`. A read returns due messages after the cursor, bounded per page.
+- Each reader principal has one create-only delivery fact per delivered
+  message, stored beside that message. A read delivers the oldest messages in
+  `seq` order that are due and have no fact for that reader, bounded per page.
   `next` never crosses a message that is not due yet: delivery is a contiguous
-  run from the cursor, so a delayed message blocks later messages for that
-  reader. A read stopped at one reports `delayed: true`, `next` at the last
+  run from the retained prefix, so a delayed message blocks later messages for
+  that reader. A read stopped at one reports `delayed: true`, `next` at the last
   delivered message and `more: true`; wake on the message's due time to resume.
-  Acknowledgement is explicit and monotonic; a `seq` whose prefix contains a
-  not-yet-due message is refused, and unacknowledged messages are delivered
-  again. Messages already removed by retention leave a gap that acknowledgement
-  skips, matching the reads that crossed it.
+  `cursor` is only a page position through history: it chooses where a read
+  starts, and the rows any read returns are recorded delivered, cursor or
+  not. Messages already removed by retention leave a gap that reads cross.
 - Appending a due message, or a delayed message becoming due, touches
-  `wake/<role>` for each role in the queue's `wake` list. A message wakes each
-  reader once: a unit's durable finish records, per reader, the last message its
-  opening delivered (`woken/<principal>.json`), and only a later due message
-  wakes that reader again. Unacknowledged messages stay pending and readable
-  but are not a standing wake. A reader is not woken by its own message,
-  except a delayed one, which is a wake its author asked for. A reply also
-  wakes the author of the message it refers to (see `refs`). The service manager
-  watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's
-  own watch). The scheduler sleeps until the next wake or the earliest
-  `deliver_at`.
+  `wake/<role>` for each role in the queue's `wake` list. A queue wakes while it
+  holds a due, wake-eligible message with no delivery fact for that reader;
+  delivery consumes the wake. A dispatched unit records delivery for every
+  message its opening showed, including when the optional `queues` section is
+  omitted from its prompt, so a shown message wakes once. A reader is not woken
+  by its own message, except a delayed one, which is a wake its author asked
+  for. A reply also wakes the author of the message it refers to (see `refs`).
+  The service manager watches the wake files (systemd PathChanged, launchd
+  WatchPaths, or the resident daemon's own watch). The scheduler sleeps until
+  the next wake or the earliest `deliver_at`.
+- Older `cursors/` and `woken/` files are converted to delivery facts once on
+  first use and marked as migrated; afterwards delivery facts are the only
+  reader state.
 
 ### Retention
 
-A message is removed once every reader in `read` has acknowledged it,
-`retain_days` have passed, and no retained message refers to it. Removal is
-done by the kernel when it next appends to or reads that queue; it never runs
-on a timer of its own. Retention is per-queue configuration with the default
-above; there is no total cap.
+A message is removed once every concrete reader in `read` has a delivery fact
+for it, `retain_days` have passed, and no retained message refers to it. A
+`role:*` grant names no concrete reader and fails closed: it never makes a
+message removable on its own. Delivery facts go with their messages, so
+removal deletes them too. Removal is done by the kernel when it next appends
+to or reads that queue; it never runs on a timer of its own. Retention is
+per-queue configuration with the default above; there is no total cap.
 
 A queue may instead declare `retain_last = N` (1..64) for writer-owned count
-retention: only the newest N messages are kept, regardless of reader cursors.
+retention: only the newest N messages are kept, regardless of delivery facts.
 This mode excludes both `wake` (removal must not drop a wake edge) and
 `retain_days`, and refuses messages with refs or delayed delivery that would pin
 older history. A message another queue refers to is kept for id-addressable
@@ -174,8 +179,7 @@ wait = {readmit = false}
 | Tool | Effect |
 |---|---|
 | `queue_write(queue, body, refs?, deliver_at?, id?)` | Append a message if the role may write to the queue |
-| `queue_read(queue, cursor?, limit?)` | Read due messages after the role's cursor (or after `cursor`), bounded; returns `next`, `head`, `more`, `delayed` |
-| `queue_ack(queue, seq)` | Advance the role's cursor |
+| `queue_read(queue, cursor?, limit?)` | Read the oldest due messages undelivered to the role, bounded, recording delivery; `cursor` only sets the page start (returned rows are still delivered); returns `next`, `head`, `more`, `delayed` |
 | `message_read(id)` | Read one message the role may read |
 | `message_refs(id, direction)` | List messages the role may read that refer to `id`, or that `id` refers to, bounded and paged |
 

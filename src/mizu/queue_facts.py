@@ -1,10 +1,11 @@
 """Queue facts for one role: what wakes it and what its unit opening states.
 
 The facts are counts and the newest messages of each declared queue the role
-may read; nothing here interprets a message, names a queue or acknowledges
-anything. Readiness admits a role when a queue that wakes it has a due
-message that has not woken it yet; a finished unit records that its opening's
-messages have woken the role.
+may read; nothing here interprets a message or names a queue. Delivery facts
+are the only reader state: a due message wakes a role until it is delivered,
+and a dispatched unit records delivery for every message its opening showed.
+Readiness admits a role when a queue that wakes it has a due message that has
+not been delivered to it yet.
 """
 from __future__ import annotations
 
@@ -68,16 +69,29 @@ def next_delivery_at(project, role_name: str) -> float | None:
     return min(deadlines) if deadlines else None
 
 
-def mark_woken(project, role_name: str, rows: list[dict]) -> None:
-    """Record that the opening's due messages have woken the role."""
+def deliver_opening(project, role_name: str, rows: list[dict], unit: str) -> None:
+    """Record delivery for every message the dispatched unit opening showed.
+
+    ``rows`` is the confirmed opening projection, including when the role's
+    prompt hides the optional ``queues`` section. A racing retention removal
+    or a corrupt fact cannot fail dispatch: such a message stays undelivered
+    and can still wake a later unit.
+    """
     store = project.kernel_queues
     for row in rows:
-        if type(row.get("through")) is int and "queue" in row:
-            store.mark_woken(row["queue"], principal(role_name), row["through"])
+        if not isinstance(row.get("queue"), str) or not isinstance(row.get("messages"), list):
+            continue
+        for message in row["messages"]:
+            if not isinstance(message, dict) or type(message.get("seq")) is not int:
+                continue
+            try:
+                store.record_delivery(row["queue"], message["seq"], principal(role_name), unit)
+            except (Denied, OSError, ValueError):
+                continue
 
 
 def opening(project, role_name: str) -> list[dict]:
-    """Per readable queue with due messages: count, ``more`` and the newest few.
+    """Per readable queue with due messages: count, ``more`` and the oldest few.
 
     The number of newest messages is ``[limits] queue_opening_messages``. A
     queue that cannot be read is listed with its error instead of a count.

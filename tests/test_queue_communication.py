@@ -50,7 +50,7 @@ class QueueFixture(Fixture):
 
 
 class QueueCliTests(QueueFixture):
-    def test_operator_write_read_ack_message_and_refs(self):
+    def test_operator_write_read_message_and_refs(self):
         code, first, _ = self.cli("queue", "sample", "write", "notes",
                                   "--body", json.dumps({"title": "Upstream release"}))
         self.assertEqual(code, 0)
@@ -58,15 +58,26 @@ class QueueCliTests(QueueFixture):
         code, second, _ = self.cli("queue", "sample", "write", "notes", "--body", "-",
                                    "--ref", first["id"], stdin=json.dumps({"title": "Follow-up"}))
         self.assertEqual((code, second["refs"]), (0, [first["id"]]))
+        # The operator's own writes are credited at append, so they have
+        # already been delivered to it and no plain read returns them.
+        _, own, _ = self.cli("queue", "sample", "read", "notes")
+        self.assertEqual(own["messages"], [])
+        _, observed, _ = self.cli("queue", "sample", "write", "notes", "--host",
+                                  "--body", json.dumps({"title": "Observed"}))
         code, page, _ = self.cli("queue", "sample", "read", "notes")
-        self.assertEqual([m["seq"] for m in page["messages"]], [1, 2])
-        self.assertEqual(page["head"], 2)
-        # Reading after an explicit cursor pages from the end and moves no cursor.
+        self.assertEqual([m["seq"] for m in page["messages"]], [3])
+        self.assertEqual(page["head"], 3)
+        # A read delivers the host's message to the operator and records cli.
+        store = self.project.kernel_queues
+        self.assertTrue(store.delivered("notes", 3, "operator"))
+        fact = json.loads((self.project.root / "queues" / "notes" / "delivery"
+                           / "00000000000000000003" / "operator.json").read_text())
+        self.assertEqual(fact["unit"], "cli")
+        # An explicit cursor pages the whole history; a plain read is drained.
+        _, history, _ = self.cli("queue", "sample", "read", "notes", "--cursor", "0")
+        self.assertEqual([m["seq"] for m in history["messages"]], [1, 2, 3])
         _, tail, _ = self.cli("queue", "sample", "read", "notes", "--cursor", "1")
-        self.assertEqual([m["seq"] for m in tail["messages"]], [2])
-        _, again, _ = self.cli("queue", "sample", "read", "notes")
-        self.assertEqual(len(again["messages"]), 2)
-        self.assertEqual(self.cli("queue", "sample", "ack", "notes", "2")[1], {"seq": 2})
+        self.assertEqual([m["seq"] for m in tail["messages"]], [2, 3])
         _, empty, _ = self.cli("queue", "sample", "read", "notes")
         self.assertEqual(empty["messages"], [])
         _, message, _ = self.cli("queue", "sample", "message", second["id"])
@@ -92,8 +103,10 @@ class QueueCliTests(QueueFixture):
     def test_idempotent_id_and_delayed_delivery(self):
         body = json.dumps({"title": "Retry"})
         ident = "a" * 32
-        _, first, _ = self.cli("queue", "sample", "write", "notes", "--body", body, "--id", ident)
-        _, again, _ = self.cli("queue", "sample", "write", "notes", "--body", body, "--id", ident)
+        _, first, _ = self.cli("queue", "sample", "write", "notes", "--body", body,
+                               "--id", ident, "--host")
+        _, again, _ = self.cli("queue", "sample", "write", "notes", "--body", body,
+                               "--id", ident, "--host")
         self.assertEqual(first, again)
         _, later, _ = self.cli("queue", "sample", "write", "notes", "--body", json.dumps({"title": "Later"}),
                                "--deliver-at", "2099-01-01T00:00:00+00:00")
@@ -101,6 +114,8 @@ class QueueCliTests(QueueFixture):
         _, page, _ = self.cli("queue", "sample", "read", "notes")
         self.assertEqual([m["id"] for m in page["messages"]], [ident])
         self.assertTrue(page["delayed"])
+        _, history, _ = self.cli("queue", "sample", "read", "notes", "--cursor", "0")
+        self.assertEqual([m["id"] for m in history["messages"]], [ident])
 
 
 class QueueFactsTests(QueueFixture):
@@ -112,10 +127,11 @@ class QueueFactsTests(QueueFixture):
         for index in range(5):
             self.write(f"m{index}")
         facts = store.pending("notes", "role:worker", newest=2)
-        self.assertEqual((facts["count"], facts["more"]), (5, False))
-        self.assertEqual([m["body"]["title"] for m in facts["messages"]], ["m3", "m4"])
+        self.assertEqual((facts["count"], facts["more"]), (5, True))
+        self.assertEqual([m["body"]["title"] for m in facts["messages"]], ["m0", "m1"])
         self.assertTrue(store.due("notes", "role:worker"))
-        store.ack("notes", "role:worker", 5)
+        for seq in range(1, 6):
+            store.record_delivery("notes", seq, "role:worker", "test")
         self.assertFalse(store.due("notes", "role:worker"))
         self.write("held", deliver_at="2099-01-01T00:00:00+00:00")
         self.write("after")
@@ -146,7 +162,36 @@ class QueueFactsTests(QueueFixture):
         self.project.config = dataclasses.replace(self.config, limits=limits)
         rows = queue_facts.opening(self.project, "worker")
         self.assertEqual((rows[0]["count"], [m["body"]["title"] for m in rows[0]["messages"]]),
-                         (6, ["m5"]))
+                         (6, ["m0"]))
+
+    def test_successive_openings_deliver_every_message_in_seq_order(self):
+        for index in range(3):
+            self.write(f"m{index}")
+        limits = dataclasses.replace(self.config.limits, queue_opening_messages=1)
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles, limits=limits)
+        self.project = Project(config, self.project.name)
+
+        seen = []
+
+        def observer(ctx, prompt, profile=None):
+            shown = json.loads(prompt).get("queues", [])
+            if shown:
+                seen.append(shown[0]["messages"][0]["body"]["title"])
+            ctx.handle("finish", {"outcome": "wait", "summary": "Seen", "state": "Next."})
+
+        for _ in range(3):
+            Engine(config, driver=ScriptDriver(observer)).run(self.project, "worker")
+        self.assertEqual(seen, ["m0", "m1", "m2"])
+        # No reader call: the openings themselves delivered every message in
+        # seq order, so each is delivered and the wake has ended.
+        store = self.project.kernel_queues
+        for seq in (1, 2, 3):
+            self.assertTrue(store.delivered("notes", seq, "role:worker"))
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
     def test_unit_opening_carries_queue_facts_without_instructions(self):
         self.write("Observed upstream release")
@@ -168,8 +213,8 @@ class QueueFactsTests(QueueFixture):
         self.assertEqual(queues[0]["messages"][0]["body"]["title"], "Observed upstream release")
         self.assertEqual(set(queues[0]), {"queue", "count", "more", "messages", "through"})
 
-    def test_waking_message_stays_due_after_interrupted_finish_until_acked(self):
-        """A finish interrupted before its intent is durable leaves the queue due for retry."""
+    def test_waking_message_keeps_no_finish_intent_when_interrupted(self):
+        """An interrupted finish leaves no intent; opening delivery still consumes the wake."""
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(
             roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
@@ -203,28 +248,24 @@ class QueueFactsTests(QueueFixture):
         self.assertEqual(first_prompts[0]["queues"][0]["messages"][0]["body"]["title"],
                          "Observed upstream release")
         self.assertFalse(list((self.project.root / "runs").rglob("finish-intent.json")))
-        # The source remains due and visible to the next observer unit.
-        self.assertTrue(queue_facts.due(self.project, "worker"))
-        opening = queue_facts.opening(self.project, "worker")
-        self.assertEqual(opening[0]["count"], 1)
-        self.assertEqual(opening[0]["messages"][0]["body"]["title"], "Observed upstream release")
+        # Delivery was recorded at dispatch, before the finish was interrupted:
+        # the message is no longer due or in a later opening, and no wake loops.
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
+        self.assertTrue(self.project.kernel_queues.delivered("notes", 1, "role:worker"))
 
         prompts = []
 
         def observer(ctx, prompt, profile=None):
             prompts.append(json.loads(prompt))
-            self.assertEqual(ctx.handle("queue_ack", {"queue": "notes", "seq": 1}), {"seq": 1})
             ctx.handle("finish", {"outcome": "wait", "summary": "Read queue", "state": "Next."})
 
         Engine(config, driver=ScriptDriver(observer)).run(self.project, "worker")
-        self.assertEqual(prompts[0]["queues"][0]["count"], 1)
-        self.assertEqual(prompts[0]["queues"][0]["messages"][0]["body"]["title"],
-                         "Observed upstream release")
-        # The granted queue_ack in the retrying unit is what clears the source.
+        self.assertEqual(prompts[0]["queues"], [])
         self.assertFalse(queue_facts.due(self.project, "worker"))
         self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
-    def test_finished_unit_is_not_rewoken_by_messages_it_left_unacknowledged(self):
+    def test_finished_unit_is_not_rewoken_by_messages_its_opening_delivered(self):
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(
             roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
@@ -242,10 +283,32 @@ class QueueFactsTests(QueueFixture):
         Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
         self.assertEqual(prompts[0]["queues"][0]["count"], 1)
         self.assertFalse(queue_facts.due(self.project, "worker"))
-        # Still pending and stated in the next opening, but no longer a wake.
-        self.assertEqual(queue_facts.opening(self.project, "worker")[0]["count"], 1)
+        # The opening's delivery drains it from both wakes and later openings.
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
         self.write("Another release")
         self.assertTrue(queue_facts.due(self.project, "worker"))
+
+    def test_hidden_queues_section_still_delivers_the_opening(self):
+        """A role that cannot see the optional section still wakes only once."""
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"),
+            context_exclude=("queues",))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
+        message = self.write("Observed upstream release")
+        prompts = []
+
+        def reader(ctx, prompt, profile=None):
+            prompts.append(json.loads(prompt))
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read without the section",
+                                  "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        self.assertNotIn("queues", prompts[0])
+        self.assertTrue(self.project.kernel_queues.delivered("notes", message["seq"], "role:worker"))
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
     def test_answer_wakes_the_asker_and_arrives_with_its_question(self):
         roles = dict(self.config.roles)
@@ -273,7 +336,7 @@ class QueueFactsTests(QueueFixture):
         self.assertTrue((self.project.root / "wake" / "worker").exists())
         with patch("mizu.role_admission._ready_work_observation", return_value=(False, False, False)):
             self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
-        self.project.kernel_queues.ack("notes", "role:worker", 1)
+        self.project.kernel_queues.record_delivery("notes", 1, "role:worker", "test")
         self.assertFalse(queue_facts.due(self.project, "worker"))
         # A message in a queue that does not wake the role is no reason to admit it.
         self.project.kernel_queues.append("answers", {"body": "later"}, "operator")

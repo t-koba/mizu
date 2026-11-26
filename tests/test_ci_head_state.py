@@ -617,7 +617,11 @@ class CiHeadStateTests(Fixture):
         store = self.project.kernel_queues
         self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
         self.assertNotIn("ci_head_state_observations", queue_facts.waking(config, "worker"))
-        queue_facts.mark_woken(self.project, "worker", context.queues)
+        queue_facts.deliver_opening(self.project, "worker", context.queues, "observation-unit")
+        self.assertTrue(store.delivered("ci_head_state_observations",
+                                        rows[0]["messages"][0]["seq"], "role:worker"))
+        self.assertEqual([r for r in queue_facts.opening(self.project, "worker")
+                          if r.get("queue") == "ci_head_state_observations"], [])
         self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
 
     def test_distinct_reader_gets_no_fact_on_fixed_key_or_queue_opening(self):
@@ -675,7 +679,9 @@ class CiHeadStateTests(Fixture):
                 self.assertEqual(openings[0]["messages"][0]["body"]["summary"],
                                  body["summary"])
                 self.assertFalse(queue_facts.due(self.project, "worker"))
-                queue_facts.mark_woken(self.project, "worker", rows)
+                queue_facts.deliver_opening(self.project, "worker", rows, "observation-unit")
+                self.assertTrue(store.delivered(name, openings[0]["messages"][0]["seq"],
+                                                "role:worker"))
                 self.assertFalse(queue_facts.due(self.project, "worker"))
                 self.assertFalse(store.due(name, "role:worker"))
                 live = (self.project.root / "queues" / name / "messages").glob("*.json")

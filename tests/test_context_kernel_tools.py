@@ -1,6 +1,6 @@
 """Context queue/message tool dispatch is owned by an extracted mixin.
 
-The five live queue/message wrappers keep their dispatch keys and reach the
+The four live queue/message wrappers keep their dispatch keys and reach the
 kernel queue tool module with the trusted Context as first argument. The
 object/event kernel and its dispatch keys were deleted; no test subject remains
 for them here.
@@ -16,13 +16,12 @@ from mizu.runtime import Context
 _OPS = (
     ("queue_write", "queue_write"),
     ("queue_read", "queue_read"),
-    ("queue_ack", "queue_ack"),
     ("message_read", "message_read"),
     ("message_refs", "message_refs"),
 )
 
 _RETIRED = ("objects_create", "objects_transition", "objects_read", "objects_list",
-            "events_read", "events_ack")
+            "events_read", "events_ack", "queue_ack")
 
 
 class ContextKernelToolsTests(unittest.TestCase):

@@ -1,10 +1,10 @@
-"""Declared message queues: authenticated append, cursors, refs and retention.
+"""Declared message queues: authenticated append, delivery facts, refs and retention.
 
 Layout under the project root:
   queues/<queue>/messages/<seq:020d>.json  immutable messages, create-only
   queues/<queue>/head.json                 last assigned sequence (derived)
-  queues/<queue>/cursors/<principal>.json  one durable cursor per reader principal
-  queues/<queue>/woken/<principal>.json    last sequence that has already woken the principal
+  queues/<queue>/delivery/<seq:020d>/<principal>.json  create-only delivery facts
+  queues/delivery-migration.json           one-time cursor/woken conversion marker
   queues/<queue>/retain.json               first sequence not yet considered for removal
   queues/ids/<id>.json                     global id -> (queue, seq), kept as a tombstone
   queues/refs/<id>/to.json                 bounded pointers to messages referring to <id>
@@ -42,6 +42,7 @@ PAGE_DEFAULT = 64
 MAX_REFS = 512
 MAX_RETENTION_SCAN = 256
 MAX_RETAIN_LAST = 64
+DELIVERY_MAX_PRINCIPALS = 512
 DEFAULT_RETAIN_DAYS = 30
 INTEGER_LIMIT = (1 << 63) - 1
 #: Queue and field names: lowercase identifiers.
@@ -51,6 +52,8 @@ NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 PRINCIPAL = re.compile(r"(?:role:(?:\*|[a-z][a-z0-9_-]{0,62})|host|operator)\Z")
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_DELIVERY_KEYS = frozenset({"unit", "at"})
+_DELIVERY_UNIT_MAX = 128
 _TYPES = ("string", "integer", "boolean", "instant", "digest", "id", "principal", "list")
 _FIELD_KEYS = frozenset({"type", "required", "max", "min", "values", "item", "max_items"})
 
@@ -313,10 +316,14 @@ class QueueStore:
                 raise Denied(f"Reference {ref} is not a message the actor may read")
 
     @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self, *, migrate: bool = True) -> Iterator[None]:
+        # ``migrate=False`` is only for migrate_cursors itself, which enters
+        # the lock and then runs the conversion without re-acquiring it.
         mkdir(self.root / "locks")
         with lock(self.root / "locks" / "queues.lock"):
             self._recover()
+            if migrate:
+                self._migrate_cursors()
             yield
 
     # -- writing -----------------------------------------------------------------------------
@@ -440,6 +447,18 @@ class QueueStore:
         if seq > self._stored_head(queue):
             atomic_write(self.root / self._relative(queue, "head.json"), canonical({"seq": seq}))
         declaration = self.queues.get(queue)
+        if declaration is not None and message.get("deliver_at") is None:
+            # An immediate message credits its author when the author may read
+            # the queue. First write wins; a retry or crash replay cannot add
+            # a second credit. Delayed messages are not credited: their author
+            # asked to be woken when they become due.
+            try:
+                author = self._actor(message.get("author"))
+                at = _instant(message.get("at"), "message time").isoformat(timespec="seconds")
+            except Denied:
+                author, at = None, None
+            if author is not None and allows(declaration.read, author):
+                self._write_delivery(queue, seq, author, "append", at)
         if not self._due(message, stamp):
             # A future delivery writes no role wake, so a daemon caching its
             # next deadline would otherwise sleep through it. Bump the wake
@@ -528,64 +547,98 @@ class QueueStore:
             return message
 
     # -- reading -----------------------------------------------------------------------------
-    def _cursor_path(self, queue: str, actor: str) -> Path:
-        return self.root / self._relative(queue, "cursors", actor.replace(":", "_") + ".json")
+    def _delivery_dir(self, queue: str, seq: int) -> Path:
+        if type(seq) is not int or seq < 1:
+            raise Denied("delivery sequence must be positive")
+        return self.root / self._relative(queue, "delivery", f"{seq:020d}")
 
-    def _cursor(self, queue: str, actor: str) -> int:
-        stored = self._optional_json(self._relative(queue, "cursors", actor.replace(":", "_") + ".json"))
-        value = stored.get("seq") if isinstance(stored, Mapping) else None
-        return value if type(value) is int and value >= 0 else 0  # corrupt cursors license no removal
+    def _delivery_path(self, queue: str, seq: int, actor: str) -> Path:
+        return self._delivery_dir(queue, seq) / (self._actor(actor).replace(":", "_") + ".json")
 
-    def _woken_path(self, queue: str, actor: str) -> Path:
-        return self.root / self._relative(queue, "woken", actor.replace(":", "_") + ".json")
+    def _delivery(self, queue: str, seq: int, actor: str) -> dict | None:
+        """One create-only fact, or None when absent; malformed facts fail closed."""
+        actor = self._actor(actor)
+        name = self._relative(queue, "delivery", f"{seq:020d}",
+                              actor.replace(":", "_") + ".json")
+        try:
+            stored = self._optional_json(name)
+        except Denied:
+            raise
+        except (ValueError, RecursionError) as exc:
+            raise Denied("Corrupt delivery record") from exc
+        if stored is None:
+            return None
+        unit = stored.get("unit") if isinstance(stored, Mapping) else None
+        if (not isinstance(stored, Mapping) or set(stored) != _DELIVERY_KEYS
+                or not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                or "\x00" in unit):
+            raise Denied("Corrupt delivery record")
+        _instant(stored["at"], "delivery time")
+        return dict(stored)
 
-    def _woken(self, queue: str, actor: str) -> int:
-        stored = self._optional_json(self._relative(queue, "woken", actor.replace(":", "_") + ".json"))
-        value = stored.get("seq") if isinstance(stored, Mapping) else None
-        return value if type(value) is int and value >= 0 else 0
+    def _write_delivery(self, queue: str, seq: int, actor: str, unit: str, at: str) -> dict:
+        """Create one fact inside the lock; the first writer's bytes win."""
+        if (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                or "\x00" in unit):
+            raise Denied("delivery unit must be a bounded string")
+        at = _instant(at, "delivery time").isoformat(timespec="seconds")
+        existing = self._delivery(queue, seq, actor)
+        if existing is not None:
+            return existing
+        record = {"unit": unit, "at": at}
+        atomic_write(self._delivery_path(queue, seq, actor), canonical(record), exclusive=True)
+        return record
 
-    def mark_woken(self, queue: str, actor: str, seq: int) -> int:
-        """Record that messages through ``seq`` have woken ``actor``; monotonic.
-
-        A message wakes each reader once, when it is due. Later wakes need a
-        later message; the unacknowledged ones stay pending and readable.
-        """
-        declaration = self._grant(queue, actor, write=False)
-        if type(seq) is not int or seq < 0:
-            raise Denied("woken sequence must be nonnegative")
-        with self._locked():
-            seq = min(seq, self._head(declaration.name))
-            current = self._woken(declaration.name, actor)
-            if seq > current:
-                atomic_write(self._woken_path(declaration.name, actor), canonical({"seq": seq}))
-                return seq
-            return current
+    def _cursor_principal(self, name: str) -> str:
+        """Decode the cursor filename convention back to a concrete principal."""
+        if name in ("host", "operator"):
+            return self._actor(name)
+        if name.startswith("role_"):
+            return self._actor("role:" + name[len("role_"):])
+        raise Denied("Corrupt cursor principal")
 
     def read(self, queue: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT,
-             now=None) -> dict:
+             unit=None, now=None) -> dict:
+        """Return one page of messages, recording delivery for the rows returned.
+
+        ``cursor`` is only a page position; without it the scan starts at the
+        retained prefix and skips messages already delivered to ``actor``.
+        ``unit`` names the consuming operation when delivery is recorded.
+        """
         declaration = self._grant(queue, actor, write=False)
         if type(limit) is not int or not 1 <= limit <= PAGE_MAX:
             raise Denied(f"limit must be from 1 to {PAGE_MAX}")
         if cursor is not None and (type(cursor) is not int or cursor < 0):
             raise Denied("cursor must be a nonnegative sequence")
+        if cursor is not None and cursor > self._head(declaration.name):
+            raise Denied("cursor is beyond the queue head")
+        if unit is not None and (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                                 or "\x00" in unit):
+            raise Denied("delivery unit must be a bounded string")
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         with self._locked():
             head = self._head(declaration.name)
-            if cursor is not None and cursor > head:
-                raise Denied("cursor is beyond the queue head")
-            seq = (max(self._cursor(declaration.name, actor), self._retained(declaration.name))
-                   if cursor is None and declaration.retain_last is not None
-                   else (self._cursor(declaration.name, actor) if cursor is None else cursor))
+            seq = (cursor if cursor is not None
+                   else max(self._retained(declaration.name), 0))
             rows, delayed = [], False
+            # Bound the page by rows returned, not by positions examined:
+            # already-delivered rows are skipped and must never push a later
+            # undelivered message out of reach. The scan still stops at a
+            # not-yet-due message (head-of-line) and at the queue head.
             while seq < head and len(rows) < limit:
                 candidate = seq + 1
                 message = self._message(declaration.name, candidate)
                 if message is not None and not self._due(message, stamp):
-                    delayed = True  # head-of-line: no cursor may cross it
+                    delayed = True  # head-of-line: no page may cross it
                     break
-                if message is not None:
-                    rows.append(message)
                 seq = candidate
+                if message is None or (cursor is None
+                                       and self.delivered(declaration.name, candidate, actor)):
+                    continue
+                if unit is not None:
+                    self._write_delivery(declaration.name, candidate, actor, unit,
+                                         stamp.isoformat(timespec="seconds"))
+                rows.append(message)
             if declaration.retain_last is not None:
                 self._retain_last(declaration.name, declaration)
             else:
@@ -593,79 +646,55 @@ class QueueStore:
             return {"messages": rows, "next": seq, "head": head,
                     "more": seq < head, "delayed": delayed}
 
-    def ack(self, queue: str, actor: str, seq: int, *, now=None) -> int:
-        declaration = self._grant(queue, actor, write=False)
-        if type(seq) is not int or seq < 0:
-            raise Denied("acknowledged sequence must be nonnegative")
-        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
-        with self._locked():
-            if seq > self._head(declaration.name):
-                raise Denied("acknowledged sequence is beyond the queue head")
-            current = self._cursor(declaration.name, actor)
-            for candidate in range(current + 1, seq + 1):
-                message = self._message(declaration.name, candidate)
-                if message is None:
-                    # Retention removes only messages every reader had already
-                    # acknowledged; a gap is proof of delivery, not the reverse.
-                    continue
-                if not self._due(message, stamp):
-                    raise Denied("Cannot acknowledge an undelivered message")
-            if seq > current:
-                atomic_write(self._cursor_path(declaration.name, actor), canonical({"seq": seq}))
-                return seq
-            return current
-
     def pending(self, queue: str, actor: str, *, newest: int = PAGE_DEFAULT, now=None) -> dict:
-        """Count the due unacknowledged messages a read would deliver to ``actor``.
+        """Count the due messages a read would deliver to ``actor``.
 
-        The count covers the contiguous due run after the later of the actor's
-        cursor and the retained prefix (a delayed message ends it, as it ends a
-        read), scanning at most
-        ``PAGE_MAX`` messages; ``more`` reports a longer run. ``messages``
-        holds the newest ``newest`` (0..PAGE_MAX) of the counted run. Reads
-        nothing else and acknowledges nothing; no lock is taken.
+        The scan starts at the retained prefix, skips gaps and messages already
+        delivered to ``actor``, and ends at a not-yet-due message (head-of-line)
+        or the queue head. A delivered prefix is skipped, not counted, so it
+        cannot hide a later undelivered message. ``messages`` holds the oldest
+        ``newest`` (0..PAGE_MAX) of the counted messages. Nothing is written.
         """
         declaration = self._grant(queue, actor, write=False)
         if type(newest) is not int or not 0 <= newest <= PAGE_MAX:
             raise Denied(f"newest must be from 0 to {PAGE_MAX}")
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._cursor(declaration.name, actor),
-                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
+        seq = max(self._retained(declaration.name), 0)
         count, rows = 0, []
-        while seq < head and count < PAGE_MAX:
+        # Count undelivered messages, not examined positions: a delivered
+        # prefix of any length cannot hide the next undelivered message.
+        # A not-yet-due message still ends the contiguous run (head-of-line).
+        while seq < head:
             candidate = seq + 1
             message = self._message(declaration.name, candidate)
             if message is not None and not self._due(message, stamp):
                 break  # head-of-line: a read stops here too, so do not cross it
             seq = candidate
-            if message is None:
+            if message is None or self.delivered(declaration.name, candidate, actor):
                 continue
             count += 1
-            if newest:
+            if newest and len(rows) < newest:
                 rows.append(message)
-                del rows[:-newest]
-        more = count == PAGE_MAX and seq < head
-        # `seq` is the last position a read would reach without crossing a
-        # delayed message. Marking a not-yet-due sequence as woken would make
-        # due() scan past it when it later becomes due, losing its wake.
+        more = count > len(rows) or seq < head
         return {"queue": declaration.name, "count": count, "more": more, "messages": rows,
                 "through": seq}
 
     def due(self, queue: str, actor: str, *, now=None) -> bool:
-        """Whether a due message that has not yet woken ``actor`` is waiting for it.
+        """Whether a due, wake-eligible message awaiting delivery wakes ``actor``.
 
-        Wakes are edges, not levels: a message wakes a reader once (see
-        ``mark_woken``), and an unacknowledged message does not wake it again.
-        Besides the queue's ``wake`` list, a reply wakes the author of the
-        message it refers to (see ``_wakes``), so a thread reaches whoever
-        started it.
+        Delivery facts are the only reader state: a message wakes a reader once,
+        when it is delivered. Besides the queue's ``wake`` list, a reply wakes
+        the author of the message it refers to (see ``_wakes``), so a thread
+        reaches whoever started it. An undelivered message stays read-pending;
+        it just does not wake again.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor),
-                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
+        seq = max(self._retained(declaration.name), 0)
+        # Scan to the head, stopping at the first not-yet-due message. A long
+        # delivered prefix is skipped, not counted, so it cannot hide a wake.
         while seq < head:
             seq += 1
             message = self._message(declaration.name, seq)
@@ -673,45 +702,148 @@ class QueueStore:
                 continue
             if not self._due(message, stamp):
                 return False  # head-of-line: a read stops here too
-            if self._wakes(declaration, message, actor):
+            if (self._wakes(declaration, message, actor)
+                    and not self.delivered(declaration.name, seq, actor)):
                 return True
         return False
 
+    def delivered(self, queue: str, seq: int, actor: str) -> bool:
+        """Whether ``actor`` has a delivery fact for message ``seq``; read-only."""
+        self._grant(queue, actor, write=False)
+        if type(seq) is not int or seq < 1:
+            raise Denied("delivery sequence must be positive")
+        return self._delivery(queue, seq, actor) is not None
+
+    def record_delivery(self, queue: str, seq: int, actor: str, unit: str,
+                        *, now=None) -> dict:
+        """Record that ``seq`` was delivered to ``actor``; idempotent, first write wins."""
+        declaration = self._grant(queue, actor, write=False)
+        if type(seq) is not int or seq < 1:
+            raise Denied("delivery sequence must be positive")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
+        if seq > self._head(declaration.name):
+            raise Denied("delivery sequence is beyond the queue head")
+        message = self._message(declaration.name, seq)
+        if message is None:
+            raise Denied("No message to deliver")
+        if not self._due(message, stamp):
+            raise Denied("Cannot record delivery for an undelivered message")
+        if (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                or "\x00" in unit):
+            raise Denied("delivery unit must be a bounded string")
+        at = stamp.isoformat(timespec="seconds")
+        with self._locked():
+            return self._write_delivery(declaration.name, seq, actor, unit, at)
+
+    def _migrate_cursors(self) -> dict:
+        """Convert cursors to facts once; called under the queue lock."""
+        marker = self._relative("delivery-migration.json")
+        try:
+            done = self._optional_json(marker)
+        except Denied:
+            raise
+        except (ValueError, RecursionError) as exc:
+            raise Denied("Corrupt delivery migration marker") from exc
+        if done is not None:
+            return {"migrated": 0}
+        # Validate every cursor before writing anything: a malformed one must
+        # leave the whole conversion unchanged for a later, resumable run.
+        pending: list[tuple[str, str, int, Path]] = []
+        for queue in sorted(self.queues):
+            directory = self.root / self._relative(queue, "cursors")
+            if not directory.exists():
+                continue
+            if directory.is_symlink() or not directory.is_dir():
+                raise Denied("Corrupt cursor directory")
+            files = sorted(path for path in directory.iterdir() if path.suffix == ".json")
+            if len(files) > DELIVERY_MAX_PRINCIPALS:
+                raise Denied("Cursor directory exceeds its bound")
+            for path in files:
+                if path.is_symlink() or not path.is_file():
+                    raise Denied("Corrupt cursor file")
+                principal = self._cursor_principal(path.stem)
+                stored = self._optional_json(self._relative(queue, "cursors", path.name))
+                seq = stored.get("seq") if isinstance(stored, Mapping) else None
+                if type(seq) is not int or seq < 0:
+                    raise Denied("Corrupt cursor")
+                pending.append((queue, principal, seq, path))
+        at = clock()
+        for queue, principal, seq, path in pending:
+            for candidate in range(1, min(seq, self._head(queue)) + 1):
+                if self._message(queue, candidate) is not None:
+                    self._write_delivery(queue, candidate, principal, "migration", at)
+            path.unlink()
+        root = self.root / "queues"
+        if root.is_dir():
+            for directory in sorted(root.glob("*/woken")):
+                if directory.is_symlink() or not directory.is_dir():
+                    raise Denied("Corrupt woken directory")
+                files = sorted(path for path in directory.iterdir() if path.suffix == ".json")
+                if len(files) > DELIVERY_MAX_PRINCIPALS:
+                    raise Denied("Woken directory exceeds its bound")
+                for path in files:
+                    if path.is_symlink() or not path.is_file():
+                        raise Denied("Corrupt woken file")
+                    path.unlink()
+        atomic_write(self.root / marker, canonical({"at": at}))
+        return {"migrated": len(pending)}
+
+    def migrate_cursors(self) -> dict:
+        """Convert declared queues' cursors into delivery facts once."""
+        with self._locked(migrate=False):
+            return self._migrate_cursors()
+
     def next_delivery(self, queue: str, actor: str, *, now=None) -> dt.datetime | None:
-        """The aware ``deliver_at`` of the first not-yet-due message ``actor``'s
-        due-scan would hit, or None when the scan reaches the head first.
+        """The aware ``deliver_at`` of the first future message ``actor``'s
+        due-scan would reach but that has not been delivered to it, or None.
 
         Schema: returns an aware ``datetime`` or None; ``now`` is an ISO time
         used for the due comparison. Bounds: scans exactly the range ``due``
-        scans, from ``max(cursor, woken, retained)`` to the head, skipping retention
-        gaps and stopping at the first not-due message (head-of-line). Trust:
+        scans, from the retained prefix to the head, skipping retention gaps,
+        stopping at the first not-due message (head-of-line), and examining at
+        the queue head. Only messages that would wake ``actor``
+        (see ``_wakes``) and have no delivery fact for it count. Trust:
         ``deliver_at`` is validated through ``_instant`` and the read grant is
         checked. Retry/cancellation: none. Evidence: the message's stored
         ``deliver_at`` field. Failure: raises ``Denied`` for an undeclared
         queue, an invalid actor, a missing read grant or a corrupt
-        ``deliver_at``. Read-only; takes no lock and acknowledges nothing.
+        ``deliver_at``. Read-only; takes no lock and records no delivery.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor),
-                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
+        seq = max(self._retained(declaration.name), 0)
+        # As in ``due``, delivered rows are skipped without ending the scan,
+        # so a delivered prefix cannot hide a later actionable deadline.
         while seq < head:
             seq += 1
             message = self._message(declaration.name, seq)
             if message is None:
                 continue
             if not self._due(message, stamp):
-                return _instant(message["deliver_at"], "deliver_at")
+                if (self._wakes(declaration, message, actor)
+                        and not self.delivered(declaration.name, seq, actor)):
+                    return _instant(message["deliver_at"], "deliver_at")
+                return None  # head-of-line: no later deadline can be reached
         return None
 
-    def message(self, id: str, actor: str) -> dict:
+    def message(self, id: str, actor: str, *, unit=None) -> dict:
+        """Resolve one readable message, optionally recording its delivery.
+
+        ``unit`` names the consuming operation; without it this read is pure.
+        """
         message_id = _id(id, "message id")
         actor = self._actor(actor)
         message = self._message_by_id(message_id)
         if message is None:
             raise Denied(f"No message {message_id}")
         self._grant(message["queue"], actor, write=False)
+        if unit is not None and (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                                 or "\x00" in unit):
+            raise Denied("delivery unit must be a bounded string")
+        if unit is not None:
+            with self._locked():
+                self._write_delivery(message["queue"], message["seq"], actor, unit, clock())
         return message
 
     def refs(self, id: str, direction: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT) -> dict:
@@ -745,6 +877,30 @@ class QueueStore:
         return {"messages": rows, "next": last, "head": head, "more": more}
 
     # -- retention ---------------------------------------------------------------------------
+    def _remove_delivery(self, queue: str, seq: int) -> None:
+        """Remove one message's bounded delivery directory and its facts."""
+        directory = self._delivery_dir(queue, seq)
+        if not directory.exists():
+            return
+        if directory.is_symlink() or not directory.is_dir():
+            raise Denied("Corrupt delivery directory")
+        entries = list(directory.iterdir())
+        if len(entries) > DELIVERY_MAX_PRINCIPALS:
+            raise Denied("Delivery directory exceeds its bound")
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file() or not entry.name.endswith(".json"):
+                raise Denied("Corrupt delivery record")
+            entry.unlink()
+        directory.rmdir()
+
+    def _remove_message(self, queue: str, seq: int, message: Mapping) -> None:
+        """Unlink a message and all its delivery facts; ids and refs live separately."""
+        if (not isinstance(message, Mapping) or message.get("queue") != queue
+                or message.get("seq") != seq):
+            raise Denied("Corrupt queue message")
+        (self.root / self._relative(queue, "messages", f"{seq:020d}.json")).unlink(missing_ok=True)
+        self._remove_delivery(queue, seq)
+
     def _remove_ref(self, target: str, message_id: str) -> None:
         entries = self._refs_to(target)
         remaining = [entry for entry in entries
@@ -768,8 +924,7 @@ class QueueStore:
         if (declaration.retain_last is None
                 or message["seq"] > self._retained(message["queue"])):
             return
-        (self.root / self._relative(message["queue"], "messages",
-                                    f"{message['seq']:020d}.json")).unlink(missing_ok=True)
+        self._remove_message(message["queue"], message["seq"], message)
 
     def _retained(self, queue: str) -> int:
         """Validated processed prefix of ``retain.json`` (0 when absent/corrupt)."""
@@ -799,8 +954,7 @@ class QueueStore:
         for seq in range(cursor + 1, stop + 1):
             message = self._message(queue, seq)
             if message is not None and not self._refs_to(message["id"]):
-                message_path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
-                message_path.unlink(missing_ok=True)
+                self._remove_message(queue, seq, message)
                 for ref in message.get("refs", []):
                     self._remove_ref(ref, message["id"])
                 (self.root / self._relative("refs", message["id"], "to.json")).unlink(missing_ok=True)
@@ -809,7 +963,7 @@ class QueueStore:
             atomic_write(path, canonical({"seq": last}))
 
     def _retain(self, queue: str, declaration: Queue, stamp: dt.datetime) -> None:
-        """Remove bounded old messages only when every reader acknowledged them."""
+        """Remove bounded old messages only when every reader was delivered to."""
         path = self.root / self._relative(queue, "retain.json")
         stored = self._optional_json(self._relative(queue, "retain.json"))
         cursor = stored.get("seq") if isinstance(stored, Mapping) else None
@@ -833,16 +987,17 @@ class QueueStore:
                     break
             except (Denied, KeyError):
                 break
-            # role:* has no concrete actor cursor, so it stays at zero and
-            # fails closed rather than dropping a message another role may read.
-            if any(self._cursor(queue, reader) < seq for reader in declaration.read):
+            # A role:* reader has no concrete delivery fact, so coverage
+            # cannot be proven: fail closed rather than drop a message another
+            # role may read.
+            if any(reader == "role:*" or not self.delivered(queue, seq, reader)
+                   for reader in declaration.read):
                 break
             if self._refs_to(message["id"]):
                 if blocked is None:
                     blocked = seq  # do not advance the cursor past a live referrer
                 continue
-            message_path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
-            message_path.unlink(missing_ok=True)
+            self._remove_message(queue, seq, message)
             for ref in message.get("refs", []):
                 self._remove_ref(ref, message["id"])
             (self.root / self._relative("refs", message["id"], "to.json")).unlink(missing_ok=True)

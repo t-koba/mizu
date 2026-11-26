@@ -68,8 +68,7 @@ PURPOSE_PREFIXES = {
         "scheduling."),
     "result_read": "Retrieve the next page of a truncated tool result without rerunning the tool.",
     "queue_write": "Append a message to a declared queue.",
-    "queue_read": "Read due messages from a declared queue after your role's durable cursor,",
-    "queue_ack": "Advance your role's durable cursor in a declared queue to seq;",
+    "queue_read": "Read undelivered due messages from a declared queue, recording what you read",
     "message_read": "Read one message by its 32-hex id if your role may read its queue.",
     "message_refs": "List messages referring to id, or that id refers to, in either direction",
     "finish": "End this work unit and release its model slot and workspace lock.",
@@ -84,7 +83,7 @@ HISTORY_WORDING = re.compile(
 
 class ToolDescriptionTests(unittest.TestCase):
     def test_definition_inventory(self):
-        self.assertEqual(len(DEFINITIONS), 41)
+        self.assertEqual(len(DEFINITIONS), 40)
         for retired in ("work_items_legacy_read", "work_items_reconcile"):
             self.assertNotIn(retired, DEFINITIONS)
         for tool, (description, _) in DEFINITIONS.items():
@@ -104,7 +103,7 @@ class ToolDescriptionTests(unittest.TestCase):
                 self.assertNotRegex(description, HISTORY_WORDING)
 
     def test_description_byte_budget(self):
-        # The rewritten manual plus the five declared queue tools is 27,582
+        # The rewritten manual plus the four declared queue tools is 27,582
         # bytes; it must stay at or below that measured size.
         self.assertLessEqual(sum(len(d.encode("utf-8")) for d, _ in DEFINITIONS.values()), 27_582)
 

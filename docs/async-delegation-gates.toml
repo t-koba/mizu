@@ -48,7 +48,7 @@ parent_denied = [
   "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",
   "report", "feed_updates", "ready_work_read", "work_order_read", "report_read",
   # Queue and message tools are not proven safe for a reserved parent yet; fail closed.
-  "queue_read", "queue_write", "queue_ack", "message_read", "message_refs",
+  "queue_read", "queue_write", "message_read", "message_refs",
 ]
 
 [parameterized.vcs_read]

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from . import (check_jobs, ci_waits, delegation_gates, delivery_settlement,
                dispatch_evidence, editor, lock_diagnostics, proposal_waits,
-               reviews, safe_point, work_item_events)
+               queue_facts, reviews, safe_point, work_item_events)
 from . import platform as _platform
 from .ci_observation import effective_ci_wake_branches
 from .ci_wake import wake_facts_cover_due, write_ci_wake
@@ -424,6 +424,14 @@ class EngineRunMixin:
                 # A pin must be durable before dispatch-adjacent delivery state
                 # changes, so a setup failure cannot consume an unseen wake.
                 delivery_settlement.register(context)
+                # The opening projection is the delivery seam: the role saw
+                # these messages even when its prompt omits the queues
+                # section, so they must not wake it again after this unit.
+                try:
+                    queue_facts.deliver_opening(project, role_name, context.queues,
+                                                context.run_dir.name)
+                except (Denied, OSError, ValueError):
+                    pass
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
                 decoded = json.loads(prompt)

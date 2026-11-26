@@ -137,8 +137,7 @@ class ProgressAdmissionTests(Fixture):
                           "command_evidence_read", "experiment_evidence_read",
                           "queue_read", "message_read", "message_refs"):
             self.assertTrue(_is_observational_operation(operation, {}), operation)
-        for operation in ("queue_write", "queue_ack"):
-            self.assertFalse(_is_observational_operation(operation, {}), operation)
+        self.assertFalse(_is_observational_operation("queue_write", {}), "queue_write")
         for action in ("list", "logs", "result"):
             self.assertTrue(_is_observational_operation("check_job", {"action": action}))
         cases = (("fetch", "receipt_id", {"url": "https://example.test/"}),
