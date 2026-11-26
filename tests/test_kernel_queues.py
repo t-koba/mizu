@@ -725,6 +725,74 @@ class QueueStoreTests(unittest.TestCase):
         store.read("events", "role:alpha", now=NOW)
         self.assertFalse(pinned_dir.exists())
 
+    def test_generated_id_pointers_retire_with_count_retained_messages(self):
+        """Whole retained storage stays bounded, not just the message bodies."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["operator"], "retain_last": 1}
+        root = self.root / "generated-pointers"
+        store = QueueStore(root, parse_queues(raw))
+        bodies = lambda: len(list((root / "queues" / "events" / "messages").glob("*.json")))
+        pointers = lambda: len(list((root / "queues" / "ids").glob("*.json")))
+        appended = 0
+        for total in (20, 200):
+            while appended < total:
+                store.append("events", {"n": 1}, "host", now=NOW)
+                appended += 1
+            # Both the bodies and the generated-id pointers are bounded at the
+            # retention count, even though hundreds of messages were appended.
+            self.assertEqual(bodies(), 1)
+            self.assertEqual(pointers(), 1)
+
+    def test_caller_id_tombstone_survives_removal_and_blocks_reuse(self):
+        """Explicit ids keep their idempotency tombstone after pruning."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["operator"], "retain_last": 1}
+        root = self.root / "caller-tombstone"
+        store = QueueStore(root, parse_queues(raw))
+        explicit = "a" * 32
+        made = store.append("events", {"n": 1}, "host", id=explicit, now=NOW)
+        store.append("events", {"n": 2}, "host", now=NOW)  # prune the first
+        self.assertFalse((root / "queues" / "events" / "messages"
+                          / f"{made['seq']:020d}.json").exists())
+        pointer = root / "queues" / "ids" / (explicit + ".json")
+        self.assertTrue(pointer.exists())
+        self.assertNotIn("id_generated", json.loads(pointer.read_text(encoding="utf-8")))
+        with self.assertRaises(Denied):
+            store.append("events", {"n": 1}, "host", id=explicit, now=NOW)
+
+    def test_generated_target_pointer_is_kept_while_referrer_is_live(self):
+        """A generated-id pointer of a still-referenced message is preserved."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["role:alpha", "operator"],
+                         "retain_last": 1}
+        root = self.root / "live-ref-pointer"
+        store = QueueStore(root, parse_queues(raw))
+        target = store.append("events", {"n": 1}, "host", now=NOW)
+        pointer = root / "queues" / "ids" / (target["id"] + ".json")
+        self.assertTrue(json.loads(pointer.read_text(encoding="utf-8")).get("id_generated"))
+        referrer = store.append("notes", {}, "role:alpha", now=OLD, refs=[target["id"]])
+        store.append("events", {"n": 2}, "host", now=NOW)  # first held by live ref
+        self.assertTrue(pointer.exists())  # live referenced message keeps its pointer
+        self.deliver(store, "notes", referrer, now=NOW)
+        store.read("notes", "role:alpha", now=NOW)  # last ref goes -> target removed
+        self.assertFalse((root / "queues" / "events" / "messages"
+                          / f"{target['seq']:020d}.json").exists())
+        self.assertFalse(pointer.exists())  # now no live referrer: pointer retires
+
+    def test_generated_id_marker_survives_crash_recovery(self):
+        """A recovered generated-id message still retires its pointer."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["operator"], "retain_last": 1}
+        root = self.root / "recovery-pointer"
+        store = QueueStore(root, parse_queues(raw))
+        recovered = {"queue": "events", "seq": 1, "id": "b" * 32, "author": "host",
+                     "at": NOW, "deliver_at": None, "refs": [], "body": {"n": 1}}
+        atomic_write(root / "queues" / "intent.json",
+                     canonical({"message": recovered, "id_generated": True}))
+        resumed = QueueStore(root, parse_queues(raw))
+        resumed.append("events", {"n": 2}, "host", now=NOW)  # triggers recovery + prune
+        self.assertFalse((root / "queues" / "ids" / ("b" * 32 + ".json")).exists())
+
     def test_migrate_cursors_converts_once_without_importing_woken(self):
         queue = self.root / "queues" / "tasks"
         for seq in range(1, 5):

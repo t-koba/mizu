@@ -6,7 +6,8 @@ Layout under the project root:
   queues/<queue>/delivery/<seq:020d>/<principal>.json  create-only delivery facts
   queues/delivery-migration.json           one-time cursor/woken conversion marker
   queues/<queue>/retain.json               first sequence not yet considered for removal
-  queues/ids/<id>.json                     global id -> (queue, seq), kept as a tombstone
+  queues/ids/<id>.json                     global id -> (queue, seq); a generated id retires
+                                         with its message, a caller id stays a tombstone
   queues/refs/<id>/to.json                 bounded pointers to messages referring to <id>
   queues/intent.json                       the one in-flight append (crash recovery)
   locks/queues.lock                        serialises writes
@@ -436,14 +437,21 @@ class QueueStore:
         value = message.get("deliver_at")
         return value is None or _instant(value, "deliver_at") <= stamp
 
-    def _publish(self, message: dict, stamp: dt.datetime) -> None:
+    def _publish(self, message: dict, stamp: dt.datetime, *, id_generated=False) -> None:
         queue, seq, message_id = message["queue"], message["seq"], message["id"]
         path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
         atomic_write(path, canonical(message), exclusive=True)
         for ref in message["refs"]:
             self._add_ref(ref, message)
+        # A caller-supplied id is an idempotency key: its pointer must survive
+        # removal so a retry cannot reuse an id whose message is gone. A
+        # generated id has no such contract and its pointer would otherwise
+        # outlive the message forever, so mark it for retirement with the body.
+        pointer = {"queue": queue, "seq": seq}
+        if id_generated is True:
+            pointer["id_generated"] = True
         atomic_write(self.root / self._relative("ids", f"{message_id}.json"),
-                     canonical({"queue": queue, "seq": seq}), exclusive=True)
+                     canonical(pointer), exclusive=True)
         if seq > self._stored_head(queue):
             atomic_write(self.root / self._relative(queue, "head.json"), canonical({"seq": seq}))
         declaration = self.queues.get(queue)
@@ -491,7 +499,8 @@ class QueueStore:
             raise Denied("Corrupt queue append intent")
         try:
             self._prepare_publish(intent["message"])
-            self._publish(dict(intent["message"]), _instant(clock(), "now"))
+            self._publish(dict(intent["message"]), _instant(clock(), "now"),
+                          id_generated=intent.get("id_generated") is True)
         except Denied:
             # Denied is deterministic: a message that cannot be published must
             # not wedge every later operation on replay. Transient I/O failures
@@ -527,6 +536,7 @@ class QueueStore:
                     if not same:
                         raise Denied(f"Message id {id} already carries different content")
                     return existing
+            id_generated = id is None
             message_id = id or secrets.token_hex(16)
             while self._id_pointer(message_id) is not None:
                 if id is not None:
@@ -538,7 +548,8 @@ class QueueStore:
                        "deliver_at": None if deliver is None else deliver_at,
                        "refs": list(ref_ids), "body": values}
             self._prepare_publish(message)
-            atomic_write(self.root / self._relative("intent.json"), canonical({"message": message}))
+            atomic_write(self.root / self._relative("intent.json"),
+                         canonical({"message": message, "id_generated": id_generated}))
             self._recover()
             if declaration.retain_last is not None:
                 self._retain_last(declaration.name, declaration)
@@ -949,12 +960,25 @@ class QueueStore:
         directory.rmdir()
 
     def _remove_message(self, queue: str, seq: int, message: Mapping) -> None:
-        """Unlink a message and all its delivery facts; ids and refs live separately."""
+        """Unlink a message, its delivery facts, and a generated id pointer.
+
+        Caller-supplied ids keep their tombstone (the idempotency contract);
+        generated ids have no caller and must not leave a permanent pointer.
+        Pointers to live referenced messages are not touched here: retention
+        leaves such messages on disk and ``_remove_ref`` retires them when the
+        last referrer goes away.
+        """
         if (not isinstance(message, Mapping) or message.get("queue") != queue
                 or message.get("seq") != seq):
             raise Denied("Corrupt queue message")
         (self.root / self._relative(queue, "messages", f"{seq:020d}.json")).unlink(missing_ok=True)
         self._remove_delivery(queue, seq)
+        try:
+            pointer = self._id_pointer(message["id"])
+        except (Denied, KeyError):
+            pointer = None  # never delete a pointer we cannot validate as generated
+        if isinstance(pointer, Mapping) and pointer.get("id_generated") is True:
+            (self.root / self._relative("ids", message["id"] + ".json")).unlink(missing_ok=True)
 
     def _remove_ref(self, target: str, message_id: str) -> None:
         entries = self._refs_to(target)
