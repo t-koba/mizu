@@ -425,15 +425,22 @@ class EngineRunMixin:
                 # changes, so a setup failure cannot consume an unseen wake.
                 delivery_settlement.register(context)
                 decoded = json.loads(prompt)
-                # The delivery seam credits only queue messages actually
-                # serialized into this unit's opening. A role whose prompt
-                # omits the `queues` section was handed no queue content, so
-                # nothing is credited and those messages stay pending.
-                try:
-                    queue_facts.deliver_opening(project, role_name, decoded.get("queues", []),
-                                                context.run_dir.name)
-                except (Denied, OSError, ValueError):
-                    pass
+                # Credit only the queue content actually serialized into this
+                # unit's opening, and only at the real prompt handoff boundary
+                # in dispatch_evidence.execute. A role whose prompt omits the
+                # `queues` section was handed no queue content, so nothing is
+                # credited. Deferring to the handoff keeps a setup failure
+                # before the driver call from consuming an unseen wake.
+                opening_queues = decoded.get("queues", [])
+
+                def credit_opening_handoff():
+                    try:
+                        queue_facts.deliver_opening(project, role_name, opening_queues,
+                                                    context.run_dir.name)
+                    except (Denied, OSError, ValueError):
+                        pass
+
+                context._opening_handoff = credit_opening_handoff
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
                 work_items_page = decoded.get("open_work_items")

@@ -45,8 +45,10 @@ do not use this token contract.
 ## Messages
 
 The unit opening's `queues` lists, for each queue you may read, the due
-messages you have not acknowledged: their count and the newest of them. Read
-them with `queue_read` and record what you read with `queue_ack`; acknowledging
+messages not yet delivered to you: their count and the newest of them. The
+kernel records delivery when it hands content to a dispatched opening or when
+you call `queue_read` or `message_read`; there is no separate acknowledgement
+step, and a `cursor` passed to `queue_read` only pages stored history. Reading
 answers or accepts nothing. Write a `proposals` message when you learned
 something about the product that the worker does not know yet: what you
 observed, the evidence and why it matters. Ask the operator through

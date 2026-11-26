@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import support  # noqa: F401
 from support import Fixture, ScriptDriver, history_write_json
-from mizu import cli, queue_facts, unit_finish
+from mizu import cli, dispatch_evidence, queue_facts, unit_finish
 from mizu.errors import Denied, ProtocolError
 from mizu.fs import write_json
 from mizu.kernel import parse_queues
@@ -192,6 +192,93 @@ class QueueFactsTests(QueueFixture):
             self.assertTrue(store.delivered("notes", seq, "role:worker"))
         self.assertFalse(queue_facts.due(self.project, "worker"))
         self.assertEqual(queue_facts.opening(self.project, "worker"), [])
+
+    def test_pre_handoff_failure_keeps_the_only_wake(self):
+        """Delivery is credited at the driver handoff, not at prompt setup."""
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
+        self.write("unseen")
+        driver = ScriptDriver(lambda ctx, prompt, profile=None: ctx.handle(
+            "finish", {"outcome": "wait", "summary": "Seen", "state": "Next."}))
+
+        def fail_setup(*args, **kwargs):
+            raise OSError("synthetic pre-handoff setup failure")
+
+        with patch.object(dispatch_evidence, "capture_projection", side_effect=fail_setup):
+            with self.assertRaises(OSError):
+                Engine(config, driver=driver).run(self.project, "worker")
+        # No prompt reached the driver, so nothing was delivered: the wake and
+        # the pending message survive for a later unit.
+        self.assertEqual(driver.calls, [])
+        self.assertTrue(queue_facts.due(self.project, "worker"))
+        self.assertFalse(self.project.kernel_queues.delivered("notes", 1, "role:worker"))
+        self.assertEqual(len(queue_facts.opening(self.project, "worker")[0]["messages"]), 1)
+
+        # A subsequent unit that does reach the driver hands over and credits it.
+        Engine(config, driver=driver).run(self.project, "worker")
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        self.assertTrue(self.project.kernel_queues.delivered("notes", 1, "role:worker"))
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
+
+    def test_referred_body_serialized_in_opening_is_credited(self):
+        """A nested referred body handed to the driver is credited by its own queue/seq."""
+        limits = dataclasses.replace(self.config.limits, queue_opening_messages=1)
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles, limits=limits)
+        self.project = Project(config, self.project.name)
+        store = self.project.kernel_queues
+        store.append("answers", {"title": "filler"}, "operator")
+        target = store.append("answers", {"title": "TARGET"}, "operator")
+        store.append("notes", {"title": "reply"}, "operator", refs=[target["id"]])
+
+        handed = []
+        def reader(ctx, prompt, profile=None):
+            for row in json.loads(prompt).get("queues", []):
+                for message in row.get("messages", []):
+                    for ref in message.get("refers", []):
+                        handed.append(ref["body"]["title"])
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read", "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        # The target was beyond the one-message opening limit of its own queue,
+        # but its body was serialized as a referred body and so was delivered.
+        self.assertEqual(handed, ["TARGET"])
+        self.assertTrue(store.delivered("answers", target["seq"], "role:worker"))
+        # No reader call drains it: it will not be shown again.
+        self.assertNotIn(target["seq"], [m["seq"] for m in
+                         store.pending("answers", "role:worker")["messages"]])
+
+    def test_unreadable_ref_is_not_serialized_nor_credited(self):
+        """A body the reader never received stays undelivered."""
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        queues = dict(QUEUES)
+        queues["secret"] = {"write": ["operator"], "read": ["operator"],
+                            "schema": {"title": {"type": "string", "max": 80, "required": True}}}
+        config = dataclasses.replace(self.config, roles=roles, queues=parse_queues(queues))
+        self.project = Project(config, self.project.name)
+        store = self.project.kernel_queues
+        hidden = store.append("secret", {"title": "HIDDEN"}, "operator")
+        store.append("notes", {"title": "reply"}, "operator", refs=[hidden["id"]])
+
+        handed = []
+        def reader(ctx, prompt, profile=None):
+            for row in json.loads(prompt).get("queues", []):
+                for message in row.get("messages", []):
+                    handed.extend(message.get("refers", []))
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read", "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        self.assertEqual(handed, [])
+        fact = (self.project.root / "queues" / "secret" / "delivery"
+                / f"{hidden['seq']:020d}" / "role:worker.json")
+        self.assertFalse(fact.exists())
 
     def test_unit_opening_carries_queue_facts_without_instructions(self):
         self.write("Observed upstream release")

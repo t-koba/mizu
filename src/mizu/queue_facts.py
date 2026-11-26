@@ -80,22 +80,40 @@ def deliver_opening(project, role_name: str, rows: list[dict], unit: str) -> Non
     """Record delivery for every message the dispatched unit opening showed.
 
     ``rows`` is the queues projection actually serialized into the dispatched
-    opening; a role whose prompt omits that section passes no rows, so no
-    unseen message is credited. A racing retention removal
+    opening, including referred bodies embedded by ``_with_thread``; a role
+    whose prompt omits that section passes no rows, so no unseen message is
+    credited. A racing retention removal
     or a corrupt fact cannot fail dispatch: such a message stays undelivered
     and can still wake a later unit.
     """
     store = project.kernel_queues
+    actor = principal(role_name)
+
+    def credit(message: dict, default_queue) -> None:
+        # A serialized message is credited by its own queue and sequence. A
+        # referred body (see _with_thread) is serialized into the same opening
+        # and must be credited too, or the next opening shows it again even
+        # though the reader already received it. Bodies that were not
+        # serialized are absent here and stay undelivered.
+        if not isinstance(message, dict) or type(message.get("seq")) is not int:
+            return
+        queue = message.get("queue", default_queue)
+        if not isinstance(queue, str):
+            return
+        try:
+            store.record_delivery(queue, message["seq"], actor, unit)
+        except (Denied, OSError, ValueError):
+            pass
+        refers = message.get("refers")
+        if isinstance(refers, list):
+            for referred in refers:
+                credit(referred, queue)
+
     for row in rows:
         if not isinstance(row.get("queue"), str) or not isinstance(row.get("messages"), list):
             continue
         for message in row["messages"]:
-            if not isinstance(message, dict) or type(message.get("seq")) is not int:
-                continue
-            try:
-                store.record_delivery(row["queue"], message["seq"], principal(role_name), unit)
-            except (Denied, OSError, ValueError):
-                continue
+            credit(message, row["queue"])
 
 
 def opening(project, role_name: str) -> list[dict]:

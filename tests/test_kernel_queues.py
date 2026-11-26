@@ -6,6 +6,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import support  # noqa: F401  (puts src on the path)
 from support import Fixture
@@ -366,6 +367,50 @@ class QueueStoreTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in page["messages"]], [delayed["id"]])
         self.assertTrue(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
         self.assertFalse(self.store.due("tasks", "role:alpha", now=later))
+    def test_ready_lookups_skip_the_delivered_prefix_regardless_of_history(self):
+        """pending/due/next_delivery read work tracks changes, not retained history."""
+        def reads_for(count):
+            root = self.root / f"floor-{count}"
+            store = QueueStore(root, self.queues)
+            for index in range(count):
+                made = store.append("tasks", BODY, "operator", now=NOW)
+                self.deliver(store, "tasks", made, readers=("role:alpha",), now=NOW)
+            real = store._message
+            seen = []
+            def counted(*args, **kwargs):
+                seen.append(1)
+                return real(*args, **kwargs)
+            with patch.object(store, "_message", side_effect=counted):
+                facts = store.pending("tasks", "role:alpha", newest=0, now=NOW)
+                self.assertFalse(store.due("tasks", "role:alpha", now=NOW))
+                self.assertIsNone(store.next_delivery("tasks", "role:alpha", now=NOW))
+            self.assertEqual((facts["count"], facts["more"]), (0, False))
+            return len(seen)
+
+        small, large = reads_for(16), reads_for(128)
+        # A fully delivered prefix costs a bounded number of reads, not one
+        # read per retained message, so both sizes do the same amount of work.
+        self.assertEqual(small, large)
+
+    def test_floor_never_crosses_a_delayed_message(self):
+        """The derived floor preserves exact head-of-line for delayed messages."""
+        due = self.store.append("tasks", BODY, "operator", now=NOW)
+        delayed = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        tail = self.store.append("tasks", BODY, "operator", now=NOW)
+        self.deliver(self.store, "tasks", due, readers=("role:alpha",), now=NOW)
+        self.deliver(self.store, "tasks", tail, readers=("role:alpha",), now=NOW)  # delivered out of order
+        # The delayed message in between is not crossed even though the tail
+        # already has a delivery fact: at NOW it still bounds every due scan.
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=NOW))
+        self.assertEqual(self.store.pending("tasks", "role:alpha", now=NOW)["count"], 0)
+        self.assertEqual(self.store.next_delivery("tasks", "role:alpha", now=NOW),
+                         _instant(LATER, "deliver_at"))
+        # Once due and delivered, the tail's earlier fact becomes reachable and
+        # the scan is clean at the later observation time too.
+        self.deliver(self.store, "tasks", delayed, readers=("role:alpha",), now=LATER)
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+        self.assertIsNone(self.store.next_delivery("tasks", "role:alpha", now=LATER))
+
     def test_delivery_facts_are_durable_and_idempotent(self):
         first = self.store.append("notes", {}, "host", now=NOW)
         page = self.store.read("notes", "role:alpha", now=NOW)

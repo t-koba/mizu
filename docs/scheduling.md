@@ -29,7 +29,7 @@ Existing scheduling controls still win, and no queue-message lifecycle is
 changed. Service-managed scheduled, event-subscribed and unscheduled on-change
 roles watch their configured queues (triggers are not recursive);
 explicit-run-only roles stay explicit-run-only. See [kernel.md](kernel.md) for
-delivery, cursors and acknowledgements.
+delivery facts and history page positions.
 
 The shipped example (`config/config.example.toml`) exercises each pattern:
 

@@ -2,10 +2,11 @@
 
 Roles, the operator and host tooling communicate through the queues declared
 in `queues.toml`. A unit opening states, for each queue you may read, how many
-due messages you have not acknowledged and the newest of them. `queue_read`
-returns them in order; `queue_ack` records that you have read up to a
-sequence. Acknowledging says only that you read a message. It answers,
-accepts or rejects nothing.
+due messages not yet delivered to you and the newest of them. The kernel
+records delivery when it hands content to a dispatched opening or when you
+call `queue_read` or `message_read`; there is no separate acknowledgement
+tool, and a `cursor` passed to `queue_read` only pages stored history. Reading
+says only that you received a message. It answers, accepts or rejects nothing.
 
 ## proposals
 

@@ -36,8 +36,8 @@ of a running role. The example userland declares the `proposals`, `questions`
 (threads: questions and the answers that refer to them) and `notices` queues
 with their schemas, roles and wakes. There is no
 authority marker, dual-write path, or adapter left in the runtime: decisions are
-plain-English judgements made by roles under policy, and acknowledgements are
-queue cursors. Old record files appear only as stored data for those conversions
+plain-English judgements made by roles under policy, and delivery is a kernel
+fact recorded when content is handed to a reader. Old record files appear only as stored data for those conversions
 and as historical manifests; see [operations](operations.md) for the procedures.
 
 ## Stages
@@ -119,7 +119,7 @@ cutover.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
-| 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader cursors and acknowledgement, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |
+| 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader delivery facts, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |
 | 2. Proposals, decisions, questions, answers, notices | Nothing new | Queues for each, and the policy text for who writes and reads them and what a reader does | insights, insight_index, insight_tools, decision_delivery, decision_reconciliation, decision_idle, record_migration, operator_records, operator_record_index, host_records and the insight branches in shared modules |
 | 3. Work items, waits, completion | Nothing new | Work as messages in a queue, waits as delayed messages or as reading for a referring message, completion as policy (the holder's judgement and an independent check) | work_items and work_item_* modules, completion_evidence and completion_* modules, ready-work projection |
 | 4. Wake and scheduling | Daemon sleeps on wakes and the earliest `deliver_at`; outcome effects from configuration | Outcome names and effects per role; which queues wake each role | idle_seconds re-evaluation loop, readiness recheck cadence, event-recovery polls, CI re-wake cadence, fixed wake order in runtime/scheduling, progress outcome lists |

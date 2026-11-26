@@ -438,6 +438,18 @@ def execute(context, driver, prompt, **kwargs):
         pass
     status = "raised"
     context._dispatch_in_progress = True
+    # Credit the opening's queue content at the actual handoff boundary: the
+    # prompt is about to cross into the driver. A failure before this point
+    # (prompt construction, projection capture, admission, container setup)
+    # leaves the wake intact for a later unit; a driver that received the
+    # prompt and then fails has still been handed the content. Idempotent
+    # across retries, and a measurement failure here never fails dispatch.
+    handoff = getattr(context, "_opening_handoff", None)
+    if handoff is not None:
+        try:
+            handoff()
+        except Exception:
+            pass
     try:
         result = driver.execute(context, prompt, **kwargs)
         status = "returned"

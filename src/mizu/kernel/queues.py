@@ -587,7 +587,55 @@ class QueueStore:
             return existing
         record = {"unit": unit, "at": at}
         atomic_write(self._delivery_path(queue, seq, actor), canonical(record), exclusive=True)
+        # Every fact write advances the contiguous prefix; callers hold the
+        # queue lock, so the floor and the facts it summarizes move together.
+        self._advance_floor(queue, actor)
         return record
+
+    def _floor_path(self, queue: str, actor: str) -> Path:
+        return (self.root / self._relative(queue, "floor")
+                / (self._actor(actor).replace(":", "_") + ".json"))
+
+    def _floor(self, queue: str, actor: str, head: int) -> int:
+        """Contiguous delivered prefix for ``actor``; 0 when absent or corrupt.
+
+        The floor is a kernel fact derived from delivery facts: it is advanced
+        only under the lock and only over messages that carry a delivery fact
+        for ``actor`` and have no ``deliver_at``. Immediate messages are due at
+        every ``now``, so skipping a delivered one can never hide a wake or a
+        head-of-line boundary. Delayed messages are deliberately not crossed,
+        keeping exact delayed ordering for any observation time. A corrupt or
+        unreadable floor fails closed to 0 (a full scan), never to a skip.
+        """
+        try:
+            stored = self._optional_json(
+                self._relative(queue, "floor", self._actor(actor).replace(":", "_") + ".json"))
+        except (Denied, ValueError, RecursionError):
+            return 0
+        value = stored.get("seq") if isinstance(stored, Mapping) else None
+        return value if type(value) is int and 0 <= value <= head else 0
+
+    def _advance_floor(self, queue: str, actor: str) -> None:
+        """Extend ``actor``'s contiguous delivered prefix; called under the lock.
+
+        Every delivery-fact write attempts this, so an out-of-order by-ID
+        delivery that fills a gap is crossed once the earlier seq is delivered.
+        The walk starts at the stored floor and stops at its first non-crossable
+        seq, so a run of in-order deliveries costs O(1) per write.
+        """
+        head = self._head(queue)
+        floor = self._floor(queue, actor, head)
+        start = floor
+        while floor < head:
+            candidate = floor + 1
+            message = self._message(queue, candidate)
+            if message is None or message.get("deliver_at") is not None:
+                break  # a gap or a delayed message is never crossed
+            if self._delivery(queue, candidate, actor) is None:
+                break
+            floor = candidate
+        if floor != start:
+            atomic_write(self._floor_path(queue, actor), canonical({"seq": floor}))
 
     def _cursor_principal(self, name: str) -> str:
         """Decode the cursor filename convention back to a concrete principal."""
@@ -660,7 +708,7 @@ class QueueStore:
             raise Denied(f"newest must be from 0 to {PAGE_MAX}")
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), 0)
+        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
         count, rows = 0, []
         # Count undelivered messages, not examined positions: a delivered
         # prefix of any length cannot hide the next undelivered message.
@@ -692,7 +740,7 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), 0)
+        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
         # Scan to the head, stopping at the first not-yet-due message. A long
         # delivered prefix is skipped, not counted, so it cannot hide a wake.
         while seq < head:
@@ -812,7 +860,7 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), 0)
+        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
         # As in ``due``, delivered rows are skipped without ending the scan,
         # so a delivered prefix cannot hide a later actionable deadline.
         while seq < head:
