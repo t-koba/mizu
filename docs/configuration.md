@@ -80,7 +80,7 @@ projection: the host passes only raw branch heads, exact-head publication pairs,
 instants, cleaned run identities and validated CI request pages; the driver
 projects the bounded rows for the fixed prompt key, which stays empty when the
 driver is absent or refuses. The `ci_summary` driver is the other: the host
-passes one coherent poll-cache read as retained failure triples, validated
+passes one coherent poll-cache read as retained failure subject/revision pairs, validated
 check summaries and a projection-incompleteness flag; the driver owns the
 aggregate policy and the opt-in `ci` section stays without aggregates when it
 is absent, refuses or returns invalid facts. Wake facts come from the

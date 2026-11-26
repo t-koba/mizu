@@ -1,7 +1,7 @@
 """Trusted host gathering of raw CI aggregate evidence for an observation driver.
 
 The host caller reads one coherent poll-cache generation and assembles only
-evidence inputs: bounded retained failure triples, validated current check
+evidence inputs: bounded retained failure subject/revision pairs, validated current check
 summaries and the projection's incompleteness flag. A configured operator driver
 owns the aggregation policy and projects those inputs into bounded prompt facts
 through the generic host seam; this module never recomputes or repairs the
@@ -11,7 +11,7 @@ Schema: ``ci_summary_facts(project, config=None)`` returns the driver's list of
 at most ``MAX_CI_WAKE_ROWS`` plain aggregate facts, each with exactly
 ``{subject, revision, outcome, non_passing_checks, may_be_incomplete}``, sorted
 by ``(subject, revision)``. Bounds: one poll-cache read, at most
-``MAX_CI_WAKE_ROWS`` failure triples and cleaned summaries sent as one request,
+``MAX_CI_WAKE_ROWS`` failure subject/revision pairs and cleaned summaries sent as one request,
 one driver call and one observation in reply. Trust: cache rows and driver
 output are untrusted evidence; the kernel-owned queue records the observation
 as external-untrusted. Retry/cancellation: one driver call, no replay. Evidence:
@@ -43,7 +43,9 @@ def summary_request(project, config=None) -> dict:
         summaries = [[branch, entry["sha"], entry["non_passing_checks"],
                       entry["may_be_incomplete"]]
                      for branch in sorted(cleaned) for entry in cleaned[branch]]
-        return {"rows": [[row["branch"], row["sha"], row["check"]] for row in rows],
+        # Only (subject, revision) identifies a failure for aggregation; the
+        # check name is host-validated and deliberately not sent to the driver.
+        return {"rows": [[row["branch"], row["sha"]] for row in rows],
                 "summaries": summaries, "partial": partial}
     except Exception:
         return {}

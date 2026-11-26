@@ -54,7 +54,7 @@ class CiSummaryObservationTests(Fixture):
         """Stand in for the generic host seam, invoking the real driver once."""
         self.assertEqual(name, "ci_summary")
         self.assertEqual(set(request), {"rows", "summaries", "partial"})
-        self.assertTrue(all(type(row) is list and len(row) == 3
+        self.assertTrue(all(type(row) is list and len(row) == 2
                             for row in request["rows"]))
         self.assertTrue(all(type(row) is list and len(row) == 4
                             for row in request["summaries"]))
@@ -90,12 +90,29 @@ class CiSummaryObservationTests(Fixture):
                              for index in range(3)]})
         request = self.request()
         self.assertEqual(request["rows"],
-                         [["main", SHA, f"check-{index}"] for index in range(3)])
+                         [["main", SHA] for _ in range(3)])
         self.assertEqual(request["summaries"], [])
         self.assertFalse(request["partial"])
         self.assertEqual(self.facts(request), [{
             "subject": "main", "revision": SHA, "outcome": "failure",
             "non_passing_checks": 3, "may_be_incomplete": True}])
+
+    def test_host_valid_spaced_names_keep_aggregate_facts(self):
+        """Host-valid spaces in check names or subjects must not drop facts."""
+        for subject, name in (("main", "unit test"),
+                              ("main", "unit\u00a0test"),
+                              ("feature/foo bar", "unit")):
+            with self.subTest(subject=subject, name=name):
+                self.cache({subject: [{"sha": SHA, "check": name}],
+                            "release": [{"sha": OLDER, "check": "unit"}]})
+                request = self.request()
+                # The unused check name never crosses the trust boundary.
+                self.assertTrue(all(len(row) == 2 for row in request["rows"]))
+                self.assertEqual(self.facts_through_host(), [
+                    {"subject": subject, "revision": SHA, "outcome": "failure",
+                     "non_passing_checks": 1, "may_be_incomplete": True},
+                    {"subject": "release", "revision": OLDER, "outcome": "failure",
+                     "non_passing_checks": 1, "may_be_incomplete": True}])
 
     def test_exact_summary_supplies_the_full_count(self):
         rows = [{"sha": SHA, "check": f"check-{index}"} for index in range(3)]
@@ -218,7 +235,7 @@ class CiSummaryObservationTests(Fixture):
         broken["rows"][0][1] = SHA.upper()
         bad.append(broken)
         broken = json.loads(canonical(request))
-        broken["rows"][0][0] = "bad branch"
+        broken["rows"][0][0] = "bad\nbranch"
         bad.append(broken)
         broken = json.loads(canonical(request))
         broken["summaries"][0] = ["main", SHA, 0, False]
@@ -230,9 +247,9 @@ class CiSummaryObservationTests(Fixture):
         broken["summaries"].append(list(broken["summaries"][0]))
         bad.append(broken)
         broken = json.loads(canonical(request))
-        broken["rows"] = [["main", SHA, "x" * (driver.MAX_TEXT + 1)]]
+        broken["rows"] = [["x" * (driver.MAX_TEXT + 1), SHA]]
         bad.append(broken)
-        bad.append({**request, "rows": [["main", SHA, "unit"]] * (driver.MAX_ROWS + 1)})
+        bad.append({**request, "rows": [["main", SHA]] * (driver.MAX_ROWS + 1)})
         for value in bad:
             with self.subTest(value=canonical(value)[:100]):
                 with self.assertRaises(ValueError):

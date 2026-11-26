@@ -93,7 +93,7 @@ harness digest before and after; both receipts report `proc-per-pid`
 
 The same stage-5 slice also moves the opt-in prompt `ci_summary` aggregates to
 a declared observation driver: the host reads one coherent poll cache and sends
-only bounded failure triples, validated check summaries and an incompleteness
+only bounded failure subject/revision pairs, validated check summaries and an incompleteness
 flag, the driver owns the aggregation policy, and the kernel validates the
 returned facts before they reach the prompt. Wake and admission logic keeps its
 own kernel-side projection; an undeclared, refusing or invalid driver leaves the

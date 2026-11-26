@@ -21,12 +21,19 @@ SUMMARY_MAX = 4096
 # ci_head_state detail bound; the 4 MiB envelope covers the larger request.
 DETAIL_MAX = 1048576
 _HEX = frozenset("0123456789abcdef")
+# Mirrors vcs._BIDI_CONTROLS; spaces are valid in branches and check names.
+_BIDI = frozenset(
+    "\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069\ufeff"
+)
 _REQUEST_KEYS = frozenset({"rows", "summaries", "partial"})
 
 
 def _text(value):
     if (not isinstance(value, str) or not value or len(value) > MAX_TEXT
-            or any(character.isspace() or character == "\x00" for character in value)):
+            or any(ord(char) < 0x20 or ord(char) == 0x7F
+                   or 0x80 <= ord(char) <= 0x9F or char in _BIDI
+                   for char in value)):
         raise ValueError("Invalid CI summary evidence text")
     return value
 
@@ -54,11 +61,10 @@ def _rows(value):
     if not isinstance(value, list) or len(value) > MAX_ROWS:
         raise ValueError("Invalid CI summary failure rows")
     for row in value:
-        if type(row) is not list or len(row) != 3:
+        if type(row) is not list or len(row) != 2:
             raise ValueError("Invalid CI summary failure row")
         _text(row[0])
         _sha(row[1])
-        _text(row[2])
     return value
 
 
@@ -92,7 +98,7 @@ def observed_summary(request) -> dict:
         _flag(partial)
 
     counts = {}
-    for branch, sha, _check in rows:
+    for branch, sha in rows:
         key = (branch, sha)
         counts[key] = counts.get(key, 0) + 1
     facts = []
