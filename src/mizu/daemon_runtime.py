@@ -132,6 +132,20 @@ def _config_stamp(config) -> tuple:
         return ()
 
 
+def _wait_already_met(project, role_name):
+    """Whether a wake fact for the role is already true when its unit ends.
+
+    Only facts another writer produces count: an unseen terminal check result
+    or exact check wait, and a due message in a queue that wakes the role. A
+    read failure counts as not met, so the unit's own bound still applies.
+    """
+    try:
+        return bool(check_jobs.wake_ready(project, role_name)
+                    or queue_facts.due(project, role_name))
+    except (MizuError, OSError, ValueError, TypeError, KeyError):
+        return False
+
+
 def _wake_deadline(config, project, name, role_name, ordinary_after,
                    baseline=(), delivery_cache=None) -> float | None:
     """Earliest monotonic instant at which a quiet daemon re-checks state.
@@ -357,10 +371,16 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                             # The reported bound is the real reason to re-enter
                             # when nothing changes; a change after this unit
                             # lifts it (see hold_fingerprint).
-                            bound = max(0.1, result["next_evaluation_at"] - time.time())
-                            ordinary_after = time.monotonic() + bound
-                            hold_fingerprint = daemon_wake.fingerprint(
-                                project.root, config_path, config_files=input_files)
+                            # The hold baseline is read after the unit, so a
+                            # wait fact another writer completed while the unit
+                            # ran (a check result, a due message) is already in
+                            # it and would never count as a change. Such a fact
+                            # is not the unit's own write: it ends the wait now.
+                            if not _wait_already_met(project, role_name):
+                                bound = max(0.1, result["next_evaluation_at"] - time.time())
+                                ordinary_after = time.monotonic() + bound
+                                hold_fingerprint = daemon_wake.fingerprint(
+                                    project.root, config_path, config_files=input_files)
                 except (MizuError, OSError, ValueError) as exc:
                     admission_wait = isinstance(exc, Busy)
                     queue_file = admission.queue_state_path(config)

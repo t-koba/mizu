@@ -28,7 +28,7 @@ class StopClock:
 
 
 class WaitingHoldTests(Fixture):
-    def _run(self, change_at):
+    def _run(self, change_at, met=False):
         """Dispatch once (ending waiting with a far bound), then idle.
 
         ``change_at`` is the fake time at which the watched state changes
@@ -76,6 +76,7 @@ class WaitingHoldTests(Fixture):
               patch("mizu.daemon_runtime.queue_facts.next_delivery_at", return_value=None),
               patch("mizu.daemon_runtime.daemon_wake.fingerprint", side_effect=fingerprint),
               patch("mizu.daemon_runtime.daemon_wake.wait", side_effect=wait),
+              patch("mizu.daemon_runtime._wait_already_met", return_value=met),
               patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
               patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
               patch("mizu.runtime.Engine") as engine,
@@ -94,6 +95,12 @@ class WaitingHoldTests(Fixture):
         # has passed), not a day later.
         dispatched_at = self._run(change_at=1600.0)
         self.assertEqual(dispatched_at[:2], [1000.0, 1600.0])
+
+    def test_a_wait_met_while_the_unit_ran_runs_after_the_cooldown(self):
+        # The awaited result landed before the unit finished, so the hold
+        # baseline already contains it: no later change will arrive.
+        dispatched_at = self._run(change_at=None, met=True)
+        self.assertEqual(dispatched_at[:2], [1000.0, 1060.0])
 
     def test_a_change_inside_the_cooldown_waits_for_the_cooldown(self):
         dispatched_at = self._run(change_at=1010.0)
