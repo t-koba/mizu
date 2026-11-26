@@ -752,8 +752,24 @@ class QueueStore:
         path = self.root / self._relative("refs", target, "to.json")
         if remaining:
             atomic_write(path, canonical(remaining))
-        else:
-            path.unlink(missing_ok=True)
+            return
+        path.unlink(missing_ok=True)
+        # A count-retained message kept only for this referrer is past its
+        # queue's scan prefix, so nothing will reconsider it. Its last
+        # referrer is gone: remove it here, where the ref was written, rather
+        # than leave a file nothing can reach by sequence or by ref.
+        try:
+            message = self._message_by_id(target)
+        except Denied:
+            return
+        if message is None:
+            return
+        declaration = self._decl(message["queue"])
+        if (declaration.retain_last is None
+                or message["seq"] > self._retained(message["queue"])):
+            return
+        (self.root / self._relative(message["queue"], "messages",
+                                    f"{message['seq']:020d}.json")).unlink(missing_ok=True)
 
     def _retained(self, queue: str) -> int:
         """Validated processed prefix of ``retain.json`` (0 when absent/corrupt)."""
@@ -768,32 +784,27 @@ class QueueStore:
         """Keep at most ``retain_last`` newest messages regardless of acks.
 
         The retained prefix marks messages already considered for removal so
-        scans skip their holes. A message still referred to is left in place
-        and the prefix does not advance past it.
+        scans skip their holes. A message still referred to is left on disk
+        for id-addressable reads, but it does not hold the prefix back: the
+        scan advances past it so newer messages stay bounded and readers see
+        the newest facts. Its writer removes it when the last ref goes away
+        (see ``_remove_ref``).
         """
         path = self.root / self._relative(queue, "retain.json")
         cursor = self._retained(queue)
         head = self._head(queue)
         target = head - declaration.retain_last
         stop = min(target, cursor + MAX_RETENTION_SCAN)
-        last, blocked = cursor, None
+        last = cursor
         for seq in range(cursor + 1, stop + 1):
             message = self._message(queue, seq)
-            if message is None:
-                if blocked is None:
-                    last = seq  # already removed: never re-examine it
-                continue
-            if self._refs_to(message["id"]):
-                if blocked is None:
-                    blocked = seq  # do not advance past a live referrer
-                continue
-            message_path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
-            message_path.unlink(missing_ok=True)
-            for ref in message.get("refs", []):
-                self._remove_ref(ref, message["id"])
-            (self.root / self._relative("refs", message["id"], "to.json")).unlink(missing_ok=True)
-            if blocked is None:
-                last = seq
+            if message is not None and not self._refs_to(message["id"]):
+                message_path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
+                message_path.unlink(missing_ok=True)
+                for ref in message.get("refs", []):
+                    self._remove_ref(ref, message["id"])
+                (self.root / self._relative("refs", message["id"], "to.json")).unlink(missing_ok=True)
+            last = seq  # holes and referred messages advance the prefix too
         if last != cursor:
             atomic_write(path, canonical({"seq": last}))
 

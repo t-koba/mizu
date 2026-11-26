@@ -7,9 +7,10 @@ unit-opening statement. Snapshot proof and its diagnostic are projected together
 for both prompt variants.
 
 Fixed ``ci_head_state`` facts come from the declared observation driver
-(:func:`_head_state_prompt_facts`), which also consumes the wake edge of the
-observation it appends. Opt-in ``ci_summary`` aggregates are projected by the
-``ci_summary`` observation driver. Session selection and its rotation/recovery/fallback
+(:func:`_head_state_prompt_facts`); its observation is a readable prompt fact
+that does not wake the role, so CI admission stays kernel-side. Opt-in
+``ci_summary`` aggregates are projected by the ``ci_summary`` observation
+driver the same way. Session selection and its rotation/recovery/fallback
 policy (:func:`session_prompt`) now also live here, re-exported by ``runtime``.
 Work-ready scheduling (``work_readiness._has_ready_work`` and
 ``work_readiness._ready_work_changed``, re-exported by ``runtime``, plus
@@ -86,11 +87,11 @@ def _prompt_research_state(context: Context):
 
 
 def _head_state_prompt_facts(context: Context):
-    """Project the driver observation and deliver its wake edge in this unit.
+    """Project the driver observation as a readable prompt fact.
 
-    The fixed key carries the observation's rows to the role, so the same
-    opening must record the appended observation as delivered; otherwise a
-    finished unit would wake again on a fact it already saw.
+    The fixed key carries the observation's rows to the role. The same opening
+    also surfaces the appended observation in ``context.queues`` so the fact is
+    visible without waking the role; CI admission stays kernel-side.
     """
     caps = set(context.role.capabilities)
     if "vcs_request" not in caps or "ci_head_state" not in context.config.drivers:
@@ -102,12 +103,12 @@ def _head_state_prompt_facts(context: Context):
 
 
 def _ci_summary_prompt_facts(context: Context):
-    """Project the opt-in aggregate observation and deliver its wake edge.
+    """Project the opt-in aggregate observation as a readable prompt fact.
 
-    The driver appends to a queue that wakes the worker, so the same opening
-    must record that observation as delivered; otherwise a finished unit would
-    wake again on a fact it already saw. The projection is opt-in via the
-    ``ci`` section and fails closed when the driver is undeclared.
+    The driver appends a non-waking observation; the same opening surfaces it
+    in ``context.queues`` so the fact is visible without waking the role. CI
+    admission stays kernel-side. The projection is opt-in via the ``ci``
+    section and fails closed when the driver is undeclared.
     """
     if "ci" not in prompt_sections.included(context.role):
         return []

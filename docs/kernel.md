@@ -132,8 +132,11 @@ A queue may instead declare `retain_last = N` (1..64) for writer-owned count
 retention: only the newest N messages are kept, regardless of reader cursors.
 This mode excludes both `wake` (removal must not drop a wake edge) and
 `retain_days`, and refuses messages with refs or delayed delivery that would pin
-older history. Removal is bounded per append or read and advances the retained
-prefix, so later scans skip the holes.
+older history. A message another queue refers to is kept for id-addressable
+reads, but it does not hold the prefix back: removal advances past it so the
+queue stays bounded and readers see the newest facts. Such a message is
+removed when its last referrer goes away. Removal is bounded per append or
+read and advances the retained prefix, so later scans skip the holes.
 
 ## Host writers
 

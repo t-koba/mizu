@@ -1,6 +1,7 @@
 """Declared queues: credentials, schemas, cursors, refs, wakes and retention."""
 import copy
 import datetime as dt
+import json
 import tempfile
 import tomllib
 import unittest
@@ -11,7 +12,7 @@ from support import Fixture
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.kernel import QueueStore, parse_queues
-from mizu.kernel.queues import MAX_REFS, PAGE_MAX, _instant
+from mizu.kernel.queues import MAX_REFS, MAX_RETENTION_SCAN, PAGE_MAX, _instant
 from mizu.project import Project
 
 DECLARATIONS = tomllib.loads('''
@@ -432,6 +433,37 @@ class QueueStoreTests(unittest.TestCase):
         self.store.read("notes", "role:alpha")
         with self.assertRaises(Denied):
             self.store.message(target["id"], "role:alpha")
+
+    def test_count_retention_crosses_a_referred_message(self):
+        """One live ref must not freeze the prefix, grow the queue or serve stale facts."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["role:*", "operator"], "retain_last": 1}
+        root = self.root / "counted"
+        store = QueueStore(root, parse_queues(raw))
+        pinned = store.append("events", {"n": 1}, "host")
+        referrer = store.append("notes", {}, "role:alpha", now=OLD, refs=[pinned["id"]])
+        total = MAX_RETENTION_SCAN + 5
+        for number in range(2, total + 1):
+            store.append("events", {"n": number}, "host")
+
+        queue = root / "queues" / "events"
+        retained = json.loads((queue / "retain.json").read_text())
+        self.assertGreater(retained["seq"], MAX_RETENTION_SCAN)
+        live = sorted(json.loads(p.read_text())["body"]["n"]
+                      for p in (queue / "messages").glob("*.json"))
+        self.assertEqual(live, [1, total])  # the pinned one and the newest one
+        self.assertEqual(store.message(pinned["id"], "role:alpha")["seq"], 1)
+        page = store.pending("events", "role:worker", newest=PAGE_MAX)
+        self.assertEqual([m["body"]["n"] for m in page["messages"]], [total])
+        self.assertEqual((page["count"], page["more"], page["through"]), (1, False, total))
+
+        # The pinned file's end of life is the removal of its last referrer.
+        for reader in ("role:alpha", "operator"):
+            store.ack("notes", reader, referrer["seq"])
+        store.read("notes", "role:alpha", now=NOW)
+        self.assertFalse((queue / "messages" / f"{pinned['seq']:020d}.json").exists())
+        with self.assertRaises(Denied):
+            store.message(pinned["id"], "role:alpha")
 
     def test_ack_crosses_retention_removed_prefix(self):
         old = self.store.append("notes", {}, "role:alpha", now=OLD)
