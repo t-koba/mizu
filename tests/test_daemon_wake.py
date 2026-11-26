@@ -636,9 +636,19 @@ class NativeWakeTests(unittest.TestCase):
                                  time.monotonic() + 0.01)
             stop.set()
             del stop
-        gc.collect()
+        # The monitor thread holds the stop event until it observes the stop,
+        # so the bridge finalizer can run after the last rotation returns. Wait
+        # for retirement with a deadline rather than sampling in the middle of
+        # an asynchronous close and blaming the product for the observation.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            gc.collect()
+            if len(os.listdir(fd_dir)) - before <= 1:
+                break
+            time.sleep(0.001)
         after = len(os.listdir(fd_dir))
-        self.assertLessEqual(after - before, 1)
+        self.assertLessEqual(after - before, 1,
+                             "stop bridge descriptors were not retired")
 
     def test_restored_include_parent_and_file_wake_without_deadline(self):
         # The parent is absent when the daemon settles. Creating it must wake
