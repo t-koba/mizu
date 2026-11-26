@@ -6,6 +6,21 @@ is complete: the proposal, decision, question, answer, notice and receipt
 machinery was deleted from `src/mizu`, and those flows are declared queues and
 policy text. A stage is complete only when its dedicated code is deleted.
 
+Stage 5 is **not complete**. Three slices have been delivered: the
+`[vcs] default_branch` policy removed the hardcoded `"main"` literals from
+kernel behaviour, the `ci_head_state` prompt facts moved to an observation
+driver, and the opt-in `ci_summary` aggregates moved to their own driver. Those
+deliveries are verified on their own scope, but they do not delete the
+dedicated VCS/CI code. `ci_*` modules, the CI wait kinds in
+`work_item_waits.py`, the publication-state projection through reviews in
+`unit_prompts.py`, `GO <branch>` title parsing and the pull-request model in
+`vcs` remain authoritative until the stage-5 deletion slice lands. Green CI on
+a narrow slice establishes that slice only, never the whole stage. The
+head-state CPU receipt is a generic wake-path control; stage 5 additionally
+needs a matched changed-case measurement with a configured CI branch, a role
+that receives the fixed key, witnessed rows on both paths and driver-child CPU
+accounting (see the stage-5 row below and the retained evidence).
+
 ## Why
 
 An inventory of `src/mizu` at 1322c64f (127 modules, 57,460 lines) found that
