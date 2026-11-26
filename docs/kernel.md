@@ -158,6 +158,18 @@ deployment names in their configuration:
 
 None of these queue names, and no message vocabulary, is known to the kernel.
 
+## Ready work
+
+The host's ready-work page is a role-scoped reading of recorded work, not a
+queue of intentions. An open item is ready while the named role has a free
+doing slot; a held doing item stays actionable, and an item carrying a
+registered wait re-enters the page only when recorded evidence makes that wait
+due, impossible, absent or terminal. Pending, unknown and receipt-bound waits
+stay held. Capacity and pending-wait counts are display facts; the change
+fingerprint tracks ready-set membership alone. Admission and the finish probe
+read the same page, so a role with nothing actionable has no ready work to
+report.
+
 ## Finishing a unit
 
 A unit ends with `finish`. The outcomes a role may use and their effects are

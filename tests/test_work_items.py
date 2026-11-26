@@ -501,7 +501,7 @@ class WorkItemTests(Fixture):
     def test_invalid_status_actor_and_irrelevant_evidence_do_not_write(self):
         for args in ({"status": "open"}, {"status": "unknown"}, {"status": None},
                      {"actor": "../worker"}, {"actor": None}, {"reason": 1},
-                     {"wait": {"kind": "code_change"}}, {"snapshot_id": self.project.snapshots.get()["id"]}):
+                     {"wait": {"kind": "unknown"}}, {"snapshot_id": self.project.snapshots.get()["id"]}):
             with self.subTest(args=args), self.assertRaises(Denied):
                 self.change(**args)
         self.assertEqual(self.revision_names(), [])

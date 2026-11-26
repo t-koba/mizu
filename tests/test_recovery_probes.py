@@ -1311,6 +1311,7 @@ class RecoveryProbeTests(SelectionFixture):
     def test_daemon_wait_uses_earlier_probe_deadline(self):
         from threading import Event
         from support import deadline_wait
+        mono = 1000.0
         event = Event()
         waits = []
         def wait(seconds):
@@ -1320,6 +1321,7 @@ class RecoveryProbeTests(SelectionFixture):
         with patch('mizu.daemon_runtime.daemon_wake.wait', side_effect=deadline_wait), patch('mizu.runtime.threading.Event', return_value=event), patch('mizu.daemon_runtime.load', return_value=self.config), \
              patch('mizu.daemon_runtime.vcs_poll_enabled', return_value=False), patch('mizu.probes.service_due', return_value=None), \
              patch('mizu.daemon_runtime.should_run', return_value=False), patch('mizu.runtime.time.time', return_value=1000), \
+             patch('mizu.daemon_runtime.time.monotonic', return_value=mono), \
              patch('mizu.probes.next_deadline', return_value=1000.5), patch('builtins.print'):
             daemon(self.config, 'sample', 'worker')
         self.assertEqual(len(waits), 1)

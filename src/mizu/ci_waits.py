@@ -201,7 +201,8 @@ def _absence_matches(item, record, settings, source, activity, generation):
     stamp = record.get("observed_at")
     return (generation is not None and isinstance(record.get("generation"), str)
             and record["generation"] == generation
-            and source is not None and activity is not None and item is not None and item["status"] == "blocked"
+            and source is not None and activity is not None and item is not None
+            and item["status"] in ("blocked", "doing")
             and item["holder"] is not None and record.get("source") == source
             and record.get("activity") == activity
             and type(stamp) in (int, float)
@@ -352,7 +353,7 @@ def _check_names(checks):
 
 
 def _items(store):
-    for item in store.current_items(statuses=("blocked",)):
+    for item in store.current_items(statuses=("blocked", "doing")):
         if (item.get("wait") or {}).get("kind") in ("ci", "publication_ci"):
             yield item
 
@@ -541,14 +542,14 @@ def readiness_init(store, role, *, limit=10):
 def readiness_feed(state, store, item):
     """Feed one fully reconstructed work item to the CI readiness accumulator.
 
-    Items that are not blocked CI waiters for this holder are ignored.
+    Items that are not held CI waiters (blocked or doing) for this role are ignored.
     Per-item route failures use the exact read-only page contract
     ``(Denied, LimitExceeded, OSError, ValueError)`` and skip only that
     waiter so another holder's evidence is still found. Iterator, seed and
     full-chain reconstruction failures are never caught here; they abort
     the shared traversal. No recovery, writes or syncs are performed.
     """
-    if item["status"] != "blocked":
+    if item["status"] not in ("blocked", "doing"):
         return
     if (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci"):
         return
@@ -802,7 +803,7 @@ def _selected(context, tokens):
         store = context.project.work_items
         item_id = envelope["subject"]["work_item"]
         item = store.current(item_id)
-        if (item["status"] != "blocked" or item["holder"] != context.role.name
+        if (item["status"] not in ("blocked", "doing") or item["holder"] != context.role.name
                 or item["rev"] != envelope["subject"]["rev"]
                 or (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci")):
             raise Denied("CI waiter revision or holder changed")
@@ -971,7 +972,7 @@ class _Enrollment:
             except Denied:
                 path.unlink()
                 continue
-            if (item is None or item["status"] != "blocked"
+            if (item is None or item["status"] not in ("blocked", "doing")
                     or (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci")
                     or _evidence(store, item) is not None):
                 path.unlink()

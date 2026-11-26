@@ -124,7 +124,7 @@ def normalize(store, value, *, stored=False):
 
 
 def _items(store):
-    for item in store.current_items(statuses=("blocked",)):
+    for item in store.current_items(statuses=("blocked", "doing")):
         if (item.get("wait") or {}).get("kind") == KIND:
             yield item
 
@@ -282,7 +282,8 @@ def readiness_init(store, role, *, limit=10):
 
 def readiness_feed(state, store, item):
     """Feed one fully reconstructed work item to the proposal accumulator."""
-    if (item["status"] != "blocked" or (item.get("wait") or {}).get("kind") != KIND
+    if (item["status"] not in ("blocked", "doing")
+            or (item.get("wait") or {}).get("kind") != KIND
             or item["holder"] != state["role"]):
         return
     try:
@@ -315,7 +316,7 @@ def _selected(context, tokens):
     for entry in entries:
         envelope, _ = shared.get(entry.record_id, expected_digest=entry.record_digest)
         item = store.current(envelope["subject"]["work_item"])
-        if (item["status"] != "blocked" or item["holder"] != context.role.name
+        if (item["status"] not in ("blocked", "doing") or item["holder"] != context.role.name
                 or envelope != _envelope(item)):
             raise Denied("Proposal waiter revision or holder changed")
         shared.received(context.role.name, entry.record_id, entry.record_digest)

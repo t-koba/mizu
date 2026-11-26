@@ -13,6 +13,7 @@ from mizu.fs import lock, write_json
 from mizu.ledger import NAME as LEDGER_NAME
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS
+from mizu.work_item_waits import ci_wait_identity
 from support import index_items
 from test_ci_waits import CiWaitFixture, SHA
 
@@ -196,11 +197,17 @@ class UnreachableCiWaitTests(CiWaitFixture):
         self.assertEqual(scanned, [], "transition scanned the active index")
         self.assertEqual(plains, [(seed["id"], {"locked": False, "durable": True})])
 
-    def test_page_ready_hint_prescan_reads_only_the_blocked_ci_row(self):
+    def test_page_ready_hint_prescan_reads_only_held_ci_rows(self):
         seed = self.store.create(actor="worker", idempotency_key="scale-hints",
                                  title="Scale hints")["record"]["work_item"]
+        doing = self.store.create(actor="worker", idempotency_key="held-ci-hints",
+                                  title="Held CI hints")["record"]["work_item"]
+        holding = self.store.transition(doing["id"], expected_rev=1,
+                                        status="doing", actor="worker")
+        held = self.store.transition(holding["id"], expected_rev=2, status="doing",
+                                     actor="worker", wait=self.wait)
         extras = [{**seed, "id": f"wi_{i:032x}"} for i in range(1, 202)]
-        index_items(self.project.root, [self.item, seed, *extras], replace=True)
+        index_items(self.project.root, [self.item, held, seed, *extras], replace=True)
         self.assertEqual(len(self.store.current_items(statuses=("open",))), 202)
 
         in_hint = False
@@ -234,17 +241,21 @@ class UnreachableCiWaitTests(CiWaitFixture):
               patch.object(self.store, "_ci_unreachable_hints", counted_hints),
               self.answered("no", REASON) as query):
             page = self.store.page_ready(role_name="worker")
+            other_role = self.store.page_ready(role_name="reviewer")
 
         self.assertEqual(hint_scans, [], "the hint pre-scan streamed the active index")
-        self.assertEqual(hint_rows, [self.item["id"]], "hints decoded unrelated rows")
-        query.assert_called_once_with(self.store.ci_wait_settings(), SHA)
-        blocked = [row for row in page["items"] if row["id"] == self.item["id"]]
-        self.assertEqual(len(blocked), 1)
-        self.assertEqual((blocked[0]["status"], blocked[0]["wait_liveness"]["state"],
-                          blocked[0]["wait_liveness"]["reason"]),
-                         ("blocked", "impossible", REASON))
-        open_ids = {row["id"] for row in page["items"] if row["status"] == "open"}
-        self.assertTrue(open_ids, "unrelated open work disappeared from the ready page")
+        self.assertEqual(sorted(hint_rows), sorted((self.item["id"], held["id"])),
+                         "hints decoded unrelated rows")
+        self.assertEqual(query.call_count, 2, "one adapter answer per held CI waiter")
+        query.assert_any_call(self.store.ci_wait_settings(), SHA)
+        by_id = {row["id"]: row for row in page["items"]}
+        for source, expected_status in ((self.item, "blocked"), (held, "doing")):
+            row = by_id[source["id"]]
+            self.assertEqual((row["status"], row["wait_liveness"]["state"],
+                              row["wait_liveness"]["reason"]),
+                             (expected_status, "impossible", REASON))
+        open_ids = {row["id"] for row in other_role["items"] if row["status"] == "open"}
+        self.assertTrue(open_ids, "unrelated open work disappeared from the index")
 
     def test_hint_prescan_seeks_the_blocked_ci_wait_kind(self):
         steps = {}
@@ -280,7 +291,7 @@ class UnreachableCiWaitTests(CiWaitFixture):
                     plan = db.execute(
                         "EXPLAIN QUERY PLAN SELECT item, doing_since, blocked_since FROM items"
                         " INDEXED BY items_ci_wait"
-                        " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')"
+                        " WHERE status IN ('blocked','doing') AND wait_kind IN ('ci', 'publication_ci')"
                         " AND (holder IS NULL OR holder=?) ORDER BY id", ("worker",)).fetchall()
                 self.assertIn('INDEXED BY items_ci_wait',
                               work_items._CI_HINT_QUERY)
@@ -289,6 +300,30 @@ class UnreachableCiWaitTests(CiWaitFixture):
         # One CI waiter is still one waiter; unrelated blocked work must not
         # turn its pre-scan into a decode-and-sort of the whole blocked index.
         self.assertLessEqual(steps[4096], steps[256] * 2 + 500, steps)
+
+    def test_held_doing_ci_wait_is_hinted_ready_and_not_counted_as_pending(self):
+        seed = self.store.create(actor="worker", idempotency_key="held-ci-hint",
+                                 title="Held CI hint")["record"]["work_item"]
+        holding = self.store.transition(seed["id"], expected_rev=1,
+                                        status="doing", actor="worker")
+        held = self.store.transition(holding["id"], expected_rev=2, status="doing",
+                                     actor="worker", wait=self.wait)
+        self.assertEqual((held["status"], held["holder"], held["wait"]["kind"]),
+                         ("doing", "worker", "ci"))
+
+        probes, adapter = self.probing_adapter()
+        with patch("mizu.vcs.ci_reachable", side_effect=adapter):
+            hints = self.store._ci_unreachable_hints(role_name="worker")
+            self.assertEqual(hints.get(ci_wait_identity(held)), REASON)
+            page = self.store.page_ready(role_name="worker")
+
+        by_id = {row["id"]: row for row in page["items"]}
+        row = by_id[held["id"]]
+        self.assertEqual((row["status"], row["wait_liveness"]["state"],
+                          row["wait_liveness"]["reason"]), ("doing", "impossible", REASON))
+        self.assertEqual(page["held_pending_waits"], 0)
+        self.assertTrue(probes)
+        self.assertEqual(probes, [{"acquired": True}] * len(probes))
 
     def test_pending_intent_denies_ci_reopen_without_verification(self):
         with contextlib.closing(sqlite3.connect(self.project.root / LEDGER_NAME)) as db, db:

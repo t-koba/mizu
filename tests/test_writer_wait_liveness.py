@@ -307,7 +307,6 @@ class HolderOnlyTests(Fixture):
         valid_wait = fresh['wait']
         cases = {
             'open': {**fresh, 'status': 'open'},
-            'doing': {**fresh, 'status': 'doing'},
             'no_holder': {**fresh, 'holder': None},
             'no_wait': {'status': 'blocked', 'holder': 'worker', 'wait': None},
             'missing_wait': {'status': 'blocked', 'holder': 'worker'},
@@ -317,6 +316,8 @@ class HolderOnlyTests(Fixture):
             with self.subTest(case=name):
                 self.assertIsNone(holder_only(store, candidate, snapshot,
                                                writer_roles={'worker'}))
+        self.assertEqual(holder_only(store, {**fresh, 'status': 'doing'}, snapshot,
+                                     writer_roles={'worker'}), 'sole_writer_code_change')
         for name, roles in (('none', None), ('empty', set()), ('missing_holder', {'reviewer'}),
                             ('list', ['worker'])):
             with self.subTest(roles=name):

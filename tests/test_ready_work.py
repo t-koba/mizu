@@ -249,7 +249,8 @@ class ReadyWorkTests(Fixture):
             self.assertEqual(json.loads(prompt)["ready_work"], {
                 "items": [], "total": 0, "overflow_count": 0, "truncated": False,
                 "coverage_complete": True,
-                "unknown_blocked": 0})
+                "unknown_blocked": 0,
+                "capacity_in_use": 0, "capacity_limit": 1, "held_pending_waits": 0})
 
     def test_prompt_age_is_safe_for_future_missing_invalid_and_extreme_times(self):
         cases = [("2026-01-01T00:00:00+00:00", 0, 0),

@@ -90,7 +90,9 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual(ctx.ready_work_signature, page["signature"])
         self.assertEqual(ready["total"], page["total"])
         self.assertEqual(list(ready), ["items", "total", "overflow_count", "truncated",
-                                      "coverage_complete", "unknown_blocked"])
+                                      "coverage_complete", "unknown_blocked",
+                                      "capacity_in_use", "capacity_limit",
+                                      "held_pending_waits"])
 
     def test_moved_builders_still_set_the_ready_work_signature(self):
         import mizu.unit_prompts as unit_prompts

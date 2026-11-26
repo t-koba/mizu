@@ -51,7 +51,7 @@ def deadline_moment(wait):
 
 
 def next_deadline(store, role_name, *, now=None) -> float | None:
-    """Earliest future deadline epoch instant among blocked items visible to a role.
+    """Earliest future deadline epoch instant among waiting items visible to a role.
 
     Owns the deadline kind, timestamp format and role visibility so callers
     never reinterpret a stored wait. Unreadable state yields None; this is a
@@ -60,7 +60,7 @@ def next_deadline(store, role_name, *, now=None) -> float | None:
     if now is None:
         now = time.time()
     try:
-        rows = store.current_items(statuses=("blocked",))
+        rows = store.current_items(statuses=("blocked", "doing"))
     except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError,
             TypeError, AttributeError, KeyError, RecursionError):
         return None
@@ -229,7 +229,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreach
         if kind in ("ci", "publication_ci"):
             if item is None:
                 return result("receipt_bound", f"{kind}_receipt_route")
-            if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
+            if (item["status"] not in ("blocked", "doing") or not item["holder"]
+                    or item["wait"] != wait):
                 raise Denied("Terminal readiness requires the current held waiter")
             from . import ci_waits
             observed = ci_waits.terminal_evidence(store, item)
@@ -252,7 +253,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreach
         if kind == "proposal_merged":
             if item is None:
                 return result("receipt_bound", "proposal_receipt_route")
-            if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
+            if (item["status"] not in ("blocked", "doing") or not item["holder"]
+                    or item["wait"] != wait):
                 raise Denied("Terminal readiness requires the current held waiter")
             from . import proposal_waits
             observed = proposal_waits.evidence(store, item)
@@ -293,7 +295,8 @@ _HOLDER_ONLY_STATES = ("pending", "receipt_bound")
 def holder_only(store, item, snapshot, *, writer_roles, ci_unreachable=None) -> str | None:
     """Positive witness for a pending wait only its holder can release."""
     try:
-        if not isinstance(item, dict) or item.get("status") != "blocked" or not item.get("holder"):
+        if (not isinstance(item, dict) or item.get("status") not in ("blocked", "doing")
+                or not item.get("holder")):
             return None
         wait = item.get("wait") or {}
         if wait.get("kind") not in ("ci", "publication_ci"):

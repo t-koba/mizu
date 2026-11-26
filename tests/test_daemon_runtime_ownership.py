@@ -545,7 +545,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
             rows = []
 
             def current_items(self, *, statuses=None):
-                assert statuses == ("blocked",)
+                assert statuses == ("blocked", "doing")
                 return self.rows
 
         class Stub:
@@ -612,7 +612,7 @@ class DaemonRuntimeOwnershipTests(Fixture):
         ]
         store = Store(rows)
         self.assertEqual(next_deadline(store, "worker", now=wall), wall + 30)
-        self.assertEqual(store.statuses, ("blocked",))
+        self.assertEqual(store.statuses, ("blocked", "doing"))
         self.assertEqual(next_deadline(store, "auditor", now=wall), wall + 1)
         self.assertEqual(next_deadline(store, "observer", now=wall), wall + 90)
         self.assertEqual(next_deadline(store, None, now=wall), wall + 1)

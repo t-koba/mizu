@@ -22,9 +22,11 @@ change to them in the state. Make useful local commits when appropriate, but nev
 a release. Preserve uncommitted recovery changes.
 
 Keep active `doing` work within the configured per-role slot limit (default one).
-A blocked wait does not occupy a slot: release or block work you are not actively
-advancing before claiming more. Review `doing_since`, `doing_age_seconds` and
-`doing_stale` separately from latest-update age. A stale
+A doing wait still occupies its slot; a blocked wait does not. You may register
+a wait on a doing item with a doing-to-doing transition without leaving doing,
+and that transition keeps the delivery binding. Release or block other work you
+are not actively advancing before claiming more. Review `doing_since`,
+`doing_age_seconds` and `doing_stale` separately from latest-update age. A stale
 hold calls for reassessment, not automatic expiry or reassignment; same-status
 scope/delivery updates do not restart its age. Preserve legacy over-limit work
 and settle or release it without claiming additional slots.

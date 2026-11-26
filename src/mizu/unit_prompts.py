@@ -173,14 +173,19 @@ def _ready_work_age(updated_at, current_time):
 def _ready_work_projection(page, *, context=None):
     """Display one captured ready page and retain its signature for the unit.
 
-    The projection carries the bounded ``unknown_blocked`` count and
-    ``coverage_complete`` from the ready scan, so an incomplete scan never
-    reads as an exhaustive zero.
+    The projection carries the bounded ``unknown_blocked`` count,
+    ``coverage_complete`` and the role's capacity facts from the ready scan,
+    so an incomplete scan never reads as an exhaustive zero and a held item
+    with a pending wait is explained without changing readiness authority.
     """
     if type(page.get("unknown_blocked")) is not int or page["unknown_blocked"] < 0:
         raise Denied("Invalid ready-work unknown count")
     if type(page.get("coverage_complete")) is not bool:
         raise Denied("Invalid ready-work coverage")
+    for key, minimum in (("capacity_in_use", 0), ("capacity_limit", 1),
+                         ("held_pending_waits", 0)):
+        if type(page.get(key)) is not int or page[key] < minimum:
+            raise Denied(f"Invalid ready-work {key}")
     if context is not None:
         context.ready_work_signature = page["signature"]
     current_time = time.time()
@@ -192,10 +197,12 @@ def _ready_work_projection(page, *, context=None):
                           if "wait_resolution" in row else {}),
                        **({"wait": row["wait"], "wait_liveness": row["wait_liveness"],
                            "wait_satisfied": row["wait_liveness"]["state"] == "due"}
-                          if row["status"] == "blocked" else {})}
+                          if "wait" in row and "wait_liveness" in row else {})}
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
-                                         "coverage_complete", "unknown_blocked")}}
+                                         "coverage_complete", "unknown_blocked",
+                                         "capacity_in_use", "capacity_limit",
+                                         "held_pending_waits")}}
 
 
 def _work_order_projection(context) -> dict | None:

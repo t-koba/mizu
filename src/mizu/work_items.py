@@ -82,10 +82,10 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 # One index supplies status, wait kind and holder; the hint pre-scan must
-# seek blocked CI waits instead of visiting unrelated blocked work.
+# seek blocked and held doing CI waits instead of visiting unrelated work.
 _CI_HINT_QUERY = (
     "SELECT item, doing_since, blocked_since FROM items INDEXED BY items_ci_wait"
-    " WHERE status='blocked' AND wait_kind IN ('ci', 'publication_ci')")
+    " WHERE status IN ('blocked','doing') AND wait_kind IN ('ci', 'publication_ci')")
 
 _HISTORY_UNSET = object()
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
@@ -733,6 +733,8 @@ class WorkItems:
         if record_scope is not None:
             validate_scope(record_scope)
         scope_changed = record_scope != previous_scope
+        wait_changed = (status == previous["status"] == "doing"
+                        and (record.get("wait") or None) != (previous.get("wait") or None))
         refs_changed = (record.get("smoke_refs", []) != previous.get("smoke_refs", [])
                         or (record.get("wait") or {}).get("smoke_refs", []) !=
                            (previous.get("wait") or {}).get("smoke_refs", []))
@@ -744,7 +746,8 @@ class WorkItems:
                    and record["holder"] is None and "wait_resolution" not in record)
         if (status not in STATUSES or (previous["status"] == "done" and not reopening)
                 or (previous["status"] == "dropped" and status != "done")
-                or (status == previous["status"] and not scope_changed and not refs_changed and not binding and not release)):
+                or (status == previous["status"] and not scope_changed and not refs_changed
+                    and not binding and not release and not wait_changed)):
             raise Denied("Invalid work-item status transition")
         # The scope in force is inherited by every revision; it is never
         # cleared, and a closure may not change it.
@@ -782,11 +785,10 @@ class WorkItems:
             raise Denied("A scope change requires a reason")
         if status == "dropped" and reason is None:
             raise Denied("Dropping a work item requires a reason")
-        if status == "blocked":
-            if record["wait"] is not None:
-                self._stored_wait(record["wait"])
+        if status in ("blocked", "doing") and record["wait"] is not None:
+            self._stored_wait(record["wait"])
         elif record["wait"] is not None:
-            raise Denied("Only blocked work items carry waits")
+            raise Denied("Only blocked or doing work items carry waits")
         if status == "done" and policy == HOLDER_ATTESTATION:
             validate_attestation(record.get("completion_evidence"))
             if any(record.get(key) is not None for key in
@@ -1226,8 +1228,14 @@ class WorkItems:
         these private fields and keep their normal ordering.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
-        transitions are performed. With role_name, only unheld open items
-        and that role's held open/doing/blocked items are eligible. Held-open
+        transitions are performed. With role_name, an open item is ready only
+        while that role has a free doing slot; held doing items and blocked
+        items keep their own paths. A held doing item with a registered wait
+        is ready only when that wait is due, impossible, absent or terminal;
+        pending, unknown and receipt-bound waits stay held. The capacity and
+        held-pending counts are display facts, not signature inputs; without a
+        role name the role-scoped counts are zero and the limit is the default.
+        Held-open
         ownership is also enforced at the transition boundary; other grant
         authorization is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
@@ -1289,12 +1297,13 @@ class WorkItems:
                     ("doing_since", "doing_age_seconds", "doing_stale")})
         if "wait_resolution" in item:
             row["wait_resolution"] = item["wait_resolution"]
-        if item["status"] == "blocked":
+        if item["status"] == "blocked" or item.get("wait") is not None:
             row["wait"] = item["wait"]
-            row.update({key: view[key] for key in
-                        ("blocked_since", "blocked_age_seconds")})
             if wait_liveness is not None:
                 row["wait_liveness"] = wait_liveness
+        if item["status"] == "blocked":
+            row.update({key: view[key] for key in
+                        ("blocked_since", "blocked_age_seconds")})
         if "description" in item:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
@@ -1372,18 +1381,23 @@ class WorkItems:
         return sort_key, row
 
     def _active_rows(self, *, locked: bool, durable: bool = False):
-        """Stream every active row in ID order."""
+        """Stream every active row, doing rows first for capacity-aware reads.
+
+        The page orders its own rows; scan order is only evidence of which
+        holding slots are already in use before an open row is considered.
+        """
         with self._ledger.read("items", locked=locked, durable=durable) as db:
             yield from db.execute(
                 "SELECT item, doing_since, blocked_since FROM items"
-                " WHERE status IN ('open', 'doing', 'blocked') ORDER BY id")
+                " WHERE status IN ('open', 'doing', 'blocked')"
+                " ORDER BY (status = 'doing') DESC, id")
 
     def _ci_unreachable_hints(self, *, role_name=None) -> dict:
         """Ask the adapter about current CI waiters without records.lock.
 
-        The index query selects only the blocked CI waiters visible to the
-        role, so no unrelated row is decoded. Each answer is keyed by the exact
-        wait identity, so a changed record inside the lock cannot inherit a
+        The index query selects only blocked and held doing CI waiters visible
+        to the role, so no unrelated row is decoded. Each answer is keyed by the
+        exact wait identity, so a changed record inside the lock cannot inherit a
         stale answer. An unreadable or unavailable index gives no hints, and
         locked liveness then stays pending without querying the adapter.
         """
@@ -1400,9 +1414,10 @@ class WorkItems:
                 for entry in _rows(db, sql, params):
                     item, _ = self._decode(*entry)
                     # Defensive validation of decoded content; the SQL filter is
-                    # what bounds the pre-scan to blocked CI waiters.
+                    # what bounds the pre-scan to held CI waiters.
                     wait = item.get("wait")
-                    if (item.get("status") != "blocked" or not isinstance(wait, dict)
+                    if (item.get("status") not in ("blocked", "doing")
+                            or not isinstance(wait, dict)
                             or wait.get("kind") not in ("ci", "publication_ci")):
                         continue
                     if role_name is not None and item.get("holder") not in (None, role_name):
@@ -1418,7 +1433,7 @@ class WorkItems:
         """Gather one transition's CI hint from the target alone, outside any lock.
 
         ``None`` means the durable index could not be verified; an empty
-        mapping means the target is not a blocked CI waiter. Otherwise the
+        mapping means the target is not a held CI waiter. Otherwise the
         mapping holds one exact wait identity and its answer, where ``None``
         is a legitimate still-pending result from an adapter query.
         """
@@ -1429,14 +1444,15 @@ class WorkItems:
         except bounded:
             return None
         wait = item.get("wait")
-        if (item.get("status") != "blocked" or not isinstance(wait, dict)
+        if (item.get("status") not in ("blocked", "doing")
+                or not isinstance(wait, dict)
                 or wait.get("kind") not in ("ci", "publication_ci")):
             return {}
         try:
             reason = ci_waits.unreachable(self, item)
         except (*bounded, KeyError):
             # An unanswered adapter keeps the wait pending; only an
-            # unverifiable index may justify refusing a locked CI waiter.
+            # unverifiable index may justify refusing a held CI waiter.
             reason = None
         return {ci_wait_identity(item): reason}
 
@@ -1475,6 +1491,10 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         active = self._active_rows(locked=not readonly)
+        capacity_limit = (self.doing_limits.get(role_name, self.doing_limit)
+                          if role_name is not None else self.doing_limit)
+        doing_in_use = 0
+        held_pending_waits = 0
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -1502,7 +1522,11 @@ class WorkItems:
                     item, since = transformed, None
                 if item["status"] not in ("open", "doing", "blocked"):
                     continue
+            if (ready_only and role_name is not None and item["status"] == "doing"
+                    and item.get("holder") == role_name):
+                doing_in_use += 1
             state = None
+            wait_state = None
             if (wait_resolution_role is not None and item["status"] == "open"
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
@@ -1547,7 +1571,22 @@ class WorkItems:
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1
+            elif (ready_only and role_name is not None and item["status"] == "doing"
+                  and item.get("wait") is not None):
+                wait = item.get("wait")
+                if (isinstance(wait, dict) and wait.get("kind") == "code_change"
+                        and published_snapshot is None):
+                    published_snapshot = self.snapshots.get()
+                wait_state = liveness(self, wait, published_snapshot, item=item,
+                                      writer_roles=writer_roles,
+                                      ci_unreachable=ci_unreachable)
+                if wait_state["state"] in ("pending", "unknown", "receipt_bound"):
+                    held_pending_waits += 1
+                    continue
             elif blocked_only or (ready_only and item.get("wait") is not None):
+                continue
+            if (ready_only and role_name is not None and item["status"] == "open"
+                    and doing_in_use >= capacity_limit):
                 continue
             if ready_only:
                 # Order-independent fingerprint of IDs and terminal bindings,
@@ -1576,7 +1615,7 @@ class WorkItems:
                 ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view, wait_liveness=(
-                state if ready_only and item["status"] == "blocked" else None))
+                state if ready_only and item["status"] == "blocked" else wait_state))
             if blocked_only:
                 sort_key = (state["state"] in ("pending", "receipt_bound"), *sort_key)
                 row = {key: item[key] for key in ("id", "rev", "holder")}
@@ -1633,8 +1672,15 @@ class WorkItems:
                 "token": next_boundary}
             result["_wait_resolution_boundary_current"] = boundary_current
         if ready_only:
+            if (type(doing_in_use) is not int or type(capacity_limit) is not int
+                    or type(held_pending_waits) is not int or doing_in_use < 0
+                    or capacity_limit < 1 or held_pending_waits < 0):
+                raise Denied("Invalid ready-work capacity facts")
             complete = unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked
+            result["capacity_in_use"] = doing_in_use
+            result["capacity_limit"] = capacity_limit
+            result["held_pending_waits"] = held_pending_waits
             result["coverage_complete"] = complete
             result["signature"] = digest(canonical(
                 ["ready-set-v1", total, f"{ready_sum:064x}"]))
@@ -1960,7 +2006,7 @@ class WorkItems:
         # Smoke retention serializes candidate admission and then scans this
         # project's record lock, so no machine-wide lock belongs on this write.
         binding_request = (status == "doing" and snapshot_id is not None)
-        publication_wait = (status == "blocked" and isinstance(wait, dict)
+        publication_wait = (status in ("blocked", "doing") and isinstance(wait, dict)
                             and wait.get("kind") == "publication_ci")
         # Peek at the target alone before locking: a held CI waiter needs an
         # adapter answer, and that answer must be gathered without records.lock.
@@ -2028,8 +2074,8 @@ class WorkItems:
                     raise Denied("Reopening blocked work requires a reason")
             registered = None
             if wait is not None:
-                if status != "blocked":
-                    raise Denied("Only blocked work items carry waits")
+                if status not in ("blocked", "doing"):
+                    raise Denied("Only blocked or doing work items carry waits")
                 if isinstance(wait, dict) and wait.get("kind") in ("ci", "publication_ci"):
                     if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
                         raise Denied("CI waits require automatic VCS polling and an adapter")

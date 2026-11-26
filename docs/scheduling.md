@@ -89,16 +89,21 @@ Work that became due while paused and delivered inputs still admit through their
 own readiness checks. Use `mizu wake` only for an additional operator-requested
 reevaluation when ordinary work is not due.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
-It means an unheld `open` item the role can claim, or an `open`/`doing` item held by
-that role, with no structured wait. Automatic wait reopening retains the holder;
-see [project wait-resolution policy](configuration.md#work-item-wait-resolution).
+It means an `open` item the role can claim only while it has a free doing
+slot, or an `open`/`doing` item held by that role. A held doing item stays
+actionable. An item with a registered wait re-enters ready only when recorded
+evidence makes the wait due, impossible, absent or terminal; pending, unknown
+and receipt-bound waits stay held. A doing-to-doing transition can register a
+wait while keeping its delivery binding, and a doing wait keeps its slot.
+Automatic wait reopening retains the holder; see
+[project wait-resolution policy](configuration.md#work-item-wait-resolution).
 The authoritative daemon `should_run` gate reconciles supported exact waits
 before collecting ready-work change for a named writer with both `work_order`
 and `work_items_transition`. This lets a proven superseded publication wait
 restore readiness even though the blocked item was excluded from `page_ready`.
 Reconciliation failure supplies no proof and does not suppress unrelated wakes.
 Public status, ready/open pages and read tools remain side-effect free.
-Satisfied or dead blocked waits below are ready
+Satisfied or dead blocked and held doing waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
 Another role's held work never admits it. A changed eligible set (including terminal
 evidence bindings below) admits the writer
@@ -618,9 +623,11 @@ observation recorded at writer run completion is true. That observation is
 one bounded existence probe (`page_ready(limit=1)`) taken before the run's
 snapshot is created and stored immutably in the progress record (schema 2 or 3)
 (`ready_work` True/False, or null when the probe was unreadable at finish);
-Open/doing work, and blocked items whose releaser is due, absent, or confidently
-impossible, count as ready. `done` and `bounded` never count, progress
-(`has_progress` true) clears it, and a recorded false leaves it inactive.
+Open work counts as ready only with a free doing slot; doing items with a
+pending wait are held. Held doing and blocked items whose releaser is due,
+absent, or confidently impossible count as ready. `done` and `bounded` never
+count, progress (`has_progress` true) clears it, and a recorded false leaves it
+inactive.
 The value is recorded at finish: later work creation, drops, or due
 transitions never change the published run's diagnostic; only a newer writer
 run with its own observation moves it. Read-only runs create no snapshot and

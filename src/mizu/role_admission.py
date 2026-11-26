@@ -99,7 +99,7 @@ def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
     """Whether a CI or exact proposal wait has a deliverable event for the role.
 
-    Holds ``records.lock`` once and feeds every blocked item from the
+    Holds ``records.lock`` once and feeds every blocked or doing waiter from the
     current-state index to the route-owned read-only accumulator; CI evidence
     and time-dependent readiness are reevaluated each poll. Index failures
     abort. No recovery, writes, syncs or delivery/ack observation.
@@ -107,7 +107,7 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
     proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "records.lock"):
-        for item in store.current_items(statuses=("blocked",)):
+        for item in store.current_items(statuses=("blocked", "doing")):
             ci_waits.readiness_feed(ci_state, store, item)
             proposal_waits.readiness_feed(proposal_state, store, item)
         return bool(ci_waits.readiness_events(ci_state)
