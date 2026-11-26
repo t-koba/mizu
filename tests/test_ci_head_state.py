@@ -620,6 +620,28 @@ class CiHeadStateTests(Fixture):
         queue_facts.mark_woken(self.project, "worker", context.queues)
         self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
 
+    def test_distinct_reader_gets_no_fact_on_fixed_key_or_queue_opening(self):
+        """A producer's fact reaches the worker, not a different role on either path."""
+        self.receipt(SHA)
+        config, role, _, run, snap = self.context(vcs_request=True)
+        from mizu.runtime import Context
+        worker_ctx = Context(config, self.project, role, run, snap, self.project.workspace)
+        payload = json.loads(prompt_for(worker_ctx))  # real host seam appends as host
+        self.assertEqual(payload["ci_head_state"], [driver._row("main", SHA)])
+
+        # The intended reader sees the raw observation in the generic opening.
+        worker_rows = [r.get("queue") for r in queue_facts.opening(self.project, "worker")]
+        self.assertIn("ci_head_state_observations", worker_rows)
+
+        # A distinct role with the `queues` capability but no `vcs_request` gets
+        # neither the fixed key nor the observation through its queue opening.
+        reviewer_ctx = super().context("reviewer")
+        reviewer_payload = json.loads(prompt_for(reviewer_ctx))
+        self.assertNotIn("vcs_request", reviewer_ctx.role.capabilities)
+        self.assertEqual(reviewer_payload["ci_head_state"], [])
+        reviewer_rows = [r.get("queue") for r in queue_facts.opening(self.project, "reviewer")]
+        self.assertNotIn("ci_head_state_observations", reviewer_rows)
+
     def test_prompt_time_observations_stay_bounded_past_one_page(self):
         """A readable observation cannot keep the worker runnable, even at scale."""
         for name in ("ci_head_state_observations", "ci_summary_observations"):

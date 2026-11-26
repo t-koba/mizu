@@ -41,6 +41,12 @@ from raw host evidence; its `detail` is external-untrusted evidence, never a
 verdict or a CI request, and the prompt key is empty when the driver is absent
 or refuses.
 
+Unlike the general observation queues, this queue's `read` grant names only
+`role:worker` (the role that acts on CI facts) and the operator, so other
+roles do not receive the raw body through a generic queue opening. The fixed
+`ci_head_state` prompt rows remain separately gated on the `vcs_request`
+capability; a reader that fails that gate gets neither projection.
+
 ## `ci_summary_observations`
 
 A message here says what a driver observed about CI aggregates: one bounded
@@ -50,6 +56,10 @@ queues. The declared `ci_summary` driver projects the opt-in `ci_summary`
 prompt aggregates from a coherent poll-cache read; its `detail` is
 external-untrusted evidence, never a verdict, and the aggregates are empty when
 the driver is absent or refuses. The wake path reads its own kernel-side facts.
+
+As with the head-state queue, the `read` grant names only `role:worker` and
+the operator, so other roles do not receive the raw body through a generic
+queue opening. The `ci_summary` prompt rows are opt-in via the `ci` section.
 
 ## Authority
 

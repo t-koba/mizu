@@ -21,6 +21,7 @@ import support  # noqa: F401  (puts src on the path)
 from mizu.cli import configure
 from mizu.config import load
 from mizu.fs import write_json
+from mizu import queue_facts
 from mizu.head_state_observation import ci_head_state_facts
 from mizu.summary_observation import ci_summary_facts
 from mizu.errors import Denied
@@ -78,13 +79,17 @@ class ObservationDeclaration(unittest.TestCase):
             # A driver appends as host, so host must hold the write grant.
             self.assertTrue(allows(queue.write, "host"), name)
             # Readers are declared; only reply queues may wake the worker.
-            # Prompt-time observations are readable facts, not wake admissions.
-            self.assertIn("role:*", queue.read)
+            # Prompt-time observations are readable facts, not wake admissions,
+            # with a least-privilege read grant naming worker and operator only.
             if name in ("vcs_observations", "ci_observations"):
+                self.assertIn("role:*", queue.read)
                 self.assertEqual(queue.wake, ("role:worker",), name)
                 self.assertIsNone(queue.retain_last, name)
             else:
                 self.assertIn(name, (HEAD_QUEUE, SUMMARY_QUEUE), name)
+                self.assertIn("role:worker", queue.read)
+                self.assertIn("operator", queue.read)
+                self.assertNotIn("role:*", queue.read)
                 self.assertEqual(queue.wake, (), name)
                 self.assertEqual(queue.retain_last, 1, name)
             fields = queue.fields
@@ -196,6 +201,46 @@ class ObservationDeclaration(unittest.TestCase):
                 # A reader role may read the observation back.
                 page = store.read(name, "role:worker")
                 self.assertEqual(len(page["messages"]), 1)
+
+    def test_prompt_time_read_grants_are_least_privilege(self):
+        """A host producer appends; only worker and operator read the raw body."""
+        queues = parse_queues(declarations())
+        for name in (HEAD_QUEUE, SUMMARY_QUEUE):
+            queue = queues[name]
+            self.assertTrue(allows(queue.write, "host"))
+            self.assertTrue(allows(queue.read, "role:worker"))
+            self.assertTrue(allows(queue.read, "operator"))
+            self.assertNotIn("role:*", queue.read)
+            for other in ("role:reviewer", "role:searcher", "role:reporter"):
+                self.assertFalse(allows(queue.read, other), (name, other))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = QueueStore(Path(tmp), queues)
+            for name in (HEAD_QUEUE, SUMMARY_QUEUE):
+                ack = store.append(name, dict(OBSERVATION), "host")
+                self.assertEqual(ack["seq"], 1)
+                for reader in ("role:worker", "operator"):
+                    page = store.read(name, reader)
+                    self.assertEqual(page["messages"][0]["body"], OBSERVATION)
+                for other in ("role:reviewer", "role:searcher", "role:reporter"):
+                    with self.assertRaises(Denied):
+                        store.read(name, other)
+
+            # The generic queue opening follows the same grant, not the fixed key.
+            cfg = SimpleNamespace(queues=queues,
+                                  limits=SimpleNamespace(queue_opening_messages=8))
+            project = SimpleNamespace(config=cfg, kernel_queues=store)
+            self.assertIn(HEAD_QUEUE, queue_facts.readable(cfg, "worker"))
+            self.assertIn(SUMMARY_QUEUE, queue_facts.readable(cfg, "worker"))
+            worker_rows = [r.get("queue") for r in queue_facts.opening(project, "worker")]
+            self.assertIn(HEAD_QUEUE, worker_rows)
+            self.assertIn(SUMMARY_QUEUE, worker_rows)
+            for other in ("reviewer", "searcher", "reporter"):
+                self.assertNotIn(HEAD_QUEUE, queue_facts.readable(cfg, other))
+                self.assertNotIn(SUMMARY_QUEUE, queue_facts.readable(cfg, other))
+                other_rows = [r.get("queue") for r in queue_facts.opening(project, other)]
+                self.assertNotIn(HEAD_QUEUE, other_rows)
+                self.assertNotIn(SUMMARY_QUEUE, other_rows)
 
     def test_policy_and_readme_describe_authority_neutrally(self):
         policy = POLICY.read_text(encoding="utf-8")

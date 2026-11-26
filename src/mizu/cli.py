@@ -37,7 +37,9 @@ _GENERATED_OBSERVATIONS_CONFIG = """
 # examples/development/observation_drivers.toml; see docs/kernel.md#drivers.
 # The prompt-time head-state and summary queues are readable facts, not wake
 # admissions: CI admission stays kernel-side, and each keeps only the newest
-# observation owned by its driver.
+# observation owned by its driver. Their read grant names only the worker
+# (which acts on CI facts) and the operator; other roles do not receive the
+# raw observation body.
 [queues.ci_observations]        # what a driver observed in continuous integration
 write = ["host"]
 read = ["role:*", "operator"]
@@ -52,7 +54,7 @@ detail = {type = "string", max = 16384}
 
 [queues.ci_head_state_observations] # what a driver observed about CI branch heads
 write = ["host"]
-read = ["role:*", "operator"]
+read = ["role:worker", "operator"]
 retain_last = 1
 [queues.ci_head_state_observations.schema]
 driver = {type = "string", max = 80, required = true}
@@ -64,7 +66,7 @@ detail = {type = "string", max = 1048576}
 
 [queues.ci_summary_observations] # what a driver observed about CI aggregates
 write = ["host"]
-read = ["role:*", "operator"]
+read = ["role:worker", "operator"]
 retain_last = 1
 [queues.ci_summary_observations.schema]
 driver = {type = "string", max = 80, required = true}

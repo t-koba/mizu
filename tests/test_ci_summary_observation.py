@@ -334,6 +334,34 @@ class CiSummaryObservationTests(Fixture):
         queue_facts.mark_woken(self.project, "worker", context.queues)
         self.assertFalse(store.due(QUEUE, "role:worker"))
 
+    def test_distinct_reader_gets_no_fact_on_fixed_key_or_queue_opening(self):
+        """A producer's aggregate reaches the opted-in worker, not another role."""
+        from mizu.runtime import Context
+        self.cache({"main": [{"sha": SHA, "check": "unit"}]})
+        role = dataclasses.replace(
+            self.config.roles["worker"],
+            context_include=("ci",),
+            context_exclude=tuple(n for n in prompt_sections.SECTIONS if n != "ci"))
+        config = dataclasses.replace(
+            self.config, roles={**self.config.roles, "worker": role})
+        run = self.project.root / "runs" / uuid.uuid4().hex
+        mkdir(run)
+        worker_ctx = Context(config, self.project, role, run,
+                             self.project.snapshots.get(), self.project.workspace)
+        worker_payload = json.loads(prompt_for(worker_ctx))  # real host seam appends as host
+        self.assertEqual(worker_payload["ci_summary"], [self.facts()[0]])
+        worker_rows = [r.get("queue") for r in queue_facts.opening(self.project, "worker")]
+        self.assertIn(QUEUE, worker_rows)
+
+        # A distinct role without the opt-in section and without the read grant
+        # gets neither the aggregate nor the raw observation through its opening.
+        reviewer_ctx = super().context("reviewer")
+        reviewer_payload = json.loads(prompt_for(reviewer_ctx))
+        self.assertNotIn("ci", prompt_sections.included(reviewer_ctx.role))
+        self.assertNotIn("ci_summary", reviewer_payload)
+        reviewer_rows = [r.get("queue") for r in queue_facts.opening(self.project, "reviewer")]
+        self.assertNotIn(QUEUE, reviewer_rows)
+
 
 if __name__ == "__main__":
     unittest.main()
