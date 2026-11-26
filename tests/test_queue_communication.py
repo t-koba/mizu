@@ -317,11 +317,12 @@ class QueueFactsTests(QueueFixture):
                     handed.extend(message.get("refers", []))
             ctx.handle("finish", {"outcome": "wait", "summary": "Read", "state": "Next."})
 
-        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        with patch.object(store, "record_delivery", wraps=store.record_delivery) as recorded:
+            Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
         self.assertEqual(handed, [])
-        fact = (self.project.root / "queues" / "secret" / "delivery"
-                / f"{hidden['seq']:020d}" / "role:worker.json")
-        self.assertFalse(fact.exists())
+        self.assertFalse(any(call.args[:3] ==
+                             ("secret", hidden["seq"], "role:worker")
+                             for call in recorded.call_args_list))
 
     def test_unit_opening_carries_queue_facts_without_instructions(self):
         self.write("Observed upstream release")
