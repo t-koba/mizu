@@ -272,8 +272,6 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, ci_unreach
             if moment is None:
                 return result("unknown", "unreadable")
             due = dt.datetime.now(dt.timezone.utc) >= moment
-            if holder is not None and writer_roles == {holder}:
-                self_resolvable = "sole_holder_deadline"
         else:
             if snapshot is None:
                 snapshot = store.snapshots.get()

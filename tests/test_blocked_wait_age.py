@@ -111,9 +111,9 @@ class BlockedWaitAgeTests(Fixture):
             row = self.store.page_open_readonly()["items"][0]
             self.assertEqual(row["blocked_age_seconds"], 0)
         with clock(10**9):
-            # The holder's own future deadline is deferred work, so it reads as
-            # ready here rather than as blocked backpressure.
-            self.assertEqual(self.store.page_ready()["total"], 1)
+            # A deadline is released by time, not by its holder: even the sole
+            # writer's future deadline stays blocked and out of the ready set.
+            self.assertEqual(self.store.page_ready()["total"], 0)
             state = self.store.blocked_liveness_readonly()["items"][0]
             self.assertEqual((state["state"], state["blocked_age_seconds"]), ("pending", 10**9))
             item = self.change(item, "doing")

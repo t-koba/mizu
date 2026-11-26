@@ -1239,9 +1239,11 @@ class WorkItems:
         ownership is also enforced at the transition boundary; other grant
         authorization is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
-        releasers; they never imply completion. Holder-only waits (whose holder is
-        the sole possible resolver) appear in the holder's page as ordinary
-        held-open work, without satisfying the registered wait.
+        releasers; they never imply completion. Holder-only waits that only
+        their holder can release appear in the holder's page as ordinary
+        held-open work, without satisfying the registered wait. A deadline is
+        released by time, not by its holder: while pending it stays blocked with
+        its wait and outside the ready set, entering it only when due.
         Code-change authority comes from writer_roles or the configured lookup.
         CI holder-only readiness requires the independent requester grant and
         fresh exact local absence evidence. Otherwise CI waits are ready

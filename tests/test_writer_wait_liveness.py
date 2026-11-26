@@ -2,6 +2,7 @@
 import dataclasses
 import datetime as dt
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, forget_ledger
@@ -14,6 +15,15 @@ from support import history_write_json as write_json
 from mizu.runtime import (Engine, _progress_self_admits, _ready_work_observation,
                            _writer_wait_liveness, _writer_wait_sources, prompt_for, should_run)
 from mizu.work_item_waits import holder_only
+
+
+def deadline_reached(at):
+    """Clock view whose instant sits just after a stored deadline."""
+    class Reached(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime.fromisoformat(at) + dt.timedelta(seconds=1)
+    return SimpleNamespace(datetime=Reached, timezone=dt.timezone)
 
 
 class WriterWaitTests(Fixture):
@@ -220,26 +230,26 @@ class HolderOnlyTests(Fixture):
         item = self.block('deferred deadline', {'kind': 'deadline', 'at': at})
         store = self.project.work_items
         fresh = store.get(item['id'])
-        self.assertEqual(holder_only(store, fresh, self.project.snapshots.get(),
-                                     writer_roles={'worker'}), 'sole_holder_deadline')
-        # A self-deferral is ordinary held-open work: present in the holder's
-        # ready page and prompt, but with no date label or private timing signal.
+        # A deadline is released by time, not by its holder; deferring one is
+        # not an abandonment and grants no holder-only ready projection.
+        self.assertIsNone(holder_only(store, fresh, self.project.snapshots.get(),
+                                      writer_roles={'worker'}))
         ready = store.page_ready(role_name='worker')
-        row = next(row for row in ready['items'] if row['id'] == item['id'])
-        self.assertEqual(row['status'], 'open')
-        for absent in ('wait', 'wait_liveness', 'blocked_since', 'blocked_age_seconds',
-                       'deferred_until'):
-            self.assertNotIn(absent, row)
+        self.assertEqual(ready['total'], 0)
+        self.assertEqual([row['id'] for row in ready['items']], [])
         self.assertNotIn('_earliest_deferred_until', ready)
         self.assertNotIn('_earliest_deferred_until', store.page_ready(role_name='reviewer'))
-        blocked_ids = [row['id'] for row in self.project.status()['blocked_work']['items']]
-        self.assertNotIn(item['id'], blocked_ids)
-        # The open work reaches the model's opening with no deadline attached.
+        # The wait stays recorded: the by-ID read keeps blocked + wait, and the
+        # blocked inventory reports the live pending deadline to its holder.
+        self.assertEqual(fresh['status'], 'blocked')
+        self.assertEqual(fresh['wait'], {'kind': 'deadline', 'at': at})
+        blocked = [row for row in self.project.status()['blocked_work']['items']
+                   if row['id'] == item['id']]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual((blocked[0]['state'], blocked[0]['wait_kind']), ('pending', 'deadline'))
         projected = json.loads(prompt_for(self.context()))['ready_work']['items']
-        shown = next(row for row in projected if row['id'] == item['id'])
-        self.assertEqual(shown['status'], 'open')
-        for absent in ('wait', 'wait_liveness', 'wait_satisfied', 'deferred_until'):
-            self.assertNotIn(absent, shown)
+        self.assertNotIn(item['id'], [row['id'] for row in projected])
+        self.assertNotIn('deferred_until', json.dumps(projected))
         self.assertEqual(store.get(item['id']), item)
 
     def test_deadline_with_a_second_writer_stays_blocked(self):
@@ -579,14 +589,14 @@ class WriterParkingTests(Fixture):
     def test_future_holder_deadline_keeps_signature_and_counts_no_progress(self):
         from mizu.project import idle_with_open_work
         from mizu.snapshot import no_progress_recovery_due
-        from mizu.work_item_waits import holder_only
         at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat(
             timespec="seconds")
         item = self.block_deadline("future deadline", at)
         store = self.project.work_items
         self.quiet_baseline()
         before = store.page_ready(role_name="worker")
-        self.assertEqual([row["id"] for row in before["items"]], [item["id"]])
+        self.assertEqual(before["total"], 0)
+        self.assertNotIn(item["id"], [row["id"] for row in before["items"]])
         self.assertNotIn("_earliest_deferred_until", before)
         runs = []
 
@@ -597,14 +607,16 @@ class WriterParkingTests(Fixture):
         engine = Engine(self.config, driver=ScriptDriver(finish_wait))
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         first = self.project.snapshots.get()
-        self.assertIs(first["progress"]["ready_work"], True)
+        self.assertIs(first["progress"]["ready_work"], False)
         self.assertEqual(first["progress"]["ready_work_signature"], before["signature"])
         self.assertEqual(first["progress"]["no_progress_count"], 1)
+        record = {"progress": first["progress"], "role": "worker"}
+        self.assertEqual(_ready_work_observation(
+            self.project, record, self.config.roles["worker"]), (False, False, False))
         self.assertFalse(should_run(self.project, first, role_name="worker"))
 
-        # The same deadline remains visible under its real membership
-        # signature; the second unchanged finish advances the streak and
-        # parks the role instead of waiting for the deadline instant.
+        # A still-pending deadline keeps the same ready identity: the second
+        # unchanged finish advances the streak and parks the role.
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         second = self.project.snapshots.get()
         self.assertEqual(second["progress"]["no_progress_count"], 2)
@@ -612,45 +624,85 @@ class WriterParkingTests(Fixture):
         self.assertTrue(no_progress_recovery_due(second["progress"], "wait", self.config, "worker"))
         self.assertFalse(should_run(self.project, second, role_name="worker"))
         idle = idle_with_open_work(second)
-        self.assertTrue(idle["active"])
-        self.assertEqual(idle["reason"], "no_progress_with_ready_work")
+        self.assertFalse(idle["active"])
+        self.assertEqual(idle["reason"], "no_ready_work")
         after = store.page_ready(role_name="worker")
         self.assertEqual(after["signature"], before["signature"])
-        self.assertEqual([row["id"] for row in after["items"]], [item["id"]])
-        self.assertNotIn("deferred_until", after["items"][0])
-        self.assertNotIn("_earliest_deferred_until", after)
         self.assertEqual(store.get(item["id"])["status"], "blocked")
-        self.assertEqual(holder_only(store, store.get(item["id"]), second,
-                                     writer_roles={"worker"}), "sole_holder_deadline")
+        self.assertEqual(store.get(item["id"])["wait"], {"kind": "deadline", "at": at})
+        self.assertIsNone(holder_only(store, store.get(item["id"]), second,
+                                      writer_roles={"worker"}))
         self.assertEqual(len(runs), 2)
 
-    def test_passed_holder_deadline_has_no_ready_set_change_or_wake(self):
+        # The deadline instant itself is the wake: the recorded wait is now
+        # due, so the item enters the eligible set and the signature changes.
+        with patch("mizu.work_item_waits.dt", deadline_reached(at)):
+            due = store.page_ready(role_name="worker")
+            self.assertIn(item["id"], [row["id"] for row in due["items"]])
+            self.assertEqual(due["items"][0]["wait_liveness"]["state"], "due")
+            self.assertNotEqual(due["signature"], before["signature"])
+            self.assertEqual(_ready_work_observation(
+                self.project, record, self.config.roles["worker"]), (True, True, False))
+        self.assertEqual(store.get(item["id"])["status"], "blocked")
+
+    def test_passed_holder_deadline_changes_ready_set_and_wakes(self):
         from mizu.runtime import _progress_record
         from mizu.snapshot import PROGRESS_SIGNALS
+        store = self.project.work_items
+        empty = store.page_ready(role_name="worker")
         past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(
             timespec="seconds")
         item = self.block_deadline("passed deadline", past)
-        store = self.project.work_items
         page = store.page_ready(role_name="worker")
         self.assertEqual([row["id"] for row in page["items"]], [item["id"]])
-        self.assertNotIn("deferred_until", page["items"][0])
+        row = page["items"][0]
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["wait"], {"kind": "deadline", "at": past})
+        self.assertEqual(row["wait_liveness"]["state"], "due")
         self.assertNotIn("_earliest_deferred_until", page)
-        # A progress record bound to this same ready set must not report a
-        # change merely because the holder's deadline instant has passed.
-        progress = _progress_record(
-            self.project.snapshots.get(), "worker", self.config.limits.progress_signals,
-            {name: False for name in PROGRESS_SIGNALS}, "wait", ready_work=True,
-            ready_work_signature=page["signature"], wait_resolution_tokens=[])
+        # Bound to the earlier empty set, the due item is a ready-set change
+        # and wake; bound to the due set itself, it is not a repeated wake.
+        def record_for(signature, ready_work):
+            progress = _progress_record(
+                self.project.snapshots.get(), "worker", self.config.limits.progress_signals,
+                {name: False for name in PROGRESS_SIGNALS}, "wait", ready_work=ready_work,
+                ready_work_signature=signature, wait_resolution_tokens=[])
+            return {"progress": progress, "role": "worker"}
+
         changed, present, resolution_changed = _ready_work_observation(
-            self.project, {"progress": progress, "role": "worker"},
-            self.config.roles["worker"])
+            self.project, record_for(empty["signature"], False), self.config.roles["worker"])
+        self.assertTrue(changed)
+        self.assertTrue(present)
+        self.assertFalse(resolution_changed)
+        changed, present, resolution_changed = _ready_work_observation(
+            self.project, record_for(page["signature"], True), self.config.roles["worker"])
         self.assertFalse(changed)
         self.assertTrue(present)
         self.assertFalse(resolution_changed)
-        after = store.page_ready(role_name="worker")
-        self.assertEqual(after["signature"], page["signature"])
-        self.assertNotIn("_earliest_deferred_until", after)
         self.assertEqual(store.get(item["id"])["status"], "blocked")
+
+    def test_future_sole_writer_deadline_admits_finish_and_due_wakes(self):
+        from mizu.runtime import _progress_record
+        from mizu.snapshot import PROGRESS_SIGNALS
+        at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat(
+            timespec="seconds")
+        item = self.block_deadline("only future deadline", at)
+        store = self.project.work_items
+        before = store.page_ready(role_name="worker")
+        self.assertEqual(before["total"], 0)
+        self.assertTrue(self.finish(self.context(), "continue")["sealed"])
+        progress = _progress_record(
+            self.project.snapshots.get(), "worker", self.config.limits.progress_signals,
+            {name: False for name in PROGRESS_SIGNALS}, "continue", ready_work=False,
+            ready_work_signature=before["signature"], wait_resolution_tokens=[])
+        record = {"progress": progress, "role": "worker"}
+        with patch("mizu.work_item_waits.dt", deadline_reached(at)):
+            after = store.page_ready(role_name="worker")
+            self.assertIn(item["id"], [row["id"] for row in after["items"]])
+            self.assertEqual(after["items"][0]["wait_liveness"]["state"], "due")
+            self.assertNotEqual(after["signature"], before["signature"])
+            self.assertTrue(_ready_work_observation(
+                self.project, record, self.config.roles["worker"])[0])
 
     def test_finish_inventory_uses_api_bound_not_smaller_prompt_page(self):
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(

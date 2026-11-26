@@ -32,9 +32,10 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
     full signature reports ready-set change; schema-4–6 writer progress separately
     qualifies resolution wakes by exact item/revision tokens actually shown in
     the opening pages. Legacy progress retains its conservative changed-set
-    fallback because it has no delivery tokens. A sole-holder deadline stays
-    ordinary open work in the holder's ready set, so its instant passing grants
-    no wake. The progress role and fingerprint scope prevent an observer from
+    fallback because it has no delivery tokens. A deadline is released by the
+    clock, not by its holder: while pending it stays blocked and outside the
+    ready set, so the due transition is a ready-set change that grants a wake.
+    The progress role and fingerprint scope prevent an observer from
     consuming another role's ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
