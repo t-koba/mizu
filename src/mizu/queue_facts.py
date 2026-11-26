@@ -101,7 +101,11 @@ def deliver_opening(project, role_name: str, rows: list[dict], unit: str) -> Non
         if not isinstance(queue, str):
             return
         try:
-            store.record_delivery(queue, message["seq"], actor, unit)
+            # The handoff establishes the fact even for a future deliver_at:
+            # _with_thread embedded this body into the dispatched opening, so
+            # the reader already received it. Eligibility paths still honour
+            # the deadline; only this credit marks an actually-sent body.
+            store.record_delivery(queue, message["seq"], actor, unit, handed=True)
         except (Denied, OSError, ValueError):
             pass
         refers = message.get("refers")

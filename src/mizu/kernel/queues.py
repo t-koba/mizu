@@ -763,8 +763,15 @@ class QueueStore:
         return self._delivery(queue, seq, actor) is not None
 
     def record_delivery(self, queue: str, seq: int, actor: str, unit: str,
-                        *, now=None) -> dict:
-        """Record that ``seq`` was delivered to ``actor``; idempotent, first write wins."""
+                        *, now=None, handed=False) -> dict:
+        """Record that ``seq`` was delivered to ``actor``; idempotent, first write wins.
+
+        ``handed`` is set only by the opening handoff path, which has just
+        serialized the body into a dispatched prompt. The handoff itself proves
+        delivery, so a future ``deliver_at`` cannot veto that fact. Eligibility
+        paths (append, ``queue_read``, ``message_read``, wake) never set it and
+        still refuse to record delivery before the deadline.
+        """
         declaration = self._grant(queue, actor, write=False)
         if type(seq) is not int or seq < 1:
             raise Denied("delivery sequence must be positive")
@@ -774,7 +781,7 @@ class QueueStore:
         message = self._message(declaration.name, seq)
         if message is None:
             raise Denied("No message to deliver")
-        if not self._due(message, stamp):
+        if not handed and not self._due(message, stamp):
             raise Denied("Cannot record delivery for an undelivered message")
         if (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
                 or "\x00" in unit):

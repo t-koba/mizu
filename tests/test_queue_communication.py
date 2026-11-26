@@ -1,6 +1,7 @@
 """Queue communication: the operator/host CLI, opening facts, readiness and imported work."""
 import contextlib
 import dataclasses
+import datetime as dt
 import io
 import json
 import unittest
@@ -252,6 +253,38 @@ class QueueFactsTests(QueueFixture):
         # No reader call drains it: it will not be shown again.
         self.assertNotIn(target["seq"], [m["seq"] for m in
                          store.pending("answers", "role:worker")["messages"]])
+
+    def test_future_dated_referred_body_is_credited_and_not_shown_again(self):
+        """A referred body with a future deadline is handed over and credited once."""
+        limits = dataclasses.replace(self.config.limits, queue_opening_messages=1)
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles, limits=limits)
+        self.project = Project(config, self.project.name)
+        store = self.project.kernel_queues
+        future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        target = store.append("answers", {"title": "DELAYED-TARGET"}, "operator",
+                              deliver_at=future)
+        store.append("notes", {"title": "reply"}, "operator", refs=[target["id"]])
+
+        handed = []
+        def reader(ctx, prompt, profile=None):
+            for row in json.loads(prompt).get("queues", []):
+                for message in row.get("messages", []):
+                    for ref in message.get("refers", []):
+                        handed.append(ref["body"]["title"])
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read", "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        # The body was serialized into the dispatched opening even though its
+        # deadline is in the future, so the handoff must record the fact.
+        self.assertEqual(handed, ["DELAYED-TARGET"])
+        self.assertTrue(store.delivered("answers", target["seq"], "role:worker"))
+        # Past the deadline it is not offered again: the reader already got it.
+        past = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)).isoformat()
+        self.assertNotIn(target["seq"], [m["seq"] for m in
+                         store.pending("answers", "role:worker", now=past)["messages"]])
 
     def test_unreadable_ref_is_not_serialized_nor_credited(self):
         """A body the reader never received stays undelivered."""

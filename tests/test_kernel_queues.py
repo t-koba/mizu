@@ -625,6 +625,20 @@ class QueueStoreTests(unittest.TestCase):
                          {"unit": "read", "at": LATER})
         self.assertTrue(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
 
+    def test_handed_records_future_delivery_but_normal_path_still_refuses(self):
+        """The handoff opt-in records a future body; eligibility paths keep the deadline."""
+        future = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        with self.assertRaises(Denied):
+            self.store.record_delivery("tasks", future["seq"], "role:alpha", "read", now=NOW)
+        self.assertFalse(self.store.delivered("tasks", future["seq"], "role:alpha"))
+        # Only the handoff path may cross the deadline, and only for a real body.
+        self.store.record_delivery("tasks", future["seq"], "role:alpha", "opening",
+                                   now=NOW, handed=True)
+        self.assertTrue(self.store.delivered("tasks", future["seq"], "role:alpha"))
+        # Exact deadline still governs wake: not due before LATER, no wake after delivery.
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=NOW))
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+
     def test_record_delivery_is_idempotent_and_validated(self):
         message = self.store.append("tasks", BODY, "operator", now=NOW)
         seq = message["seq"]
