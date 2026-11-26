@@ -41,6 +41,7 @@ PAGE_MAX = 512
 PAGE_DEFAULT = 64
 MAX_REFS = 512
 MAX_RETENTION_SCAN = 256
+MAX_RETAIN_LAST = 64
 DEFAULT_RETAIN_DAYS = 30
 INTEGER_LIMIT = (1 << 63) - 1
 #: Queue and field names: lowercase identifiers.
@@ -142,6 +143,7 @@ class Queue:
     read: tuple[str, ...]
     wake: tuple[str, ...] = ()
     retain_days: int = DEFAULT_RETAIN_DAYS
+    retain_last: int | None = None
     fields: Mapping[str, QueueField] = dataclasses.field(default_factory=dict)
 
 
@@ -190,7 +192,7 @@ def parse_queues(raw: Any) -> Mapping[str, Queue]:
     for name, spec in raw.items():
         where = f"queues.{name}"
         _name(name, where)
-        _keys(spec, frozenset({"write", "read", "wake", "retain_days", "schema"}), where)
+        _keys(spec, frozenset({"write", "read", "wake", "retain_days", "retain_last", "schema"}), where)
         write = _principals(spec.get("write"), f"{where}.write")
         read = _principals(spec.get("read"), f"{where}.read")
         wake = _principals(spec["wake"], f"{where}.wake") if "wake" in spec else ()
@@ -201,6 +203,13 @@ def parse_queues(raw: Any) -> Mapping[str, Queue]:
             if (principal == "role:*" or not principal.startswith("role:")
                     or not allows(read, principal)):
                 raise ConfigError(f"{where}.wake must name concrete reader roles")
+        retain_last = None
+        if "retain_last" in spec:
+            if "retain_days" in spec:
+                raise ConfigError(f"{where}: retain_days and retain_last are alternatives")
+            retain_last = _bound(spec["retain_last"], f"{where}.retain_last", 1, MAX_RETAIN_LAST)
+            if wake:
+                raise ConfigError(f"{where}.retain_last cannot be combined with wake")
         days = spec.get("retain_days", DEFAULT_RETAIN_DAYS)
         if type(days) is not int or days < 1:
             raise ConfigError(f"{where}.retain_days must be a positive integer")
@@ -213,7 +222,8 @@ def parse_queues(raw: Any) -> Mapping[str, Queue]:
             raise ConfigError(f"{where}.schema must be a table")
         fields = {_name(_key, f"{where}.schema"): _field(_key, value, f"{where}.schema.{_key}")
                   for _key, value in schema.items()}
-        result[name] = Queue(name, write, read, wake, days, MappingProxyType(fields))
+        result[name] = Queue(name=name, write=write, read=read, wake=wake, retain_days=days,
+                             retain_last=retain_last, fields=MappingProxyType(fields))
     return MappingProxyType(result)
 
 
@@ -481,6 +491,9 @@ class QueueStore:
         if id is not None:
             _id(id, "id")
         with self._locked():
+            if declaration.retain_last is not None and (deliver is not None or ref_ids):
+                raise Denied(f"Queue {declaration.name} with retain_last does not accept "
+                             "refs or delayed messages")
             self._check_refs(ref_ids, actor)
             if id is not None:
                 pointer = self._id_pointer(id)
@@ -508,7 +521,10 @@ class QueueStore:
             self._prepare_publish(message)
             atomic_write(self.root / self._relative("intent.json"), canonical({"message": message}))
             self._recover()
-            self._retain(declaration.name, declaration, stamp)
+            if declaration.retain_last is not None:
+                self._retain_last(declaration.name, declaration)
+            else:
+                self._retain(declaration.name, declaration, stamp)
             return message
 
     # -- reading -----------------------------------------------------------------------------
@@ -557,7 +573,9 @@ class QueueStore:
             head = self._head(declaration.name)
             if cursor is not None and cursor > head:
                 raise Denied("cursor is beyond the queue head")
-            seq = self._cursor(declaration.name, actor) if cursor is None else cursor
+            seq = (max(self._cursor(declaration.name, actor), self._retained(declaration.name))
+                   if cursor is None and declaration.retain_last is not None
+                   else (self._cursor(declaration.name, actor) if cursor is None else cursor))
             rows, delayed = [], False
             while seq < head and len(rows) < limit:
                 candidate = seq + 1
@@ -568,7 +586,10 @@ class QueueStore:
                 if message is not None:
                     rows.append(message)
                 seq = candidate
-            self._retain(declaration.name, declaration, stamp)
+            if declaration.retain_last is not None:
+                self._retain_last(declaration.name, declaration)
+            else:
+                self._retain(declaration.name, declaration, stamp)
             return {"messages": rows, "next": seq, "head": head,
                     "more": seq < head, "delayed": delayed}
 
@@ -597,8 +618,9 @@ class QueueStore:
     def pending(self, queue: str, actor: str, *, newest: int = PAGE_DEFAULT, now=None) -> dict:
         """Count the due unacknowledged messages a read would deliver to ``actor``.
 
-        The count covers the contiguous due run after the actor's cursor (a
-        delayed message ends it, as it ends a read), scanning at most
+        The count covers the contiguous due run after the later of the actor's
+        cursor and the retained prefix (a delayed message ends it, as it ends a
+        read), scanning at most
         ``PAGE_MAX`` messages; ``more`` reports a longer run. ``messages``
         holds the newest ``newest`` (0..PAGE_MAX) of the counted run. Reads
         nothing else and acknowledges nothing; no lock is taken.
@@ -608,7 +630,8 @@ class QueueStore:
             raise Denied(f"newest must be from 0 to {PAGE_MAX}")
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = self._cursor(declaration.name, actor)
+        seq = max(self._cursor(declaration.name, actor),
+                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
         count, rows = 0, []
         while seq < head and count < PAGE_MAX:
             candidate = seq + 1
@@ -641,7 +664,8 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor))
+        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor),
+                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
         while seq < head:
             seq += 1
             message = self._message(declaration.name, seq)
@@ -659,7 +683,7 @@ class QueueStore:
 
         Schema: returns an aware ``datetime`` or None; ``now`` is an ISO time
         used for the due comparison. Bounds: scans exactly the range ``due``
-        scans, from ``max(cursor, woken)`` to the head, skipping retention
+        scans, from ``max(cursor, woken, retained)`` to the head, skipping retention
         gaps and stopping at the first not-due message (head-of-line). Trust:
         ``deliver_at`` is validated through ``_instant`` and the read grant is
         checked. Retry/cancellation: none. Evidence: the message's stored
@@ -670,7 +694,8 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor))
+        seq = max(self._cursor(declaration.name, actor), self._woken(declaration.name, actor),
+                  self._retained(declaration.name) if declaration.retain_last is not None else 0)
         while seq < head:
             seq += 1
             message = self._message(declaration.name, seq)
@@ -729,6 +754,48 @@ class QueueStore:
             atomic_write(path, canonical(remaining))
         else:
             path.unlink(missing_ok=True)
+
+    def _retained(self, queue: str) -> int:
+        """Validated processed prefix of ``retain.json`` (0 when absent/corrupt)."""
+        try:
+            stored = self._optional_json(self._relative(queue, "retain.json"))
+        except (Denied, ValueError):
+            return 0  # unreadable prefix licenses rescanning, not dropping messages
+        value = stored.get("seq") if isinstance(stored, Mapping) else None
+        return value if type(value) is int and value >= 0 else 0
+
+    def _retain_last(self, queue: str, declaration: Queue) -> None:
+        """Keep at most ``retain_last`` newest messages regardless of acks.
+
+        The retained prefix marks messages already considered for removal so
+        scans skip their holes. A message still referred to is left in place
+        and the prefix does not advance past it.
+        """
+        path = self.root / self._relative(queue, "retain.json")
+        cursor = self._retained(queue)
+        head = self._head(queue)
+        target = head - declaration.retain_last
+        stop = min(target, cursor + MAX_RETENTION_SCAN)
+        last, blocked = cursor, None
+        for seq in range(cursor + 1, stop + 1):
+            message = self._message(queue, seq)
+            if message is None:
+                if blocked is None:
+                    last = seq  # already removed: never re-examine it
+                continue
+            if self._refs_to(message["id"]):
+                if blocked is None:
+                    blocked = seq  # do not advance past a live referrer
+                continue
+            message_path = self.root / self._relative(queue, "messages", f"{seq:020d}.json")
+            message_path.unlink(missing_ok=True)
+            for ref in message.get("refs", []):
+                self._remove_ref(ref, message["id"])
+            (self.root / self._relative("refs", message["id"], "to.json")).unlink(missing_ok=True)
+            if blocked is None:
+                last = seq
+        if last != cursor:
+            atomic_write(path, canonical({"seq": last}))
 
     def _retain(self, queue: str, declaration: Queue, stamp: dt.datetime) -> None:
         """Remove bounded old messages only when every reader acknowledged them."""

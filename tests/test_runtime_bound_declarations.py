@@ -609,6 +609,9 @@ DECLARATIONS = {
         'MAX_RETENTION_SCAN': (
             '256', 'mechanism',
             'kernel queues / bounded retention work per append or read, never a timer'),
+        'MAX_RETAIN_LAST': (
+            '64', 'mechanism',
+            'kernel queues / bounded count for writer-owned retain-last observation queues'),
         'DEFAULT_RETAIN_DAYS': (
             '30', 'mechanism',
             'kernel queues / documented retention default declared per queue in configuration'),
@@ -1940,6 +1943,12 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('kernel/queues.py', 'QueueStore._retain', 1, 0): (
         'stop + 1', 'mechanism',
         'kernel queues / retention window ends at the bounded derived stop sequence'),
+    ('kernel/queues.py', 'QueueStore._retain_last', 0, 0): (
+        'cursor + 1', 'mechanism',
+        'kernel queues / count retention resumes after the durable retained prefix'),
+    ('kernel/queues.py', 'QueueStore._retain_last', 1, 0): (
+        'stop + 1', 'mechanism',
+        'kernel queues / count retention window ends at the bounded derived stop sequence'),
     ('kernel/queues.py', 'QueueStore.ack', 0, 0): (
         'current + 1', 'mechanism',
         'kernel queues / acknowledgement checks messages after the durable cursor'),

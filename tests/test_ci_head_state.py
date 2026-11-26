@@ -19,6 +19,7 @@ from mizu.fs import canonical
 from mizu.ci_requests import CiRequests, request_id
 from mizu.distribution import public_source_identity
 from mizu.fs import mkdir, write_json
+from mizu.kernel.queues import MAX_RETAIN_LAST, PAGE_MAX
 from mizu.publication import Publication
 from mizu.unit_prompts import prompt_delta_for, prompt_for
 
@@ -586,25 +587,80 @@ class CiHeadStateTests(Fixture):
         self.assertTrue(all(len(row["runs"]) == driver.MAX_IDENTITIES
                             for row in rows))
         store = self.project.kernel_queues
-        self.assertTrue(store.due("ci_head_state_observations", "role:worker"))
+        self.assertEqual(self.config.queues["ci_head_state_observations"].wake, ())
+        self.assertEqual(self.config.queues["ci_head_state_observations"].retain_last, 1)
+        self.assertNotIn("ci_head_state_observations",
+                         queue_facts.waking(self.config, "worker"))
+        self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
+        self.assertFalse(queue_facts.due(self.project, "worker"))
         page = store.read("ci_head_state_observations", "role:worker")
         self.assertEqual(len(page["messages"]), 1)
         detail = json.loads(page["messages"][0]["body"]["detail"])
         self.assertEqual(len(detail["branches"]), len(branches))
 
-    def test_prompt_consumes_the_observation_wake_edge_it_creates(self):
+    def test_prompt_keeps_observation_as_readable_fact_without_waking(self):
         from mizu.runtime import Context
         self.receipt(SHA)
         config, role, _, run, snap = self.context(vcs_request=True)
         context = Context(config, self.project, role, run, snap, self.project.workspace)
         context.queues = []
-        prompt_for(context)  # real host seam: the driver appends one observation
+        payload = json.loads(prompt_for(context))  # real host seam appends one observation
+        self.assertEqual(payload["ci_head_state"], [driver._row("main", SHA)])
+        rows = [row for row in context.queues
+                if row.get("queue") == "ci_head_state_observations"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)
+        self.assertEqual(len(rows[0]["messages"]), 1)
+        body = rows[0]["messages"][0]["body"]
+        self.assertEqual((body["driver"], body["kind"]), ("ci_head_state", "ci_head_state"))
+        self.assertEqual(json.loads(body["detail"])["branches"], payload["ci_head_state"])
         store = self.project.kernel_queues
-        self.assertTrue(store.due("ci_head_state_observations", "role:worker"))
-        self.assertEqual(context.queues[0]["queue"], "ci_head_state_observations")
-        self.assertEqual(context.queues[0]["count"], 1)
+        self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
+        self.assertNotIn("ci_head_state_observations", queue_facts.waking(config, "worker"))
         queue_facts.mark_woken(self.project, "worker", context.queues)
         self.assertFalse(store.due("ci_head_state_observations", "role:worker"))
+
+    def test_prompt_time_observations_stay_bounded_past_one_page(self):
+        """A readable observation cannot keep the worker runnable, even at scale."""
+        for name in ("ci_head_state_observations", "ci_summary_observations"):
+            with self.subTest(queue=name):
+                declaration = self.config.queues[name]
+                self.assertEqual(declaration.wake, ())
+                self.assertLessEqual(declaration.retain_last, MAX_RETAIN_LAST)
+                store = self.project.kernel_queues
+                wake = self.project.root / "wake" / "worker"
+                wake_before = (wake.exists(),
+                               wake.stat().st_mtime_ns if wake.exists() else None)
+                body = {"driver": name, "kind": name, "summary": "observed fact",
+                        "observed_at": "2026-10-01T00:00:00+00:00",
+                        "detail": '{"branches": [], "facts": []}'}
+                for _ in range(PAGE_MAX + 1):
+                    store.append(name, body, "host")
+                self.assertEqual((wake.exists(),
+                                  wake.stat().st_mtime_ns if wake.exists() else None),
+                                 wake_before)
+                self.assertFalse(store.due(name, "role:worker"))
+                self.assertNotIn(name, queue_facts.waking(self.config, "worker"))
+                self.assertFalse(queue_facts.due(self.project, "worker"))
+                rows = queue_facts.opening(self.project, "worker")
+                openings = [row for row in rows if row.get("queue") == name]
+                self.assertEqual(len(openings), 1)
+                self.assertEqual(openings[0]["count"], 1)
+                self.assertEqual(openings[0]["through"], PAGE_MAX + 1)
+                self.assertFalse(openings[0]["more"])
+                self.assertEqual(len(openings[0]["messages"]), 1)
+                self.assertEqual(openings[0]["messages"][0]["seq"], PAGE_MAX + 1)
+                self.assertEqual(openings[0]["messages"][0]["body"]["summary"],
+                                 body["summary"])
+                self.assertFalse(queue_facts.due(self.project, "worker"))
+                queue_facts.mark_woken(self.project, "worker", rows)
+                self.assertFalse(queue_facts.due(self.project, "worker"))
+                self.assertFalse(store.due(name, "role:worker"))
+                live = (self.project.root / "queues" / name / "messages").glob("*.json")
+                self.assertEqual(len(list(live)), 1)
+                retained = json.loads(
+                    (self.project.root / "queues" / name / "retain.json").read_text())
+                self.assertGreaterEqual(retained["seq"], PAGE_MAX)
 
 
 if __name__ == "__main__":

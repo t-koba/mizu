@@ -98,8 +98,10 @@ flag, the driver owns the aggregation policy, and the kernel validates the
 returned facts before they reach the prompt. Wake and admission logic keeps its
 own kernel-side projection; an undeclared, refusing or invalid driver leaves the
 aggregate prompt key empty without inventing facts. Like the head-state driver, this
-runs only while building a unit prompt and appends to a queue whose wake edge is
-delivered in that same opening, so it adds no daemon periodic work; the daemon code
+runs only while building a unit prompt and appends to a queue of readable prompt
+facts that does not wake the role (kernel-side `ci_due` remains the CI
+admission) and retains only the newest observation owned by the driver, so it
+adds no daemon periodic work; the daemon code
 and wake paths are untouched and no new CPU receipt is required for this slice.
 
 | Stage | Kernel work | Moves to userland | Deleted when done |

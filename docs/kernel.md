@@ -50,6 +50,7 @@ write = ["role:*", "host", "operator"]   # principals that may append
 read = ["role:writer", "operator"]       # principals that may read and acknowledge
 wake = ["role:writer"]                   # readers woken by a new message (subset of read)
 retain_days = 30                         # default 30; see Retention
+# retain_last = 1                        # keep only newest N (not with wake or retain_days)
 [queues.proposals.schema]                # optional; without it the body is any bounded JSON object
 title = {type = "string", max = 200, required = true}
 body = {type = "string", max = 65536}
@@ -126,6 +127,13 @@ A message is removed once every reader in `read` has acknowledged it,
 done by the kernel when it next appends to or reads that queue; it never runs
 on a timer of its own. Retention is per-queue configuration with the default
 above; there is no total cap.
+
+A queue may instead declare `retain_last = N` (1..64) for writer-owned count
+retention: only the newest N messages are kept, regardless of reader cursors.
+This mode excludes both `wake` (removal must not drop a wake edge) and
+`retain_days`, and refuses messages with refs or delayed delivery that would pin
+older history. Removal is bounded per append or read and advances the retained
+prefix, so later scans skip the holes.
 
 ## Host writers
 

@@ -288,7 +288,11 @@ class CiSummaryObservationTests(Fixture):
         self.assertIn("ci_summary", self.config.drivers)
         self.assertEqual(self.config.queues[QUEUE].fields["detail"].max, driver.DETAIL_MAX)
         store = self.project.kernel_queues
-        self.assertTrue(store.due(QUEUE, "role:worker"))
+        self.assertEqual(self.config.queues[QUEUE].wake, ())
+        self.assertEqual(self.config.queues[QUEUE].retain_last, 1)
+        self.assertNotIn(QUEUE, queue_facts.waking(self.config, "worker"))
+        self.assertFalse(store.due(QUEUE, "role:worker"))
+        self.assertFalse(queue_facts.due(self.project, "worker"))
         page = store.read(QUEUE, "role:worker")
         self.assertEqual((page["head"], len(page["messages"])), (1, 1))
         body = page["messages"][0]["body"]
@@ -300,8 +304,8 @@ class CiSummaryObservationTests(Fixture):
         self.assertEqual(json.loads(detail)["facts"], facts)
 
 
-    def test_prompt_consumes_the_observation_wake_edge_it_creates(self):
-        """The opt-in prompt projection records its observation as delivered."""
+    def test_prompt_keeps_observation_as_readable_fact_without_waking(self):
+        """The opt-in prompt projection records its observation as a readable fact."""
         from mizu.runtime import Context
         self.cache({"main": [{"sha": SHA, "check": "unit"}]})
         role = dataclasses.replace(
@@ -318,10 +322,15 @@ class CiSummaryObservationTests(Fixture):
         payload = json.loads(prompt_for(context))  # real host seam appends one observation
         self.assertEqual(payload["ci_summary"], [self.facts()[0]])
         store = self.project.kernel_queues
-        self.assertTrue(store.due(QUEUE, "role:worker"))
+        self.assertFalse(store.due(QUEUE, "role:worker"))
+        self.assertNotIn(QUEUE, queue_facts.waking(config, "worker"))
         rows = [row for row in context.queues if row.get("queue") == QUEUE]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["count"], 1)
+        self.assertEqual(len(rows[0]["messages"]), 1)
+        body = rows[0]["messages"][0]["body"]
+        self.assertEqual((body["driver"], body["kind"]), ("ci_summary", "ci_summary"))
+        self.assertEqual(json.loads(body["detail"])["facts"], payload["ci_summary"])
         queue_facts.mark_woken(self.project, "worker", context.queues)
         self.assertFalse(store.due(QUEUE, "role:worker"))
 

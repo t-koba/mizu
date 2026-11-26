@@ -77,9 +77,16 @@ class ObservationDeclaration(unittest.TestCase):
             queue = queues[name]
             # A driver appends as host, so host must hold the write grant.
             self.assertTrue(allows(queue.write, "host"), name)
-            # Readers and the wake target are declared; no wildcard wake.
+            # Readers are declared; only reply queues may wake the worker.
+            # Prompt-time observations are readable facts, not wake admissions.
             self.assertIn("role:*", queue.read)
-            self.assertEqual(queue.wake, ("role:worker",))
+            if name in ("vcs_observations", "ci_observations"):
+                self.assertEqual(queue.wake, ("role:worker",), name)
+                self.assertIsNone(queue.retain_last, name)
+            else:
+                self.assertIn(name, (HEAD_QUEUE, SUMMARY_QUEUE), name)
+                self.assertEqual(queue.wake, (), name)
+                self.assertEqual(queue.retain_last, 1, name)
             fields = queue.fields
             self.assertTrue(fields["driver"].required)
             self.assertTrue(fields["kind"].required)
@@ -264,6 +271,8 @@ class GeneratedDeploymentCosts(unittest.TestCase):
                               head_example["max_bytes"], head_example["diagnostic_bytes"]))
             self.assertEqual(config.queues[HEAD_QUEUE],
                              parse_queues(declarations())[HEAD_QUEUE])
+            self.assertEqual(config.queues[HEAD_QUEUE].wake, ())
+            self.assertEqual(config.queues[HEAD_QUEUE].retain_last, 1)
             summary = config.drivers["ci_summary"]
             summary_durable = config_file.parent / "drivers" / "ci_summary_driver.py"
             self.assertEqual(summary.command, (sys.executable, str(summary_durable)))
@@ -280,6 +289,8 @@ class GeneratedDeploymentCosts(unittest.TestCase):
                               summary_example["diagnostic_bytes"]))
             self.assertEqual(config.queues[SUMMARY_QUEUE],
                              parse_queues(declarations())[SUMMARY_QUEUE])
+            self.assertEqual(config.queues[SUMMARY_QUEUE].wake, ())
+            self.assertEqual(config.queues[SUMMARY_QUEUE].retain_last, 1)
             self.assertEqual(config.queues[SUMMARY_QUEUE].fields["detail"].max,
                              1048576)
 
@@ -288,6 +299,7 @@ class GeneratedDeploymentCosts(unittest.TestCase):
             self.assertTrue(allows(queue.write, "host"))
             self.assertIn("role:*", queue.read)
             self.assertEqual(queue.wake, ("role:worker",))
+            self.assertIsNone(queue.retain_last)
             self.assertEqual(queue.fields["detail"].max, 16384)
 
             # Real config and real host seam: only the Context shell is a shim.
