@@ -4,7 +4,9 @@
 # Declaring it switches the vcs_read ci_costs projection to the generic host
 # seam; without it that op fails closed.
 # Declaring ci_head_state moves the fixed prompt head facts to this
-# operator-owned program; without it those facts stay empty.
+# operator-owned program; without it those facts stay empty. The ci_summary
+# driver likewise projects the opt-in aggregate prompt facts; without it an
+# explicit `ci` section carries no aggregate facts.
 
 [drivers.ci_costs]
 command = ["python3", "examples/development/drivers/ci_costs_driver.py"]
@@ -19,4 +21,12 @@ observation_queue = "ci_head_state_observations"
 timeout_seconds = 20
 # The 65-branch worst case is 128-char UTF-8 identities across two arrays.
 max_bytes = 2097152
+diagnostic_bytes = 0
+
+[drivers.ci_summary]
+command = ["python3", "examples/development/drivers/ci_summary_driver.py"]
+observation_queue = "ci_summary_observations"
+timeout_seconds = 20
+# 2048 aggregate facts with branch/check identities and counts.
+max_bytes = 4194304
 diagnostic_bytes = 0

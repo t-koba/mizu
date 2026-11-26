@@ -426,23 +426,6 @@ def wake_ci_facts(project, config=None) -> list:
     return wake_ci_observation(project, config)[1]
 
 
-def ci_summary_facts(project, config=None, *, all_subjects=False) -> list:
-    """Bounded aggregate facts for wake subjects, or all observed subjects.
-
-    Reads one poll cache and uses the wake aggregation schema and bounds;
-    unreadable or malformed evidence yields no facts, never inferred success.
-    """
-    if not all_subjects:
-        return wake_ci_facts(project, config)
-    try:
-        if config is None:
-            config = getattr(project, "config", None)
-        raw = read_json(project.root / POLL_STATE_FILE, {})
-        return _ci_summary_observation(raw, config)[1]
-    except Exception:
-        return []
-
-
 def _valid_ci_summary_fact(value) -> bool:
     """Exact aggregate schema, shared by prompt copies and generation validation."""
     return (isinstance(value, dict)

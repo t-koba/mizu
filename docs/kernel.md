@@ -180,7 +180,11 @@ protocol. The kernel passes requests and returns responses without
 interpreting provider concepts. A driver that observes an external system
 returns observations, which the kernel appends to the driver's configured
 queue. Version control, CI, pull requests, publication and review are driver
-operations plus deployment policy; none of them is a kernel concept.
+operations plus deployment policy; none of them is a kernel concept. The
+development deployment projects its fixed `ci_head_state` rows and its opt-in
+`ci_summary` aggregates this way: the trusted host gathers bounded raw
+evidence, the declared driver owns the projection, and the caller validates
+the returned facts. Wake and admission decisions never read those observations.
 
 ### Declaration
 

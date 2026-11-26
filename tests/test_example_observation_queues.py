@@ -20,7 +20,9 @@ from types import SimpleNamespace
 import support  # noqa: F401  (puts src on the path)
 from mizu.cli import configure
 from mizu.config import load
+from mizu.fs import write_json
 from mizu.head_state_observation import ci_head_state_facts
+from mizu.summary_observation import ci_summary_facts
 from mizu.errors import Denied
 from mizu.kernel import QueueStore, parse_queues
 from mizu.kernel.queues import allows
@@ -33,6 +35,9 @@ DRIVER_FRAGMENT = EXAMPLE / "observation_drivers.toml"
 DRIVER = EXAMPLE / "drivers" / "ci_costs_driver.py"
 HEAD_DRIVER = EXAMPLE / "drivers" / "ci_head_state_driver.py"
 HEAD_QUEUE = "ci_head_state_observations"
+SUMMARY_DRIVER = EXAMPLE / "drivers" / "ci_summary_driver.py"
+SUMMARY_QUEUE = "ci_summary_observations"
+ALL_QUEUES = ("vcs_observations", "ci_observations", HEAD_QUEUE, SUMMARY_QUEUE)
 POLICY = EXAMPLE / "policies" / "observations.md"
 README = EXAMPLE / "README.md"
 
@@ -66,9 +71,9 @@ OBSERVATION = {
 class ObservationDeclaration(unittest.TestCase):
     def test_all_queues_validate_with_bounded_credentials(self):
         raw = declarations()
-        self.assertEqual(set(raw), {"vcs_observations", "ci_observations", HEAD_QUEUE})
+        self.assertEqual(set(raw), set(ALL_QUEUES))
         queues = parse_queues(raw)
-        for name in ("vcs_observations", "ci_observations", HEAD_QUEUE):
+        for name in ALL_QUEUES:
             queue = queues[name]
             # A driver appends as host, so host must hold the write grant.
             self.assertTrue(allows(queue.write, "host"), name)
@@ -83,7 +88,8 @@ class ObservationDeclaration(unittest.TestCase):
             self.assertFalse(fields["digest"].required)
             self.assertEqual(fields["driver"].max, 80)
             self.assertEqual(fields["summary"].max, 4096)
-            expected_detail = 1048576 if name == HEAD_QUEUE else 16384
+            expected_detail = {"vcs_observations": 16384, "ci_observations": 16384,
+                               HEAD_QUEUE: 1048576, SUMMARY_QUEUE: 1048576}[name]
             self.assertEqual(fields["detail"].max, expected_detail)
             self.assertEqual(fields["digest"].type, "digest")
 
@@ -115,8 +121,9 @@ class ObservationDeclaration(unittest.TestCase):
             config = load(top)
             self.assertEqual(set(config.queues), {
                 "proposals", "questions", "notices", "work",
-                "vcs_observations", "ci_observations", HEAD_QUEUE})
-            self.assertEqual(set(config.drivers), {"ci_costs", "ci_head_state"})
+                "vcs_observations", "ci_observations", HEAD_QUEUE, SUMMARY_QUEUE})
+            self.assertEqual(set(config.drivers),
+                             {"ci_costs", "ci_head_state", "ci_summary"})
             driver = config.drivers["ci_costs"]
             self.assertEqual(driver.command, ("python3", "examples/development/drivers/ci_costs_driver.py"))
             self.assertEqual((driver.observation_queue, driver.timeout_seconds,
@@ -128,7 +135,13 @@ class ObservationDeclaration(unittest.TestCase):
             self.assertEqual((head.observation_queue, head.timeout_seconds,
                               head.max_bytes, head.diagnostic_bytes),
                              (HEAD_QUEUE, 20.0, 2097152, 0))
-            for name in ("vcs_observations", "ci_observations", HEAD_QUEUE):
+            summary = config.drivers["ci_summary"]
+            self.assertEqual(summary.command, (
+                "python3", "examples/development/drivers/ci_summary_driver.py"))
+            self.assertEqual((summary.observation_queue, summary.timeout_seconds,
+                              summary.max_bytes, summary.diagnostic_bytes),
+                             (SUMMARY_QUEUE, 20.0, 4194304, 0))
+            for name in ALL_QUEUES:
                 self.assertIn("host", config.queues[name].write)
 
     def test_fragment_introduces_only_the_queues_root_key(self):
@@ -151,12 +164,18 @@ class ObservationDeclaration(unittest.TestCase):
             "timeout_seconds": 20,
             "max_bytes": 2097152,
             "diagnostic_bytes": 0})
+        self.assertEqual(declared["drivers"]["ci_summary"], {
+            "command": ["python3", "examples/development/drivers/ci_summary_driver.py"],
+            "observation_queue": SUMMARY_QUEUE,
+            "timeout_seconds": 20,
+            "max_bytes": 4194304,
+            "diagnostic_bytes": 0})
 
     def test_schema_bounds_are_enforced_on_host_append(self):
         queues = parse_queues(declarations())
         with tempfile.TemporaryDirectory() as tmp:
             store = QueueStore(Path(tmp), queues)
-            for name in ("vcs_observations", "ci_observations", HEAD_QUEUE):
+            for name in ALL_QUEUES:
                 ack = store.append(name, dict(OBSERVATION), "host")
                 self.assertEqual(ack["seq"], 1)
                 self.assertIn("id", ack)
@@ -173,7 +192,7 @@ class ObservationDeclaration(unittest.TestCase):
 
     def test_policy_and_readme_describe_authority_neutrally(self):
         policy = POLICY.read_text(encoding="utf-8")
-        for queue in ("vcs_observations", "ci_observations", HEAD_QUEUE):
+        for queue in ALL_QUEUES:
             self.assertIn(queue, policy)
         self.assertIn("external-untrusted", policy)
         self.assertIn("authoritative", policy)
@@ -245,6 +264,24 @@ class GeneratedDeploymentCosts(unittest.TestCase):
                               head_example["max_bytes"], head_example["diagnostic_bytes"]))
             self.assertEqual(config.queues[HEAD_QUEUE],
                              parse_queues(declarations())[HEAD_QUEUE])
+            summary = config.drivers["ci_summary"]
+            summary_durable = config_file.parent / "drivers" / "ci_summary_driver.py"
+            self.assertEqual(summary.command, (sys.executable, str(summary_durable)))
+            self.assertTrue(summary_durable.is_file())
+            self.assertEqual(summary_durable.read_bytes(), SUMMARY_DRIVER.read_bytes())
+            self.assertTrue(all(Path(arg).is_absolute() for arg in summary.command))
+            summary_example = tomllib.loads(
+                DRIVER_FRAGMENT.read_text(encoding="utf-8"))["drivers"]["ci_summary"]
+            self.assertEqual((summary.observation_queue, summary.timeout_seconds,
+                              summary.max_bytes, summary.diagnostic_bytes),
+                             (summary_example["observation_queue"],
+                              summary_example["timeout_seconds"],
+                              summary_example["max_bytes"],
+                              summary_example["diagnostic_bytes"]))
+            self.assertEqual(config.queues[SUMMARY_QUEUE],
+                             parse_queues(declarations())[SUMMARY_QUEUE])
+            self.assertEqual(config.queues[SUMMARY_QUEUE].fields["detail"].max,
+                             1048576)
 
             queue = config.queues["ci_observations"]
             self.assertEqual(queue, parse_queues(declarations())["ci_observations"])
@@ -269,6 +306,20 @@ class GeneratedDeploymentCosts(unittest.TestCase):
             self.assertEqual((head_body["driver"], head_body["kind"]),
                              ("ci_head_state", "ci_head_state"))
             self.assertEqual(json.loads(head_body["detail"])["branches"], rows)
+
+            write_json(root / "vcs-poll.json", {"failures": {
+                "off-wake": [{"sha": "a" * 40, "check": "unit"}]}})
+            summary_rows = ci_summary_facts(project, config)
+            self.assertEqual(summary_rows, [{
+                "subject": "off-wake", "revision": "a" * 40,
+                "outcome": "failure", "non_passing_checks": 1,
+                "may_be_incomplete": True}])
+            summary_page = project.kernel_queues.read(SUMMARY_QUEUE, "role:worker")
+            self.assertEqual((summary_page["head"], len(summary_page["messages"])), (1, 1))
+            self.assertEqual(summary_page["messages"][0]["author"], "host")
+            self.assertEqual(
+                json.loads(summary_page["messages"][0]["body"]["detail"])["facts"],
+                summary_rows)
 
             run_dir = root / "run"
             (run_dir / "vcs-read").mkdir(parents=True)
@@ -300,17 +351,20 @@ class GeneratedDeploymentCosts(unittest.TestCase):
             existing = existing_dir / "config.toml"
             durable = existing_dir / "drivers" / "ci_costs_driver.py"
             head_durable = existing_dir / "drivers" / "ci_head_state_driver.py"
+            summary_durable = existing_dir / "drivers" / "ci_summary_driver.py"
             # Migration: copy the reviewed programs into the durable config dir
             # and declare their absolute paths with the operator's interpreter.
             (durable.parent).mkdir(parents=True)
             shutil.copyfile(DRIVER, durable)
             shutil.copyfile(HEAD_DRIVER, head_durable)
+            shutil.copyfile(SUMMARY_DRIVER, summary_durable)
             shutil.copytree(generated.parent / "policies",
                             existing_dir / "policies", dirs_exist_ok=True)
             text = generated.read_text(encoding="utf-8").replace(
                 'data_dir = "~/.local/state/mizu"',
                 "data_dir = " + json.dumps(str(root / "data")))
-            for name, target in (("ci_costs", durable), ("ci_head_state", head_durable)):
+            for name, target in (("ci_costs", durable), ("ci_head_state", head_durable),
+                                 ("ci_summary", summary_durable)):
                 generated_command = "command = " + json.dumps(
                     [sys.executable, str(generated.parent / "drivers" / f"{name}_driver.py")])
                 documented_command = "command = " + json.dumps([sys.executable, str(target)])
@@ -323,6 +377,8 @@ class GeneratedDeploymentCosts(unittest.TestCase):
                              (sys.executable, str(durable)))
             self.assertEqual(config.drivers["ci_head_state"].command,
                              (sys.executable, str(head_durable)))
+            self.assertEqual(config.drivers["ci_summary"].command,
+                             (sys.executable, str(summary_durable)))
 
             project = SimpleNamespace(root=root, kernel_queues=QueueStore(root, config.queues))
             run_dir = root / "run"
@@ -337,15 +393,23 @@ class GeneratedDeploymentCosts(unittest.TestCase):
                                            kernel_queues=project.kernel_queues)
             previous = os.getcwd()
             head_rows = []
+            summary_rows = []
             try:
                 os.chdir(foreign)
                 result = Context._op_vcs_read_ci_costs(context, {"op": "ci_costs"})
                 head_rows = ci_head_state_facts(head_project, head_config)
+                write_json(root / "vcs-poll.json", {"failures": {
+                    "off-wake": [{"sha": "a" * 40, "check": "unit"}]}})
+                summary_rows = ci_summary_facts(head_project, head_config)
             finally:
                 os.chdir(previous)
             self.assertEqual(head_rows, [{
                 "subject": "main", "revision": "", "runs": [], "requests": [],
                 "no_head": True, "no_evidence": False, "may_be_incomplete": False}])
+            self.assertEqual(summary_rows, [{
+                "subject": "off-wake", "revision": "a" * 40,
+                "outcome": "failure", "non_passing_checks": 1,
+                "may_be_incomplete": True}])
 
             self.assertEqual(result["op"], "ci_costs")
             self.assertEqual(result["trust"], "external-untrusted")

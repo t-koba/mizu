@@ -91,6 +91,17 @@ harness digest before and after; both receipts report `proc-per-pid`
 `docs/evidence/ci-head-state-cpu-evidence.json`; verify them with
 `scripts/verify-stage4-cpu-evidence.py --record docs/evidence/ci-head-state-cpu-evidence.json --repo <checkout>`.
 
+The same stage-5 slice also moves the opt-in prompt `ci_summary` aggregates to
+a declared observation driver: the host reads one coherent poll cache and sends
+only bounded failure triples, validated check summaries and an incompleteness
+flag, the driver owns the aggregation policy, and the kernel validates the
+returned facts before they reach the prompt. Wake and admission logic keeps its
+own kernel-side projection; an undeclared, refusing or invalid driver leaves the
+aggregate prompt key empty without inventing facts. Like the head-state driver, this
+runs only while building a unit prompt and appends to a queue whose wake edge is
+delivered in that same opening, so it adds no daemon periodic work; the daemon code
+and wake paths are untouched and no new CPU receipt is required for this slice.
+
 | Stage | Kernel work | Moves to userland | Deleted when done |
 |---|---|---|---|
 | 1. Queues | `mizu.kernel`: queue declarations, authenticated append, per-reader cursors and acknowledgement, delayed delivery, reference lookup, retention, wake files; `queue_*` and `message_*` tools; `[queues]` configuration | — | The object store with states, transitions and requirements (`kernel/kinds.py`, `kernel/objects.py`, `kernel/events.py` as they are), `kernel_shadow.py`, `kernel_shadow_audit.py`, the `kernel-shadow` commands, `[kinds]` and role `subscribe` configuration, `objects_*` and `events_*` tools |

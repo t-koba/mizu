@@ -18,17 +18,19 @@ nothing here specially.
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4
   userland: the runtime reads these names from configuration, not source.
-- `observation_queues.toml` declares `vcs_observations`, `ci_observations` and
-  `ci_head_state_observations`: bounded queues to which observation drivers
+- `observation_queues.toml` declares `vcs_observations`, `ci_observations`,
+  `ci_head_state_observations` and `ci_summary_observations`: bounded queues to
+  which observation drivers
   append what they find. Their bodies are opaque plain objects; the schemas
   enforce bounds and required fields only. It is stage-5 userland. A config
-  written by `mizu configure` already declares the two CI queues, so including
+  written by `mizu configure` already declares the three CI queues, so including
   this fragment there would duplicate those keys.
-- `observation_drivers.toml` declares the illustrative `ci_costs` and
-  `ci_head_state` drivers in `drivers/`. Including them switches the
-  `vcs_read ci_costs` join and the fixed `ci_head_state` prompt facts to those
-  operator-owned programs through the generic host seam; without them the op
-  fails closed and those facts are empty. A config written by `mizu configure`
+- `observation_drivers.toml` declares the illustrative `ci_costs`,
+  `ci_head_state` and `ci_summary` drivers in `drivers/`. Including them switches
+  the `vcs_read ci_costs` join, the fixed `ci_head_state` rows and the opt-in
+  `ci_summary` aggregates to those operator-owned programs through the generic
+  host seam; without them the op fails closed and those prompt facts are empty.
+  A config written by `mizu configure`
   already carries working declarations with absolute, CWD-independent commands
   pointing at durable copies of the programs in the config dir, so including
   this fragment there would duplicate the keys. A manually authored or migrated
@@ -44,9 +46,9 @@ nothing here specially.
 authoritative until cutover; declaring the queue changes no runtime authority.
 
 Declaring the observation queues changes no runtime authority on its own. The
-separate driver declarations do switch the CI cost computation and the fixed
-head-state facts to operator-owned programs; their dedicated kernel modules are
-gone. The remaining dedicated version-control and CI code stays authoritative
+separate driver declarations do switch the CI cost computation, the fixed
+head-state rows and the opt-in aggregate prompt facts to operator-owned
+programs; their dedicated kernel modules are gone. The remaining dedicated version-control and CI code stays authoritative
 until later cutover and deletion slices. Only the example driver commands are
 shipped here; a deployment supplies its own.
 

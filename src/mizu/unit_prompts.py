@@ -8,7 +8,8 @@ for both prompt variants.
 
 Fixed ``ci_head_state`` facts come from the declared observation driver
 (:func:`_head_state_prompt_facts`), which also consumes the wake edge of the
-observation it appends. Session selection and its rotation/recovery/fallback
+observation it appends. Opt-in ``ci_summary`` aggregates are projected by the
+``ci_summary`` observation driver. Session selection and its rotation/recovery/fallback
 policy (:func:`session_prompt`) now also live here, re-exported by ``runtime``.
 Work-ready scheduling (``work_readiness._has_ready_work`` and
 ``work_readiness._ready_work_changed``, re-exported by ``runtime``, plus
@@ -27,7 +28,8 @@ from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs, prompt_sections, reviews
 from .head_state_observation import ci_head_state_facts
-from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact, ci_summary_facts
+from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact
+from .summary_observation import ci_summary_facts
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
 from .protocol import _writer_continuation_contract, tool_definitions
@@ -94,6 +96,22 @@ def _head_state_prompt_facts(context: Context):
     if "vcs_request" not in caps or "ci_head_state" not in context.config.drivers:
         return []
     rows = ci_head_state_facts(context.project, context.config)
+    from . import queue_facts
+    context.queues = queue_facts.opening(context.project, context.role.name)
+    return rows
+
+
+def _ci_summary_prompt_facts(context: Context):
+    """Project the opt-in aggregate observation and deliver its wake edge.
+
+    The driver appends to a queue that wakes the worker, so the same opening
+    must record that observation as delivered; otherwise a finished unit would
+    wake again on a fact it already saw. The projection is opt-in via the
+    ``ci`` section and fails closed when the driver is undeclared.
+    """
+    if "ci" not in prompt_sections.included(context.role):
+        return []
+    rows = ci_summary_facts(context.project, context.config)
     from . import queue_facts
     context.queues = queue_facts.opening(context.project, context.role.name)
     return rows
@@ -520,6 +538,7 @@ def prompt_for(context: Context) -> str:
     # transitions below are the fixed single-writer contract, not policy.
     from . import work_order as _plan
     ci_head_state = _head_state_prompt_facts(context)
+    ci_summary = _ci_summary_prompt_facts(context)
     opening = _plan._capture_opening(context)
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context))
@@ -553,8 +572,7 @@ def prompt_for(context: Context) -> str:
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "ci_branch": ci_branch,
-                       "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
-                                      if "ci" in prompt_sections.included(context.role) else []),
+                       "ci_summary": ci_summary,
                        "ci_head_state": ci_head_state,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
@@ -615,6 +633,7 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
     caps = set(context.role.capabilities)
     from . import work_order as _plan
     ci_head_state = _head_state_prompt_facts(context)
+    ci_summary = _ci_summary_prompt_facts(context)
     opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
@@ -648,8 +667,7 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
                        **checks,
                        "acceptance_commands": acceptance,
                        "ci_branch": ci_branch,
-                       "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
-                                      if "ci" in prompt_sections.included(context.role) else []),
+                       "ci_summary": ci_summary,
                        "ci_head_state": ci_head_state,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),

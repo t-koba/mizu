@@ -21,8 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # Stage-5 deployment defaults, written only into a newly generated config. The
 # static template ships no active driver table so that including the example
 # fragments cannot duplicate a key; it is the generated text below that makes
-# `vcs_read ci_costs` and fixed `ci_head_state` facts work out of the box. The
-# command placeholders are made absolute at configure time and paired with
+# `vcs_read ci_costs`, fixed `ci_head_state` and opt-in `ci_summary` facts work
+# out of the box. The command placeholders are made absolute at configure time
+# and paired with
 # durable copies of the reviewed programs in the private config dir, so source
 # upgrades cannot remove them and the commands are independent of the working
 # directory.
@@ -58,6 +59,18 @@ observed_at = {type = "instant", required = true}
 digest = {type = "digest"}
 detail = {type = "string", max = 1048576}
 
+[queues.ci_summary_observations] # what a driver observed about CI aggregates
+write = ["host"]
+read = ["role:*", "operator"]
+wake = ["role:worker"]
+[queues.ci_summary_observations.schema]
+driver = {type = "string", max = 80, required = true}
+kind = {type = "string", max = 80, required = true}
+summary = {type = "string", max = 4096, required = true}
+observed_at = {type = "instant", required = true}
+digest = {type = "digest"}
+detail = {type = "string", max = 1048576}
+
 [drivers.ci_costs]
 command = ["python3", "examples/development/drivers/ci_costs_driver.py"]
 observation_queue = "ci_observations"
@@ -70,6 +83,13 @@ command = ["python3", "examples/development/drivers/ci_head_state_driver.py"]
 observation_queue = "ci_head_state_observations"
 timeout_seconds = 20
 max_bytes = 2097152
+diagnostic_bytes = 0
+
+[drivers.ci_summary]
+command = ["python3", "examples/development/drivers/ci_summary_driver.py"]
+observation_queue = "ci_summary_observations"
+timeout_seconds = 20
+max_bytes = 4194304
 diagnostic_bytes = 0
 """
 
@@ -286,7 +306,7 @@ def configure(file: Path, pi_command: str | None) -> dict:
     drivers = file.parent / "drivers"
     text = (ROOT / "config/config.example.toml").read_text(encoding="utf-8")
     generated = _GENERATED_OBSERVATIONS_CONFIG
-    for name in ("ci_costs", "ci_head_state"):
+    for name in ("ci_costs", "ci_head_state", "ci_summary"):
         generated = generated.replace(
             f'command = ["python3", "examples/development/drivers/{name}_driver.py"]',
             "command = " + json.dumps([sys.executable, str(drivers / f"{name}_driver.py")]))
@@ -300,7 +320,7 @@ def configure(file: Path, pi_command: str | None) -> dict:
         target = file.parent / "policies" / policy.name
         if not target.exists():
             atomic_write(target, policy.read_bytes(), exclusive=True)
-    for name in ("ci_costs", "ci_head_state"):
+    for name in ("ci_costs", "ci_head_state", "ci_summary"):
         target = drivers / f"{name}_driver.py"
         if not target.exists():
             atomic_write(target,

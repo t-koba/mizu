@@ -41,12 +41,23 @@ from raw host evidence; its `detail` is external-untrusted evidence, never a
 verdict or a CI request, and the prompt key is empty when the driver is absent
 or refuses.
 
+## `ci_summary_observations`
+
+A message here says what a driver observed about CI aggregates: one bounded
+aggregate per subject and exact revision, with a non-passing-check count and an
+incompleteness flag. It has the same envelope and trust rule as the other
+queues. The declared `ci_summary` driver projects the opt-in `ci_summary`
+prompt aggregates from a coherent poll-cache read; its `detail` is
+external-untrusted evidence, never a verdict, and the aggregates are empty when
+the driver is absent or refuses. The wake path reads its own kernel-side facts.
+
 ## Authority
 
 These queues are declarations only: adding them to a deployment changes no
 runtime authority. Declaring a `[drivers.<name>]` table does select a command;
-the example `ci_costs` and `ci_head_state` drivers switch the cost computation
-and head-state facts out of the kernel, while the remaining dedicated
+the example `ci_costs`, `ci_head_state` and `ci_summary` drivers switch the cost
+computation, head-state rows and aggregate prompt facts out of the kernel, while
+the remaining dedicated
 version-control and CI code stays authoritative
 until its own cutover slices delete it. The command shipped under `drivers/`
 is illustrative; an operator supplies and reviews the command actually used.
