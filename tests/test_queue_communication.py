@@ -288,8 +288,8 @@ class QueueFactsTests(QueueFixture):
         self.write("Another release")
         self.assertTrue(queue_facts.due(self.project, "worker"))
 
-    def test_hidden_queues_section_still_delivers_the_opening(self):
-        """A role that cannot see the optional section still wakes only once."""
+    def test_hidden_queues_section_credits_nothing_and_stays_pending(self):
+        """A prompt without the queues section neither wakes nor credits queue content."""
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(
             roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"),
@@ -304,11 +304,36 @@ class QueueFactsTests(QueueFixture):
             ctx.handle("finish", {"outcome": "wait", "summary": "Read without the section",
                                   "state": "Next."})
 
+        # Omitting the section also removes queue wake eligibility: an unshown
+        # message must not wake every unit without ever being drained.
+        self.assertNotIn("notes", queue_facts.waking(config, "worker"))
+        self.assertFalse(queue_facts.due(self.project, "worker"))
         Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
         self.assertNotIn("queues", prompts[0])
+        # No false delivery fact: the content was never handed over.
+        self.assertFalse(self.project.kernel_queues.delivered("notes", message["seq"], "role:worker"))
+        # The message stays pending, so nothing is lost.
+        rows = queue_facts.opening(self.project, "worker")
+        self.assertEqual([m["seq"] for m in rows[0]["messages"]], [message["seq"]])
+
+    def test_restored_queues_section_delivers_pending_message(self):
+        """Returning the section delivers the still-pending message on the next opening."""
+        message = self.write("Observed upstream release")
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
+        seen = []
+
+        def reader(ctx, prompt, profile=None):
+            seen.append(json.loads(prompt).get("queues", []))
+            ctx.handle("finish", {"outcome": "wait", "summary": "Seen", "state": "Next."})
+
+        Engine(config, driver=ScriptDriver(reader)).run(self.project, "worker")
+        self.assertEqual(seen[0][0]["messages"][0]["seq"], message["seq"])
         self.assertTrue(self.project.kernel_queues.delivered("notes", message["seq"], "role:worker"))
         self.assertFalse(queue_facts.due(self.project, "worker"))
-        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
     def test_answer_wakes_the_asker_and_arrives_with_its_question(self):
         roles = dict(self.config.roles)

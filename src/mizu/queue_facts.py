@@ -3,12 +3,14 @@
 The facts are counts and the newest messages of each declared queue the role
 may read; nothing here interprets a message or names a queue. Delivery facts
 are the only reader state: a due message wakes a role until it is delivered,
-and a dispatched unit records delivery for every message its opening showed.
+and a dispatched unit records delivery for every message its serialized
+opening actually showed.
 Readiness admits a role when a queue that wakes it has a due message that has
 not been delivered to it yet.
 """
 from __future__ import annotations
 
+from . import prompt_sections
 from .errors import Denied
 from .kernel.queues import allows
 
@@ -25,7 +27,12 @@ def readable(config, role_name: str) -> list[str]:
 
 def waking(config, role_name: str) -> list[str]:
     """Declared queues whose messages can wake the role: its ``wake`` queues, and
-    the queues it may both write and read, where replies to its messages arrive."""
+    the queues it may both write and read, where replies to its messages arrive.
+    A role whose prompt omits the ``queues`` section cannot drain a queue wake
+    through its opening, so no queue wakes it: eligibility follows handover."""
+    role = getattr(config, "roles", {}).get(role_name)
+    if role is not None and "queues" not in prompt_sections.included(role):
+        return []
     actor = principal(role_name)
     return [name for name, queue in config.queues.items()
             if actor in queue.wake or (allows(queue.write, actor) and allows(queue.read, actor))]
@@ -72,8 +79,9 @@ def next_delivery_at(project, role_name: str) -> float | None:
 def deliver_opening(project, role_name: str, rows: list[dict], unit: str) -> None:
     """Record delivery for every message the dispatched unit opening showed.
 
-    ``rows`` is the confirmed opening projection, including when the role's
-    prompt hides the optional ``queues`` section. A racing retention removal
+    ``rows`` is the queues projection actually serialized into the dispatched
+    opening; a role whose prompt omits that section passes no rows, so no
+    unseen message is credited. A racing retention removal
     or a corrupt fact cannot fail dispatch: such a message stays undelivered
     and can still wake a later unit.
     """

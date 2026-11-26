@@ -111,9 +111,11 @@ body = {type = "string", max = 65536}
 - Appending a due message, or a delayed message becoming due, touches
   `wake/<role>` for each role in the queue's `wake` list. A queue wakes while it
   holds a due, wake-eligible message with no delivery fact for that reader;
-  delivery consumes the wake. A dispatched unit records delivery for every
-  message its opening showed, including when the optional `queues` section is
-  omitted from its prompt, so a shown message wakes once. A reader is not woken
+  delivery consumes the wake. A dispatched unit records delivery for exactly
+  the queue messages its serialized opening showed; a role whose prompt omits
+  the optional `queues` section is handed no queue content, is not woken by
+  queues, and credits nothing, so a shown message wakes once and an unshown
+  one stays pending. A reader is not woken
   by its own message, except a delayed one, which is a wake its author asked
   for. A reply also wakes the author of the message it refers to (see `refs`).
   The service manager watches the wake files (systemd PathChanged, launchd

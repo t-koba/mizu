@@ -56,7 +56,7 @@ class EventBatchRendererTests(unittest.TestCase):
     def config_for(self, schedule):
         interval, calendar, daemon = schedule
         role = dataclasses.replace(self.config.roles['reporter'], interval_seconds=interval,
-            calendar=calendar, daemon=daemon, capabilities=(),
+            calendar=calendar, daemon=daemon, capabilities=('queues',),
             work_item_events=('done',), on_change=False, event_poll_seconds=120)
         return dataclasses.replace(self.config, roles={'reporter': role})
 
@@ -69,7 +69,9 @@ class EventBatchRendererTests(unittest.TestCase):
         # All files for unscheduled, interval, calendar and daemon roles,
         # including event recovery polling, as rendered by this release. The
         # reporter may write and read a queue, so replies to it arrive through
-        # the wake directory, which its event trigger watches.
+        # the wake directory, which its event trigger watches. The queues
+        # capability keeps the section in the opening so those replies can be
+        # delivered; without it a queue must not wake the role.
         expected = {
             'linux': '1d92848a588ce6bb498c84b34011ce2a661187375beb73ec6aba5178f0be7a54',
             'macos': '3c415ae1ca51aaee4afd40d8e8e45f28f423098bf1c99189f7957a90c517f1ee',

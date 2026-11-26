@@ -424,17 +424,18 @@ class EngineRunMixin:
                 # A pin must be durable before dispatch-adjacent delivery state
                 # changes, so a setup failure cannot consume an unseen wake.
                 delivery_settlement.register(context)
-                # The opening projection is the delivery seam: the role saw
-                # these messages even when its prompt omits the queues
-                # section, so they must not wake it again after this unit.
+                decoded = json.loads(prompt)
+                # The delivery seam credits only queue messages actually
+                # serialized into this unit's opening. A role whose prompt
+                # omits the `queues` section was handed no queue content, so
+                # nothing is credited and those messages stay pending.
                 try:
-                    queue_facts.deliver_opening(project, role_name, context.queues,
+                    queue_facts.deliver_opening(project, role_name, decoded.get("queues", []),
                                                 context.run_dir.name)
                 except (Denied, OSError, ValueError):
                     pass
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
-                decoded = json.loads(prompt)
                 work_items_page = decoded.get("open_work_items")
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "profile": role.profile, "snapshot": snapshot["id"],
