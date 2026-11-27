@@ -427,6 +427,56 @@ class QueueStoreTests(unittest.TestCase):
                     with self.subTest(trial=trial, step=step, now=stamp):
                         self._indexed_lookups(store, "tasks", "role:alpha", stamp)
 
+    def test_gate_validation_cost_is_linear_in_fragmented_runs(self):
+        """Fragmented gates are validated in one pass, not one scan per gate."""
+        class CountingRuns:
+            def __init__(self, values):
+                self.values = values
+                self.touches = 0
+
+            def __len__(self):
+                return len(self.values)
+
+            def __getitem__(self, index):
+                self.touches += 1
+                return self.values[index]
+
+        for count in (16, 128):
+            with self.subTest(count=count):
+                runs = [(seq, seq) for seq in range(1, 2 * count, 2)]
+                gates = [[seq, LATER] for seq in range(1, 2 * count, 2)]
+                observed = CountingRuns(runs)
+                checked = queue_module._valid_gates(gates, observed, 2 * count,
+                                                     parse=True)
+                self.assertEqual([entry[0] for entry in checked],
+                                 [seq for seq, _ in gates])
+                # A per-gate membership scan touches about count * count runs.
+                self.assertLessEqual(observed.touches, 3 * count)
+                elapsed = CountingRuns(runs)
+                self.assertIsNotNone(queue_module._valid_gates(
+                    gates, elapsed, 2 * count, parse=False))
+                self.assertLessEqual(elapsed.touches, 3 * count)
+
+        # A crafted fragmented index validates in both the elapsed and the
+        # full branch, and fails closed when a gate falls into a run gap.
+        store = QueueStore(self.root / "fragmented", self.queues)
+        path = self.root / "fragmented" / "queues" / "tasks" / "skip" / "role_alpha.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        runs = [[1, 1], [3, 3], [5, 5]]
+        gates = [[1, LATER], [3, SOONER], [5, EVEN_LATER]]
+        atomic_write(path, canonical({"runs": runs, "gates": gates, "until": EVEN_LATER}))
+        expected = (tuple(map(tuple, runs)), tuple(map(tuple, gates)))
+        self.assertEqual(store._skip_index("tasks", "role:alpha", 5,
+                                           stamp=queue_module._instant(NOW, "now")),
+                         expected)
+        self.assertEqual(store._skip_index("tasks", "role:alpha", 5,
+                                           stamp=queue_module._instant(EVEN_LATER, "now")),
+                         (expected[0], ()))
+        atomic_write(path, canonical({"runs": runs,
+                                      "gates": [[1, LATER], [2, SOONER]],
+                                      "until": EVEN_LATER}))
+        self.assertEqual(store._skip_index("tasks", "role:alpha", 5), ((), ()))
+
     def test_expired_delayed_head_and_delivered_suffix_skip_independently_of_history(self):
         """An expired delivered deadline joins its delivered run once it is due."""
         loads = []

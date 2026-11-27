@@ -37,7 +37,7 @@ import re
 import secrets
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from ..errors import ConfigError, Denied
 from ..fs import atomic_write, canonical, identifier, loads_finite, lock, mkdir, now as clock, safe_read
@@ -262,6 +262,39 @@ def _instant(value: Any, where: str) -> dt.datetime:
     if parsed is None or parsed.tzinfo is None:
         raise Denied(f"{where} must be an aware ISO time")
     return parsed
+
+
+def _valid_gates(raw_gates: Any, runs: Sequence[tuple[int, int]], head: int, *,
+                 parse: bool) -> list[tuple[int, str, dt.datetime | None]] | None:
+    """Validate sorted gates against sorted runs with one forward cursor.
+
+    ``runs`` holds sorted, non-overlapping ``(start, end)`` delivered ranges.
+    Return ``(seq, deadline, parsed)`` for each gate (``parsed`` is None when
+    ``parse`` is false), or None when a gate is malformed, out of order, past
+    the head or outside every run. Work is linear in gates plus runs, never
+    their product, however fragmented the delivered suffix is.
+    """
+    checked: list[tuple[int, str, dt.datetime | None]] = []
+    previous, cursor, total = 0, 0, len(runs)
+    for item in raw_gates:
+        if (not isinstance(item, list) or len(item) != 2
+                or type(item[0]) is not int or type(item[1]) is not str
+                or item[0] <= previous or item[0] > head):
+            return None
+        seq = item[0]
+        while cursor < total and runs[cursor][1] < seq:
+            cursor += 1
+        if cursor >= total or runs[cursor][0] > seq:
+            return None
+        parsed = None
+        if parse:
+            try:
+                parsed = _instant(item[1], "deliver_at")
+            except Denied:
+                return None
+        checked.append((seq, item[1], parsed))
+        previous = seq
+    return checked
 
 
 def _id(value: Any, where: str) -> str:
@@ -673,38 +706,20 @@ class QueueStore:
             else:
                 return (), ()
         if stamp is not None and until_dt is not None and until_dt <= stamp:
-            previous = 0
-            for item in raw_gates:
-                if (not isinstance(item, list) or len(item) != 2
-                        or type(item[0]) is not int or type(item[1]) is not str
-                        or item[0] <= previous or item[0] > head
-                        or not any(start <= item[0] <= end for start, end in runs)):
-                    return (), ()
-                previous = item[0]
+            if _valid_gates(raw_gates, runs, head, parse=False) is None:
+                return (), ()
             return tuple(runs), ()
-        gates: list[tuple[int, str]] = []
-        deadlines: list[dt.datetime] = []
-        previous = 0
-        for item in raw_gates:
-            if (not isinstance(item, list) or len(item) != 2
-                    or type(item[0]) is not int or type(item[1]) is not str
-                    or item[0] <= previous or item[0] > head
-                    or not any(start <= item[0] <= end for start, end in runs)):
-                return (), ()
-            try:
-                deadlines.append(_instant(item[1], "deliver_at"))
-            except Denied:
-                return (), ()
-            gates.append((item[0], item[1]))
-            previous = item[0]
+        checked = _valid_gates(raw_gates, runs, head, parse=True)
+        if checked is None:
+            return (), ()
+        gates = tuple((seq, deadline) for seq, deadline, _ in checked)
         if stamp is not None and compact and legacy:
-            until = (max(zip(deadlines, gates), key=lambda pair: pair[0])[1][1]
-                     if deadlines else None)
+            until = max(checked, key=lambda entry: entry[2])[1] if checked else None
             atomic_write(self._skip_path(queue, actor),
                          canonical({"runs": [list(run) for run in runs],
                                     "gates": [list(gate) for gate in gates],
                                     "until": until}))
-        return tuple(runs), tuple(gates)
+        return tuple(runs), gates
 
     @staticmethod
     def _skip_to(index: tuple[tuple, tuple], seq: int, stamp: dt.datetime) -> int:
