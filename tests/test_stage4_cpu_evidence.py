@@ -233,6 +233,26 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         self.assertNotEqual(dropped.returncode, 0, dropped.stderr)
         self.assertFalse(json.loads(dropped.stdout)["checks"]["shape_matched"])
 
+    def test_one_sided_deployment_field_fails_shape_and_is_reported(self):
+        # A declared field recorded in only one receipt (checksum refreshed)
+        # cannot establish a like-for-like before/after comparison: it must
+        # fail shape_matched and appear in unattested_deployment. A field
+        # absent on BOTH sides stays the reported-but-passing historical case.
+        field = "retained_messages"
+        base = json.loads(RECORD.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "record.json"
+            record = json.loads(json.dumps(base))
+            emb = record["before"]["embedded_receipt"]
+            emb.pop(field)
+            record["before"]["embedded_receipt_sha256"] = _canonical_sha(emb)
+            path.write_text(json.dumps(record), encoding="utf-8")
+            one_sided = run_verifier(["--record", str(path)])
+        self.assertNotEqual(one_sided.returncode, 0, one_sided.stderr)
+        summary = json.loads(one_sided.stdout)
+        self.assertFalse(summary["checks"]["shape_matched"])
+        self.assertIn(field, summary["unattested_deployment"])
+
     def test_native_wake_schema_fails_closed_on_settled_forge(self):
         # Seq 279 forge guard must hold on the second supported schema too:
         # dropping `settled` from a receipt and refreshing its checksum may

@@ -205,17 +205,25 @@ def build_summary(record, text, repo, scope):
 
     m = record["measurement"]
     declared = m.get("deployment")
+    before_fields = receipt_deployment(receipts[0])
+    after_fields = receipt_deployment(receipts[1])
+    established = set(before_fields) & set(after_fields)
+    one_sided = set(before_fields) ^ set(after_fields)
     # Shape compares every field a receipt actually records against the
-    # declared deployment. Security-critical fields must be present in both
-    # receipts and agree; a receipt that drops `settled` cannot pass by
-    # treating it as "not recorded".
+    # declared deployment. A declared field recorded on only one side cannot
+    # establish a like-for-like before/after comparison, so it fails. Fields
+    # absent on both sides are the historical "not recorded" case: reported,
+    # not failed. Security-critical fields must be present in both receipts
+    # and agree; a receipt that drops `settled` cannot pass by treating it as
+    # "not recorded".
     critical = ("settled",)
     checks["shape_matched"] = (
         bool(declared)
-        and all(declared.get(k) == v for r in receipts
-                for k, v in receipt_deployment(r).items())
-        and all(c in r and r[c] == declared.get(c)
-                for r in receipts for c in critical))
+        and all(declared.get(k) == v for side in (before_fields, after_fields)
+                for k, v in side.items())
+        and not any(k in declared for k in one_sided)
+        and all(c in side and side[c] == declared.get(c)
+                for side in (before_fields, after_fields) for c in critical))
     checks["validity_matched"] = (
         m.get("validity") == receipt_validity(after_receipt)
         and all(receipt_validity(r) == m.get("validity") for r in receipts))
@@ -223,11 +231,10 @@ def build_summary(record, text, repo, scope):
         receipt_validity(r)["method"] == "proc-per-pid"
         and receipt_validity(r)["steady_state_observed"] is True
         for r in receipts)
-    # A declared deployment field that no embedded receipt carries is not
-    # checked. Report it so "shape_matched: true" cannot hide the gap (a
-    # native-wake v1 record declares `python` its receipts predate).
-    attested = {k for r in receipts for k in receipt_deployment(r)}
-    unattested = sorted(k for k in (declared or {}) if k not in attested)
+    # Report declared fields not established on BOTH sides: this covers both
+    # the historical both-sides absence (native-wake v1 predates `python`)
+    # and a one-sided field that must not be silently blessed as attested.
+    unattested = sorted(k for k in declared if k not in established)
 
     skipped: list[str] = []
     if repo is None:
