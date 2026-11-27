@@ -1083,13 +1083,33 @@ class QueueStoreTests(unittest.TestCase):
         self.assertEqual(store._refs_to(target_id), [])
         self.assertEqual(list(retire.glob("*.json")), [])
 
+    def test_legacy_retire_intent_still_retires_its_pointer(self):
+        """An intent written before outgoing refs were recorded survives an upgrade."""
+        root = self.root / "retire-legacy"
+        store = QueueStore(root, self.queues)
+        pointers, retire = root / "queues" / "ids", root / "queues" / "retire"
+        legacy_id = "a" * 32
+        pointer = pointers / (legacy_id + ".json")
+        intent = retire / (legacy_id + ".json")
+        atomic_write(pointer, canonical({"queue": "notes", "seq": 1,
+                                         "id_generated": True}))
+        atomic_write(intent, canonical({"id": legacy_id, "queue": "notes", "seq": 1,
+                                        "id_generated": True}))
+        store._reconcile_retirements()
+        self.assertFalse(pointer.exists())
+        self.assertFalse(intent.exists())
+        store._reconcile_retirements()  # no orphan after repeated passes
+        self.assertFalse(pointer.exists())
+        self.assertFalse(intent.exists())
+
     def test_malformed_retire_intent_licenses_no_deletion(self):
         root = self.root / "retire-unsafe"
         store = QueueStore(root, self.queues)
         pointers, retire = root / "queues" / "ids", root / "queues" / "retire"
         cases = [
             {"id": "1" * 32, "queue": "notes", "seq": 1},  # no generated marker or refs
-            {"id": "2" * 32, "queue": "notes", "seq": 1, "id_generated": True},  # no refs
+            {"id": "2" * 32, "queue": "notes", "id_generated": True,
+             "refs": []},  # no seq
             {"id": "3" * 32, "queue": "notes", "seq": 2, "id_generated": True,
              "refs": []},  # wrong seq
             {"id": "4" * 32, "queue": "missing", "seq": 1, "id_generated": True,

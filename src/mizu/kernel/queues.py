@@ -66,6 +66,9 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _DELIVERY_KEYS = frozenset({"unit", "at"})
 _SKIP_KEYS = frozenset({"runs", "gates"})
 _RETIRE_KEYS = frozenset({"id", "queue", "seq", "id_generated", "refs"})
+# Prior versions wrote intents without outgoing refs; accept them so an
+# interrupted removal survives an upgrade and its pointer still retires.
+_LEGACY_RETIRE_KEYS = frozenset({"id", "queue", "seq", "id_generated"})
 _DELIVERY_UNIT_MAX = 128
 _TYPES = ("string", "integer", "boolean", "instant", "digest", "id", "principal", "list")
 _FIELD_KEYS = frozenset({"type", "required", "max", "min", "values", "item", "max_items"})
@@ -1136,17 +1139,19 @@ class QueueStore:
             stored = self._optional_json(self._relative("retire", path.name))
         except (Denied, ValueError, RecursionError):
             return None
-        if (not isinstance(stored, Mapping) or set(stored) != _RETIRE_KEYS
+        if (not isinstance(stored, Mapping)
+                or set(stored) not in (_RETIRE_KEYS, _LEGACY_RETIRE_KEYS)
                 or stored["id"] != path.stem or not isinstance(stored["queue"], str)
                 or stored["queue"] not in self.queues
                 or type(stored["seq"]) is not int or stored["seq"] < 1
-                or type(stored["id_generated"]) is not bool
-                or not isinstance(stored["refs"], list)
-                or len(stored["refs"]) > MAX_REFS
-                or any(not isinstance(ref, str) or not _ID.fullmatch(ref)
-                       for ref in stored["refs"])):
+                or type(stored["id_generated"]) is not bool):
             return None
-        return dict(stored)
+        refs = stored.get("refs", [])
+        if (not isinstance(refs, list) or len(refs) > MAX_REFS
+                or any(not isinstance(ref, str) or not _ID.fullmatch(ref)
+                       for ref in refs)):
+            return None
+        return {**stored, "refs": list(refs)}
 
     @staticmethod
     def _matches_retire_intent(pointer: Mapping, intent: Mapping) -> bool:
