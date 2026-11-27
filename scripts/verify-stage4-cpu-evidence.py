@@ -135,7 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     after_receipt = record["after"].get("embedded_receipt", {})
 
     def receipt_deployment(receipt):
-        return {k: receipt.get(k) for k in DEPLOYMENT_FIELDS}
+        # An absent field means "not recorded" by that receipt, not a claim
+        # of None. Some supported receipts (native-wake v1) predate `python`;
+        # turning its absence into None would reject the shipped record.
+        return {k: receipt[k] for k in DEPLOYMENT_FIELDS if k in receipt}
 
     def receipt_validity(receipt):
         validity = receipt.get("validity") or {}
@@ -143,9 +146,18 @@ def main(argv: list[str] | None = None) -> int:
                 "steady_state_observed": validity.get("steady_state_observed")}
 
     m = record["measurement"]
+    declared = m.get("deployment")
+    # Shape compares every field a receipt actually records against the
+    # declared deployment. Security-critical fields must be present in both
+    # receipts and agree; a receipt that drops `settled` cannot pass by
+    # treating it as "not recorded".
+    critical = ("settled",)
     checks["shape_matched"] = (
-        m.get("deployment") == receipt_deployment(after_receipt)
-        and all(receipt_deployment(r) == m.get("deployment") for r in receipts))
+        bool(declared)
+        and all(declared.get(k) == v for r in receipts
+                for k, v in receipt_deployment(r).items())
+        and all(c in r and r[c] == declared.get(c)
+                for r in receipts for c in critical))
     checks["validity_matched"] = (
         m.get("validity") == receipt_validity(after_receipt)
         and all(receipt_validity(r) == m.get("validity") for r in receipts))
@@ -153,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
         receipt_validity(r)["method"] == "proc-per-pid"
         and receipt_validity(r)["steady_state_observed"] is True
         for r in receipts)
+    # A declared deployment field that no embedded receipt carries is not
+    # checked. Report it so "shape_matched: true" cannot hide the gap (a
+    # native-wake v1 record declares `python` its receipts predate).
+    attested = {k for r in receipts for k in receipt_deployment(r)}
+    unattested = sorted(k for k in (declared or {}) if k not in attested)
 
     skipped: list[str] = []
     if args.repo is None:
@@ -173,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {"schema": record["schema"],
                "scope": "with_git" if args.repo is not None else "tracked_only",
                "checks": checks, "skipped": skipped,
+               "unattested_deployment": unattested,
                "passed": all(checks.values())}
     print(json.dumps(summary, sort_keys=True))
     return 0 if summary["passed"] else 1

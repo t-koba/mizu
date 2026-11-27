@@ -1,4 +1,10 @@
-"""The tracked stage-4 CPU evidence record is path-free, ID-free and tamper-evident."""
+"""Tests for the tracked stage-4 CPU evidence record and its verifier.
+
+The record is path-free and ID-free; its in-record checksums give intra-record
+consistency, and ``--repo`` adds external git-tree source naming. A party that
+can rewrite the record can refresh its checksums, so neither is an authenticity
+proof of the recorded CPU numbers.
+"""
 import hashlib
 import json
 import subprocess
@@ -10,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "verify-stage4-cpu-evidence.py"
 RECORD = ROOT / "docs" / "evidence" / "stage4-cpu-evidence.json"
+NATIVE_RECORD = ROOT / "docs" / "evidence" / "native-wake-cpu-evidence.json"
 
 
 def run_verifier(extra=None):
@@ -195,6 +202,61 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         self.assertTrue(summary["checks"]["before_tree_digest_from_git"])
         self.assertTrue(summary["checks"]["after_tree_digest_from_git"])
         self.assertFalse(summary["passed"])
+
+    def test_absent_noncritical_receipt_field_is_not_a_none_claim(self):
+        # An older supported schema (native-wake) omits `python` from its
+        # receipts. An absent field means "not recorded", not a None claim
+        # that mismatches measurement.deployment; keeping it must pass shape.
+        # Dropping a security-critical field (`settled`) must still fail.
+        base = json.loads(RECORD.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            record = json.loads(json.dumps(base))
+            for side in ("before", "after"):
+                emb = record[side]["embedded_receipt"]
+                emb.pop("python", None)
+                record[side]["embedded_receipt_sha256"] = _canonical_sha(emb)
+            path = Path(tmp) / "record.json"
+            path.write_text(json.dumps(record), encoding="utf-8")
+            kept = run_verifier(["--record", str(path)])
+
+            record = json.loads(json.dumps(base))
+            record["before"]["embedded_receipt"].pop("settled")
+            record["before"]["embedded_receipt_sha256"] = _canonical_sha(
+                record["before"]["embedded_receipt"])
+            path.write_text(json.dumps(record), encoding="utf-8")
+            dropped = run_verifier(["--record", str(path)])
+
+        self.assertEqual(kept.returncode, 0, kept.stderr)
+        kept_summary = json.loads(kept.stdout)
+        self.assertTrue(kept_summary["checks"]["shape_matched"])
+        self.assertEqual(kept_summary["unattested_deployment"], ["python"])
+        self.assertNotEqual(dropped.returncode, 0, dropped.stderr)
+        self.assertFalse(json.loads(dropped.stdout)["checks"]["shape_matched"])
+
+    def test_native_wake_schema_fails_closed_on_settled_forge(self):
+        # Seq 279 forge guard must hold on the second supported schema too:
+        # dropping `settled` from a receipt and refreshing its checksum may
+        # not hide the steady-state precondition behind "not recorded".
+        base = json.loads(NATIVE_RECORD.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "record.json"
+            path.write_text(json.dumps(base), encoding="utf-8")
+            shipped = run_verifier(["--record", str(path)])
+
+            record = json.loads(json.dumps(base))
+            for side in ("before", "after"):
+                emb = record[side]["embedded_receipt"]
+                emb.pop("settled")
+                record[side]["embedded_receipt_sha256"] = _canonical_sha(emb)
+            path.write_text(json.dumps(record), encoding="utf-8")
+            forged = run_verifier(["--record", str(path)])
+
+        self.assertEqual(shipped.returncode, 0, shipped.stderr)
+        shipped_summary = json.loads(shipped.stdout)
+        self.assertTrue(shipped_summary["checks"]["shape_matched"])
+        self.assertEqual(shipped_summary["unattested_deployment"], ["python"])
+        self.assertNotEqual(forged.returncode, 0, forged.stderr)
+        self.assertFalse(json.loads(forged.stdout)["checks"]["shape_matched"])
 
     def test_matched_shape_validity_and_public_commit_anchor(self):
         record = json.loads(RECORD.read_text(encoding="utf-8"))
