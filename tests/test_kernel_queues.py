@@ -2,6 +2,7 @@
 import copy
 import datetime as dt
 import json
+import random
 import tempfile
 import tomllib
 import unittest
@@ -391,6 +392,40 @@ class QueueStoreTests(unittest.TestCase):
             plain_page = store.read(queue, actor, now=now)
         self.assertEqual(store.read(queue, actor, now=now), plain_page)
         return len(loads)  # retention's own cursor check is not a lookup scan
+
+    def test_skip_index_matches_no_index_oracle_after_mutations(self):
+        """A seeded mutation stream keeps the derived index equal to a full scan."""
+        rng = random.Random(219)
+        stamps = (NOW, SOONER, LATER, EVEN_LATER)
+        deadlines = (None, SOONER, LATER, EVEN_LATER)
+        for trial in range(3):
+            store = QueueStore(self.root / f"oracle-{trial}", self.queues)
+            seqs: list[int] = []
+            delivered: set[int] = set()
+            for step in range(12):
+                action = rng.choice(("append", "deliver", "retire")) if seqs else "append"
+                if action == "append":
+                    made = store.append("tasks", BODY, "operator", now=NOW,
+                                        deliver_at=rng.choice(deadlines))
+                    seqs.append(made["seq"])
+                elif action == "deliver":
+                    available = [seq for seq in seqs if seq not in delivered]
+                    if not available:
+                        continue
+                    seq = rng.choice(available)
+                    store.record_delivery("tasks", seq, "role:alpha", "oracle",
+                                          now=rng.choice(stamps), handed=True)
+                    delivered.add(seq)
+                else:
+                    seq = rng.choice(seqs)
+                    message = store._message("tasks", seq)
+                    if message is not None:
+                        store._remove_message("tasks", seq, message)
+                    seqs.remove(seq)
+                    delivered.discard(seq)
+                for stamp in stamps:
+                    with self.subTest(trial=trial, step=step, now=stamp):
+                        self._indexed_lookups(store, "tasks", "role:alpha", stamp)
 
     def test_expired_delayed_head_and_delivered_suffix_skip_independently_of_history(self):
         """An expired delivered deadline joins its delivered run once it is due."""
