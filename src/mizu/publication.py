@@ -1012,12 +1012,22 @@ class Publication:
 
     @classmethod
     def _write_with_key_index(cls, store, record, kind, policy, before_stamp):
-        """Commit a new receipt and its index as one lock-scoped operation."""
+        """Commit a new receipt and its index as one lock-scoped operation.
+
+        A genuine new receipt also establishes its publication's empty CI seek
+        index before the receipt becomes readable. A CI request cannot exist
+        before a valid receipt, so this fact is authoritative at creation and
+        no later lookup needs a capped ledger scan to learn it. Replays return
+        through ``_update_key_index`` and never reach this method.
+        """
+        from .ci_requests import CiRequests
         directory, _, lock_path = _key_index_paths(store)
         mkdir(directory)
         with kernel_lock(lock_path):
             value = cls._prepare_key_index(store, record, kind, policy,
                                            before_stamp, canonical(record))
+            CiRequests(store.root.parent.parent).establish_empty_at_creation(
+                record["publication_id"])
             store._write(kind, record)
             cls._write_key_index(store, value)
 

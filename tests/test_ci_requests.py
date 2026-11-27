@@ -933,6 +933,18 @@ class CiRequestTests(Fixture):
             pages = store.matching_many({"head": ([publication], dt.date(2026, 10, 1))})
         self.assertEqual(pages, {"head": {"items": [fresh], "incomplete": False}})
 
+    def make_legacy_publication(self, publication_id):
+        """Model a receipt written before creation-time certification existed."""
+        path = CiRequests(self.project.root)._seek_path(publication_id)
+        self.assertTrue(path.exists())
+        path.unlink()
+        # Leave no empty ledger behind either: a legacy publication predates
+        # both the index directory and its creation-time certification.
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
+        with contextlib.suppress(OSError):
+            path.parent.parent.rmdir()
+
     def write_activity(self):
         path = self.project.root / ACTIVITY
         mkdir(path.parent)
@@ -980,7 +992,7 @@ class CiRequestTests(Fixture):
         self.write_activity()
         receipt = self.fresh_receipt()
         publication = receipt["publication_id"]
-        self.assertFalse(store._seek_path(publication).exists())
+        self.make_legacy_publication(publication)
         for number in range(3):
             self.unrelated_marker(store, f"{number:040x}")
         # A controlled over-cap name list proves the shared reader would be
@@ -1023,6 +1035,7 @@ class CiRequestTests(Fixture):
         self.write_activity()
         mkdir(store.root)
         publication = self.fresh_receipt()["publication_id"]
+        self.make_legacy_publication(publication)
         instant = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
         stamp = dt.datetime(2026, 5, 31, tzinfo=dt.timezone.utc)
         epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
@@ -1052,6 +1065,7 @@ class CiRequestTests(Fixture):
         self.write_activity()
         mkdir(store.root)
         publication = self.fresh_receipt()["publication_id"]
+        self.make_legacy_publication(publication)
         instant = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
         stamp = dt.datetime(2026, 5, 31, tzinfo=dt.timezone.utc)
         epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
@@ -1077,6 +1091,7 @@ class CiRequestTests(Fixture):
         self.write_activity()
         receipt = self.fresh_receipt()
         publication = receipt["publication_id"]
+        self.make_legacy_publication(publication)
         instant = dt.datetime.fromisoformat(receipt["recorded_at"])
         other = "f" * 64
         other_identity = request_id(other, SHA, ["ci"])
@@ -1124,6 +1139,7 @@ class CiRequestTests(Fixture):
         mkdir(store.root)  # An empty ledger can be certified locally.
         receipt = self.fresh_receipt()
         publication = receipt["publication_id"]
+        self.make_legacy_publication(publication)
         instant = dt.datetime.fromisoformat(receipt["recorded_at"])
         later = instant + dt.timedelta(days=1)
         delta = later - dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
@@ -1153,12 +1169,14 @@ class CiRequestTests(Fixture):
         store = CiRequests(self.project.root, CiRequestEvidence())
         self.write_activity()
         publication = self.fresh_receipt()["publication_id"]
+        self.make_legacy_publication(publication)
         stamp = dt.datetime(2036, 10, 22, 12, tzinfo=dt.timezone.utc)
         epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
         delta = stamp - epoch
         stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
                     + delta.microseconds * 1000)
-        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns), \
+                patch.object(store, "establish_publication_empty", return_value=False):
             with patch.object(store, "_rows", return_value=([], True)) as scan:
                 page = store.matching([publication], not_before=stamp)
             self.assertTrue(page["incomplete"])
@@ -1319,6 +1337,7 @@ class CiRequestTests(Fixture):
                                      name_processing_limit=100, record_limit=100)
         store = CiRequests(self.project.root, policy)
         target = self.receipt["publication_id"]
+        self.make_legacy_publication(target)
         legacy_identity = request_id(target, OTHER_SHA, ["ci"])
         mkdir(store.root)
         write_json(store.root / f"{legacy_identity}.dispatch.json", {
@@ -1388,6 +1407,7 @@ class CiRequestTests(Fixture):
         policy = dataclasses.replace(self.config.ci_requests, record_limit=1)
         store = CiRequests(self.project.root, policy)
         publication = self.receipt["publication_id"]
+        self.make_legacy_publication(publication)
         mkdir(store.root)
         for sha in (SHA, OTHER_SHA):
             identity = request_id(publication, sha, ["ci"])
@@ -1483,6 +1503,7 @@ class CiRequestTests(Fixture):
     def test_matching_scans_newest_first_and_stops_at_the_window(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]
+        self.make_legacy_publication(publication_id)
         other = "f" * 64
         rows = [
             {"date": "2026-09-30", "request_id": "older-match", "publication_id": publication_id},
@@ -1498,6 +1519,7 @@ class CiRequestTests(Fixture):
     def test_matching_many_filters_distinct_windows_in_one_scan(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]
+        self.make_legacy_publication(publication_id)
         other = "f" * 64
         rows = [
             {"date": "2026-09-30", "request_id": "older-match", "publication_id": publication_id},
@@ -1520,6 +1542,7 @@ class CiRequestTests(Fixture):
     def test_matching_fails_closed_on_stopped_or_unreadable_scan(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]
+        self.make_legacy_publication(publication_id)
         rows = [{"date": "2026-10-02", "request_id": "match",
                  "publication_id": publication_id}]
         with patch.object(store, "_rows", return_value=(rows, True)):
@@ -1555,6 +1578,7 @@ class CiRequestTests(Fixture):
     def test_matching_fails_closed_for_unreadable_dispatch_marker(self):
         store = CiRequests(self.project.root)
         publication_id = self.receipt["publication_id"]
+        self.make_legacy_publication(publication_id)
         identity = request_id(publication_id, SHA, ["ci"])
         mkdir(store.root)
         store._path(identity, "dispatch").write_text("{not-valid-json")
@@ -1941,3 +1965,94 @@ class CiRequestTests(Fixture):
         self.assertEqual(out["days"][0]["requests"], 1)
         with self.assertRaises(Denied):
             ctx.handle("vcs_read", {"op": "ci_requests", "branch": "mizu"})
+
+    def over_cap_ledger(self, store):
+        """Write name-limit + 1 valid, unrelated dispatch markers."""
+        other = "f" * 64
+        for number in range(store.policy.name_processing_limit + 1):
+            sha = f"{number:040x}"
+            identity = request_id(other, sha, ["ci"])
+            write_json(store.root / f"{identity}.dispatch.json", {
+                "request_id": identity, "publication_id": other, "sha": sha,
+                "workflows": ["ci"], "dispatched_at": "2026-01-01T00:00:00+00:00"})
+        self.assertTrue(store._rows()[1])
+
+    def published_head(self):
+        """Publish through the real prepare/dispatch/complete receipt path."""
+        publication = Publication(self.project.root, "e" * 40, "2" * 64, "published",
+                                  "push", projection=public_source_identity({}))
+        intent, _ = publication.prepare("approval", "run")
+        publication.mark_dispatch()
+        return publication.complete(intent, SHA)
+
+    def test_creation_index_proves_empty_despite_over_cap_shared_ledger(self):
+        policy = dataclasses.replace(self.config.ci_requests,
+                                     name_processing_limit=100, record_limit=100)
+        store = CiRequests(self.project.root, policy)
+        self.over_cap_ledger(store)
+        publication = self.published_head()["publication_id"]
+        instant = dt.datetime(2026, 10, 22, tzinfo=dt.timezone.utc)
+        self.write_activity()  # An unrelated observation after creation cannot matter.
+        self.assertEqual(read_json(store._seek_path(publication)), {
+            "version": ci_requests.SEEK_VERSION, "publication_id": publication, "entries": []})
+        self.assertFalse(store._fresh_activity(instant))
+        # The operator's fixed check: no_evidence=true / may_be_incomplete=false.
+        # The ci_requests page is the offline source of truth for that shape.
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")), \
+                patch.object(store, "_seek_certifiable",
+                             side_effect=AssertionError("ledger certification used")), \
+                patch.object(store, "_read", side_effect=AssertionError("dispatch read used")):
+            page = store.matching_many({"head": ([publication], instant)})["head"]
+        self.assertEqual(page, {"items": [], "incomplete": False})
+
+    def test_first_dispatch_grows_creation_index_without_a_shared_scan(self):
+        policy = dataclasses.replace(self.config.ci_requests,
+                                     name_processing_limit=100, record_limit=100)
+        store = CiRequests(self.project.root, policy)
+        self.over_cap_ledger(store)
+        publication = self.published_head()["publication_id"]
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        entry = {"request_id": identity, "date": "2026-10-20"}
+        self.assertEqual(read_json(store._seek_path(publication))["entries"], [entry])
+        # A replay of creation is create-only: it cannot clobber a grown index.
+        self.assertTrue(store.establish_empty_at_creation(publication))
+        self.assertEqual(read_json(store._seek_path(publication))["entries"], [entry])
+        self.assertFalse(store.establish_empty_at_creation("not-a-publication-id"))
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")), \
+                patch.object(store, "_seek_certifiable",
+                             side_effect=AssertionError("ledger certification used")):
+            page = store.matching_many(
+                {"head": ([publication], dt.date(2026, 10, 20))})["head"]
+        self.assertEqual(page, {"items": [identity], "incomplete": False})
+
+    def test_indexless_legacy_publication_stays_incomplete_over_cap(self):
+        policy = dataclasses.replace(self.config.ci_requests,
+                                     name_processing_limit=100, record_limit=100)
+        store = CiRequests(self.project.root, policy)
+        self.over_cap_ledger(store)
+        legacy = "9" * 64  # No creation-time index: a pre-mechanism publication.
+        self.assertFalse(store._seek_path(legacy).exists())
+        with patch.object(store, "_rows", wraps=store._rows) as scan:
+            page = store.matching_many({"head": ([legacy], dt.date(2026, 1, 1))})["head"]
+        scan.assert_called_once()
+        self.assertEqual(page, {"items": [], "incomplete": True})
+        self.assertFalse(store._seek_path(legacy).exists())
+
+    def test_a_publication_seeded_ledger_has_a_stable_activity_identity(self):
+        # Creation seeds the ledger directory but no request token exists yet.
+        # Consumers of activity() must still get an identity that changes on
+        # the first request, as it did before ledgers were seeded at creation.
+        store = CiRequests(self.project.root)
+        publication = self.published_head()["publication_id"]
+        self.assertTrue(store.root.is_dir())
+        self.assertFalse((self.project.root / ACTIVITY).exists())
+        before = store.activity()
+        self.assertEqual(before, store.activity())
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-10-20T00:00:00+00:00"})
+        self.assertNotEqual(store.activity(), before)

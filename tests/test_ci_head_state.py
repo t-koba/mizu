@@ -54,6 +54,24 @@ class CiHeadStateTests(Fixture):
                 code_digest=code_digest, approval="approval", source_commit=SOURCE,
                 projection=public_source_identity({}))
 
+    def make_legacy_head(self, receipt):
+        """Model a publication written before creation-time emptiness certification.
+
+        Its empty seek index is removed so matching_many falls through to the
+        conservative shared scan, which is what these fail-closed tests target.
+        """
+        path = CiRequests(self.project.root)._seek_path(receipt["publication_id"])
+        self.assertTrue(path.exists())
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        try:
+            path.parent.parent.rmdir()
+        except OSError:
+            pass
+
     def request(self, sha, receipt, *, dispatched_at="2026-10-20T00:00:00+00:00"):
         identity = request_id(receipt["publication_id"], sha, ["ci"])
         CiRequests(self.project.root, self.config.ci_requests).mark_dispatch(identity, {
@@ -275,6 +293,7 @@ class CiHeadStateTests(Fixture):
 
     def test_unreadable_or_truncated_evidence_is_incomplete_not_success(self):
         head = self.receipt(SHA)
+        self.make_legacy_head(head)
         write_json(self.project.root / "vcs-poll.json", "[")
         row = self.facts()[0]
         self.assertEqual(row["revision"], SHA)
@@ -345,7 +364,7 @@ class CiHeadStateTests(Fixture):
         self.assertEqual(observed["query"][1], recorded)
 
     def test_stopped_or_unreadable_head_request_scan_is_incomplete(self):
-        self.receipt(SHA)
+        self.make_legacy_head(self.receipt(SHA))
         with patch("mizu.ci_requests.CiRequests._rows", return_value=([], True)):
             row = self.facts()[0]
         self.assertTrue(row["no_evidence"])

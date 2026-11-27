@@ -340,6 +340,30 @@ class CiRequests:
         mkdir(self.root / SEEK_DIR)
         write_json(self._seek_path(publication), index)
 
+    def establish_empty_at_creation(self, publication_id: str) -> bool:
+        """Create a durable empty seek index for a brand-new publication.
+
+        The publication writer calls this while holding its receipt lock and
+        before the receipt becomes readable. ``_op_vcs_request`` refuses to
+        request CI without a valid receipt, so no request for this publication
+        can predate this fact. Emptiness therefore needs no ledger scan and no
+        global activity token here, and unrelated request writes cannot revoke
+        it. Create-only and idempotent: an existing index is never touched, so
+        a dispatch that has already grown it cannot lose its entries. Legacy
+        publications, which have no index at creation, keep the conservative
+        lookup-time certification and shared scan.
+        """
+        if not isinstance(publication_id, str) or not _HEX64.fullmatch(publication_id):
+            return False
+        with lock(self.lock):
+            if self._seek_path(publication_id).exists():
+                return True
+            mkdir(self.root / SEEK_DIR)
+            write_json(self._seek_path(publication_id), {
+                "version": SEEK_VERSION, "publication_id": publication_id, "entries": []},
+                exclusive=True)
+            return True
+
     def establish_publication_empty(self, publication_id: str) -> bool:
         """Record a certified publication's known emptiness as a durable index.
 
@@ -417,7 +441,12 @@ class CiRequests:
         return rows, invalid
 
     def activity(self) -> str:
-        """Cheap local identity, not proof the ledger was read or is quiet."""
+        """Cheap local identity, not proof the ledger was read or is quiet.
+
+        A ledger seeded by a receipt's empty seek index has no activity token
+        until the first request; like legacy records, it uses the absent-token
+        generation. The directory identity still changes on every request write.
+        """
         try:
             info = self.root.lstat()
         except FileNotFoundError:
@@ -425,10 +454,11 @@ class CiRequests:
         if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise Denied("Invalid CI request evidence directory")
         try:
-            generation = loads_finite(safe_read(self.project_root, ACTIVITY, 64))
+            (self.project_root / ACTIVITY).lstat()
         except FileNotFoundError:
-            generation = None  # Legacy records predate the invalidation token.
+            generation = None  # Legacy records and ledgers not yet written to.
         else:
+            generation = loads_finite(safe_read(self.project_root, ACTIVITY, 64))
             if not isinstance(generation, str) or not _ACTIVITY_TOKEN.fullmatch(generation):
                 raise Denied("Invalid CI request activity token")
         return digest(canonical([generation, info.st_dev, info.st_ino,
