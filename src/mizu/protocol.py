@@ -603,7 +603,8 @@ DEFINITIONS = {
                      obj({"id": KERNEL_ID_SCHEMA}, ("id",))),
     "message_refs": ("List messages referring to id, or that id refers to, in either direction "
                      "('to' or 'from'), bounded and paged by message id. Only messages your role "
-                     "may read are returned.",
+                     "may read are returned; pending bodies are withheld until they are due, and "
+                     "due bodies handed back are recorded as delivered.",
                      obj({"id": KERNEL_ID_SCHEMA,
                           "direction": {"type": "string", "enum": ["to", "from"]},
                           "cursor": KERNEL_ID_SCHEMA,

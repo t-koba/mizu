@@ -14,7 +14,8 @@ from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.fs import atomic_write, canonical
 from mizu.kernel import QueueStore, parse_queues
-from mizu.kernel.queues import MAX_REFS, MAX_RETENTION_SCAN, PAGE_DEFAULT, PAGE_MAX, _instant
+from mizu.kernel.queues import (MAX_REFS, MAX_RETENTION_SCAN, PAGE_DEFAULT, PAGE_MAX,
+                                _DELIVERY_UNIT_MAX, _instant)
 from mizu.project import Project
 
 DECLARATIONS = tomllib.loads('''
@@ -500,7 +501,7 @@ class QueueStoreTests(unittest.TestCase):
         # Once due and delivered, the tail's earlier fact becomes reachable and
         # the scan is clean at the later observation time too.
         self.deliver(self.store, "tasks", delayed, readers=("role:alpha",), now=LATER)
-        self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+        self.assertEqual(self.store.pending("tasks", "role:alpha", now=LATER)["count"], 0)
         self.assertIsNone(self.store.next_delivery("tasks", "role:alpha", now=LATER))
 
     def test_delivery_facts_are_durable_and_idempotent(self):
@@ -562,15 +563,18 @@ class QueueStoreTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(Denied):
                 self.store.message(delayed["id"], "role:alpha", now=NOW, **options)
             self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
-        # An authorized reader can still follow a pending reference by id.
+        # An authorized reader can still find a pending reference by id, but
+        # the listing withholds its body and records no handoff.
         reply = self.store.append("tasks", BODY, "role:alpha", now=NOW,
                                   refs=[delayed["id"]])
         self.assertEqual([m["id"] for m in
-                          self.store.refs(delayed["id"], "to", "role:alpha")["messages"]],
+                          self.store.refs(delayed["id"], "to", "role:alpha",
+                                          now=NOW)["messages"]],
                          [reply["id"]])
-        self.assertEqual([m["id"] for m in
-                          self.store.refs(reply["id"], "from", "role:alpha")["messages"]],
-                         [delayed["id"]])
+        pending = self.store.refs(reply["id"], "from", "role:alpha", now=NOW)["messages"]
+        self.assertEqual([m["id"] for m in pending], [delayed["id"]])
+        self.assertNotIn("body", pending[0])
+        self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
         # No grant bypass at the deadline, with or without a delivery unit.
         for options in ({}, {"unit": "probe"}):
             with self.subTest(options=options), self.assertRaises(Denied):
@@ -589,6 +593,40 @@ class QueueStoreTests(unittest.TestCase):
         self.assertEqual(self.store._delivery("tasks", delayed["seq"], "role:alpha"),
                          {"unit": "probe", "at": LATER})
         self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+
+    def test_reference_listing_honours_release_time_and_accounts_handoff(self):
+        delayed = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        reply = self.store.append("tasks", BODY, "role:beta", now=NOW,
+                                  refs=[delayed["id"]])
+        for options in ({}, {"unit": "probe"}):
+            with self.subTest(options=options):
+                rows = self.store.refs(reply["id"], "from", "role:alpha",
+                                       now=NOW, **options)["messages"]
+                self.assertEqual([m["id"] for m in rows], [delayed["id"]])
+                self.assertNotIn("body", rows[0])
+                self.assertEqual(rows[0]["deliver_at"], LATER)
+                self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
+        # A due reference in the other direction is an actual handoff when a
+        # unit is supplied; its delivery fact consumes the wake.
+        rows = self.store.refs(delayed["id"], "to", "role:alpha", now=NOW,
+                               unit="probe")["messages"]
+        self.assertEqual(rows, [reply])
+        self.assertEqual(self.store._delivery("tasks", reply["seq"], "role:alpha"),
+                         {"unit": "probe", "at": NOW})
+        # Exact deadline: a pure listing hands the body over but credits
+        # nothing; a unit listing then credits it once and consumes the wake.
+        rows = self.store.refs(reply["id"], "from", "role:alpha", now=LATER)["messages"]
+        self.assertEqual(rows, [delayed])
+        self.assertFalse(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
+        rows = self.store.refs(reply["id"], "from", "role:alpha", now=LATER,
+                               unit="probe")["messages"]
+        self.assertEqual(rows, [delayed])
+        self.assertEqual(self.store._delivery("tasks", delayed["seq"], "role:alpha"),
+                         {"unit": "probe", "at": LATER})
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=LATER))
+        for options in ({"unit": 3}, {"unit": "x" * (_DELIVERY_UNIT_MAX + 1)}):
+            with self.subTest(options=options), self.assertRaises(Denied):
+                self.store.refs(reply["id"], "from", "role:alpha", now=LATER, **options)
 
     def test_pages_are_bounded_and_paged(self):
         for index in range(PAGE_MAX + 3):

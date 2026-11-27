@@ -1023,12 +1023,13 @@ class QueueStore:
                                      stamp.isoformat(timespec="seconds"))
         return message
 
-    def refs(self, id: str, direction: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT) -> dict:
-        """List readable messages referring to ``id``, or those ``id`` refers to.
+    def refs(self, id: str, direction: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT,
+             unit=None, now=None) -> dict:
+        """List readable references to ``id``, or those ``id`` refers to.
 
-        Listing is a lookup, not a reader handoff: it stays usable for pending
-        delayed messages, whose bodies only become handoff-eligible by
-        ``message`` once due.
+        Pending references stay discoverable, but their bodies are withheld
+        until the release time. A due body handed back to a role is credited
+        when ``unit`` names the consuming operation, as other read paths do.
         """
         message = self._read_by_id(id, actor)
         if direction not in ("to", "from"):
@@ -1037,6 +1038,10 @@ class QueueStore:
             raise Denied(f"limit must be from 1 to {PAGE_MAX}")
         if cursor is not None and (not isinstance(cursor, str) or not _ID.fullmatch(cursor)):
             raise Denied("cursor must be a message id")
+        if unit is not None and (not isinstance(unit, str) or len(unit) > _DELIVERY_UNIT_MAX
+                                 or "\x00" in unit):
+            raise Denied("delivery unit must be a bounded string")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         if direction == "from":
             ids = sorted(set(message["refs"]))
         else:
@@ -1055,6 +1060,15 @@ class QueueStore:
                 continue
             if referred is None or not allows(self._decl(referred["queue"]).read, actor):
                 continue
+            if not self._due(referred, stamp):
+                # Discovery without handoff: identify the pending reference,
+                # never expose the body or credit delivery before release.
+                rows.append({key: value for key, value in referred.items() if key != "body"})
+                continue
+            if unit is not None:
+                with self._locked():
+                    self._write_delivery(referred["queue"], referred["seq"], actor, unit,
+                                         stamp.isoformat(timespec="seconds"))
             rows.append(referred)
         more = head is not None and last is not None and last < head
         return {"messages": rows, "next": last, "head": head, "more": more}

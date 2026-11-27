@@ -92,6 +92,26 @@ class QueueTools(Fixture):
             "message_refs", {"id": target["id"], "direction": "to"})["messages"]],
             [reply["id"]])
 
+    def test_message_refs_withholds_pending_body_and_credits_due(self):
+        ctx = self.granted()
+        pending = ctx.handle("queue_write", {
+            "queue": "notes", "body": {"title": "pending"},
+            "deliver_at": "2099-01-01T00:00:00+00:00"})
+        reply = ctx.handle("queue_write", {
+            "queue": "notes", "body": {"title": "reply"}, "refs": [pending["id"]]})
+        store = self.project.kernel_queues
+        # An append credits its author; clear that fact so the listing below
+        # is the first actual handoff of the due reply body.
+        store._remove_delivery("notes", reply["seq"])
+        rows = ctx.handle("message_refs", {"id": reply["id"], "direction": "from"})["messages"]
+        self.assertEqual([m["id"] for m in rows], [pending["id"]])
+        self.assertNotIn("body", rows[0])
+        self.assertFalse(store.delivered("notes", pending["seq"], "role:worker"))
+        rows = ctx.handle("message_refs", {"id": pending["id"], "direction": "to"})["messages"]
+        self.assertEqual(rows, [reply])
+        self.assertTrue(store.delivered("notes", reply["seq"], "role:worker"))
+        self.assertEqual(self.delivery_unit("notes", reply["seq"]), ctx.run_dir.name)
+
     def test_capability_and_queue_grants(self):
         denied = self.context("consult")
         with self.assertRaisesRegex(Denied, "no capability"):

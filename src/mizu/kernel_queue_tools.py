@@ -48,7 +48,7 @@ def message_read(context, args: dict) -> dict:
 
 def message_refs(context, args: dict) -> dict:
     _gate(context, "message_refs", args)
-    options = {"cursor": args.get("cursor")}
+    options = {"cursor": args.get("cursor"), "unit": context.run_dir.name}
     if "limit" in args:
         options["limit"] = args["limit"]
     return context.project.kernel_queues.refs(
