@@ -260,6 +260,12 @@ class ProgressAdmissionTests(Fixture):
         self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
+    def test_continue_without_qualifying_signal_parks_without_a_deadline(self):
+        snapshot = self._recorded_run()
+        self.assertEqual(progress_disposition(snapshot["progress"], "continue", self.config, "worker"),
+                         "parked_no_progress")
+        self.assertIsNone(snapshot["wake_at"])
+
     def test_operator_wake_offered_to_run_counts_as_input(self):
         base = self._baseline()
         self.project.set_control(wake_generation="operator-woke")

@@ -150,17 +150,34 @@ class FinishOutcomeContractTests(Fixture):
                     limited.finish_outcomes, self.config, limited)
                 self.assertNotIn(fact, text)
 
+    def test_next_step_field_description_tracks_continuation(self):
+        carries = "Carries the continuation handoff."
+        recorded = "Recorded in this unit's snapshot; applies no handoff here."
+        role = self.config.roles["consult"]
+        writer = replace(role, workspace="write")
+
+        def description(unit):
+            [finish] = tool_definitions(("finish",), role=unit, config=self.config)
+            return finish["inputSchema"]["properties"]["next_step"]["description"]
+
+        self.assertEqual(description(writer), carries)
+        for outcomes in (("wait", "done"), ("blocked", "done")):
+            with self.subTest(outcomes=outcomes):
+                self.assertEqual(description(replace(writer, finish_outcomes=outcomes)), recorded)
+        self.assertEqual(description(role), recorded)
+
     def test_next_step_readiness_fact_tracks_configured_signals(self):
         role = self.configure(limits='progress_signals = ["code"]\n')
         writer = replace(role, workspace="write")
         prefix = "Immediate next-step handoff after continue requires "
+        contract = _writer_continuation_contract(
+            writer.finish_outcomes, self.config, writer)
         self.assertIn(prefix + "a step differing from the published parent's step, "
                       "continue in the configured no-progress outcomes, and a selected "
                       "work signal among code; when any requirement is unmet, no handoff "
-                      "occurs and the configured default wait of 1800 seconds applies "
-                      "until a ready work item or another wake.",
-                      _writer_continuation_contract(
-                          writer.finish_outcomes, self.config, writer))
+                      "occurs and the unit parks with no deadline until a ready work item "
+                      "or another wake.", contract)
+        self.assertNotIn("default wait", contract.split(prefix, 1)[1])
         narrowed = replace(writer, progress_signals=("state",))
         self.assertIn(prefix + "a step differing from the published parent's step, a "
                       "configured no-progress outcome and qualifying work signal, but "

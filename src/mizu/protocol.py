@@ -44,6 +44,15 @@ def _wait_seconds_limit(config, name: str) -> int:
     return value if type(value) is int and 1 <= value <= MAX_WAIT_SECONDS else fallback
 
 
+def _next_step_carries_handoff(outcomes: tuple[str, ...], config: Config | None = None,
+                               role: Role | None = None) -> bool:
+    """True only when this unit can actually hand off through next_step."""
+    writer = role is None or getattr(role, "workspace", None) == "write"
+    continuation = outcome_effects(config, role).continuation
+    return writer and any(outcome in continuation
+                          for outcome in FINISH_OUTCOMES if outcome in outcomes)
+
+
 def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | None = None,
                                   role: Role | None = None) -> str:
     """State the resolved scheduler effects of the available finish outcomes."""
@@ -88,7 +97,8 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
         if "check_job" in (getattr(role, "capabilities", ()) or ()):
             parts.append("wait_for_check selects a check job owned by this unit.")
     if any(outcome in positive["continuation"] for outcome in selected):
-        parts.append("next_step carries the continuation handoff." if writer
+        parts.append("next_step carries the continuation handoff."
+                     if _next_step_carries_handoff(selected, config, role)
                      else "next_step is recorded but applies no handoff here.")
     if writer and "continue" in selected and "continue" in positive["continuation"]:
         signals = [name for name in role_progress_signals(config, role)
@@ -101,11 +111,9 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
             condition = ("a step differing from the published parent's step, a "
                          "configured no-progress outcome and qualifying work signal, "
                          "but none applies")
-        default = _wait_seconds_limit(config, "default_wait_seconds")
         parts.append("Immediate next-step handoff after continue requires " + condition
-                     + f"; when any requirement is unmet, no handoff occurs and the "
-                     f"configured default wait of {default} seconds applies until a "
-                     "ready work item or another wake.")
+                     + "; when any requirement is unmet, no handoff occurs and the "
+                     "unit parks with no deadline until a ready work item or another wake.")
     return " ".join(parts)[:MAX_FINISH_EFFECT_CONTRACT_CHARS]
 
 
@@ -258,7 +266,7 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
                              f"omitted values use the configured default of {default_wait}.")},
         "next_step": {**text(4096), "minLength": 1,
                       "description": ("Carries the continuation handoff."
-                                      if role is None or getattr(role, "workspace", None) == "write"
+                                      if _next_step_carries_handoff(outcomes, config, role)
                                       else "Recorded in this unit's snapshot; applies no handoff here.")},
         "next_profile": text(63), "next_reason": text(256),
     }
