@@ -562,6 +562,29 @@ class QueueStoreTests(unittest.TestCase):
                 self._indexed_lookups(store, "tasks", "role:alpha", LATER)
                 self.assertEqual(path.read_bytes(), payload)
 
+    def test_lookup_projections_never_write_queue_state(self):
+        """Read projections stay read-only even on a legacy skip index."""
+        store = QueueStore(self.root / "readonly", self.queues)
+        delayed = store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        store.record_delivery("tasks", delayed["seq"], "role:alpha", "opening",
+                              now=NOW, handed=True)
+        path = self.root / "readonly" / "queues" / "tasks" / "skip" / "role_alpha.json"
+        stored = json.loads(path.read_text())
+        atomic_write(path, canonical({"runs": stored["runs"], "gates": stored["gates"]}))
+        before = {child: child.read_bytes() for child in self.root.rglob("*")
+                  if child.is_file()}
+
+        with patch.object(queue_module, "atomic_write",
+                          side_effect=AssertionError("read-only lookup wrote")):
+            store.pending("tasks", "role:alpha", newest=0, now=NOW)
+            store.due("tasks", "role:alpha", now=NOW)
+            store.next_delivery("tasks", "role:alpha", now=NOW)
+
+        after = {child: child.read_bytes() for child in self.root.rglob("*")
+                 if child.is_file()}
+        self.assertEqual(after, before)
+        self.assertNotIn("until", json.loads(path.read_text()))
+
     def test_corrupt_skip_index_fails_closed_to_a_full_scan(self):
         """Malformed derived state never licenses skipping undelivered rows."""
         message = self.store.append("tasks", BODY, "operator", now=NOW)

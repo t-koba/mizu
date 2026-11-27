@@ -698,11 +698,8 @@ class QueueStore:
             gates.append((item[0], item[1]))
             previous = item[0]
         if stamp is not None and compact and legacy:
-            if deadlines:
-                until = gates[max(range(len(deadlines)),
-                                  key=lambda i: deadlines[i])][1]
-            else:
-                until = None
+            until = (max(zip(deadlines, gates), key=lambda pair: pair[0])[1][1]
+                     if deadlines else None)
             atomic_write(self._skip_path(queue, actor),
                          canonical({"runs": [list(run) for run in runs],
                                     "gates": [list(gate) for gate in gates],
@@ -851,8 +848,8 @@ class QueueStore:
         delivered to ``actor``, and ends at a not-yet-due message (head-of-line)
         or the queue head. A delivered prefix is skipped, not counted, so it
         cannot hide a later undelivered message. ``messages`` holds the oldest
-        ``newest`` (0..PAGE_MAX) of the counted messages. No delivery or body
-        is written; the derived skip index may gain an until field, never dropping gates.
+        ``newest`` (0..PAGE_MAX) of the counted messages. Read-only: no lock,
+        no delivery, no body or index write.
         """
         declaration = self._grant(queue, actor, write=False)
         if type(newest) is not int or not 0 <= newest <= PAGE_MAX:
@@ -860,9 +857,7 @@ class QueueStore:
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        with self._locked():
-            index = self._skip_index(declaration.name, actor, head,
-                                     stamp=stamp, compact=True)
+        index = self._skip_index(declaration.name, actor, head, stamp=stamp)
         count, rows = 0, []
         # Count undelivered messages, not examined positions: a delivered
         # run of any length cannot hide the next undelivered message.
@@ -892,16 +887,14 @@ class QueueStore:
         when it is delivered. Besides the queue's ``wake`` list, a reply wakes
         the author of the message it refers to (see ``_wakes``), so a thread
         reaches whoever started it. An undelivered message stays read-pending;
-        it just does not wake again. No delivery or body is written; the
-        derived skip index may gain an until field, never dropping gates.
+        it just does not wake again. Read-only: no lock, no delivery, no body
+        or index write.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        with self._locked():
-            index = self._skip_index(declaration.name, actor, head,
-                                     stamp=stamp, compact=True)
+        index = self._skip_index(declaration.name, actor, head, stamp=stamp)
         # Scan to the head, stopping at the first not-yet-due message. A long
         # delivered run is skipped, not counted, so it cannot hide a wake.
         while seq < head:
@@ -1025,16 +1018,13 @@ class QueueStore:
         checked. Retry/cancellation: none. Evidence: the message's stored
         ``deliver_at`` field. Failure: raises ``Denied`` for an undeclared
         queue, an invalid actor, a missing read grant or a corrupt
-        ``deliver_at``. Records no delivery or body write; the derived skip
-        index may gain an until field, under the lock, never dropping gates.
+        ``deliver_at``. Read-only: no lock, no delivery, no body or index write.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        with self._locked():
-            index = self._skip_index(declaration.name, actor, head,
-                                     stamp=stamp, compact=True)
+        index = self._skip_index(declaration.name, actor, head, stamp=stamp)
         # As in ``due``, delivered rows are skipped without ending the scan,
         # so a delivered run cannot hide a later actionable deadline.
         while seq < head:
