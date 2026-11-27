@@ -88,7 +88,8 @@ class FinishOutcomeContractTests(Fixture):
         self.assert_resolved(text, self.config, role)
         self.assertEqual(described(text)["done"], set())
         self.assertNotIn("47 seconds", text)
-        self.assertIn(f"the configured default wait is {Limits().default_wait_seconds} seconds", text)
+        self.assertIn("no wake deadline for a read-only unit", text)
+        self.assertIn(str(Limits().default_wait_seconds), text)
         self.assertNotIn("waiting:", text)
         self.assertNotIn("ready_check:", text)
 
@@ -101,7 +102,8 @@ class FinishOutcomeContractTests(Fixture):
             self.assertFalse(names & set(WRITER_ONLY))
         self.assertNotIn("parks this unit", text)
         self.assertNotIn("Waiting outcomes park", text)
-        self.assertIn("wait_seconds sets a wake deadline", text)
+        self.assertIn("no wake deadline for a read-only unit", text)
+        self.assertNotIn("sets a wake deadline", text)
         self.assertNotIn("wait_for_check selects", text)
         [finish] = tool_definitions(("finish",), role=role, config=self.config)
         self.assertIn("\n\n" + text + "\n\n", finish["description"])
@@ -132,6 +134,34 @@ class FinishOutcomeContractTests(Fixture):
         text = _writer_continuation_contract(no_wait.finish_outcomes, self.config, no_wait)
         self.assertNotIn(fact, text)
         self.assertNotIn("wait_seconds", text)
+
+    def test_wait_deadline_claim_tracks_the_scheduler_branch(self):
+        """wait_seconds promises a deadline only where one is scheduled: a
+        writer's wake_at, or a check-wait timeout, never an ordinary read."""
+        writer_claim = "sets a wake deadline of at most"
+        check_claim = "bounds the check-wait timeout of at most"
+        reader_claim = "no wake deadline for a read-only unit without check_job"
+        role = self.config.roles["consult"]
+        checker = replace(role, capabilities=(*role.capabilities, "check_job"))
+        writer = replace(role, workspace="write")
+        cases = (
+            (writer, writer_claim, "Sets a wake deadline of at most",
+             (check_claim, reader_claim)),
+            (checker, check_claim, "Bounds the check-wait timeout at most",
+             (writer_claim, reader_claim)),
+            (role, reader_claim, "schedules no wake deadline",
+             (writer_claim, check_claim)),
+        )
+        for unit, claim, field_claim, forbidden in cases:
+            with self.subTest(workspace=unit.workspace, caps=unit.capabilities):
+                contract = _writer_continuation_contract(
+                    unit.finish_outcomes, self.config, unit)
+                self.assertIn(claim, contract)
+                for phrase in forbidden:
+                    self.assertNotIn(phrase, contract)
+                [finish] = tool_definitions(("finish",), role=unit, config=self.config)
+                field = finish["inputSchema"]["properties"]["wait_seconds"]["description"]
+                self.assertIn(field_claim, field)
 
     def test_next_step_fact_tracks_continuation(self):
         fact = "next_step carries the continuation handoff."

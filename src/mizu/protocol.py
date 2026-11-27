@@ -44,6 +44,38 @@ def _wait_seconds_limit(config, name: str) -> int:
     return value if type(value) is int and 1 <= value <= MAX_WAIT_SECONDS else fallback
 
 
+def _wait_deadline_fact(config, role, *, field: bool) -> str:
+    """State exactly when wait_seconds schedules a wake deadline.
+
+    A writer's ordinary wait persists wake_at and is re-admitted at that bound.
+    A reader with check_job gets a timeout only through wait_for_check. An
+    ordinary reader wait has no timer and resumes only on a wake. The claim
+    must match the scheduler, not promise a deadline to every role.
+    """
+    default = _wait_seconds_limit(config, "default_wait_seconds")
+    maximum = _wait_seconds_limit(config, "maximum_wait_seconds")
+    writer = role is None or getattr(role, "workspace", None) == "write"
+    checker = role is not None and "check_job" in (getattr(role, "capabilities", ()) or ())
+    if writer:
+        subject = "Sets" if field else "wait_seconds sets"
+        bound = (f"omitted values use the configured default of {default}." if field
+                 else f"without it the configured default wait is {default} seconds.")
+        return f"{subject} a wake deadline of at most {maximum} seconds; " + bound
+    if checker:
+        if field:
+            return (f"Bounds the check-wait timeout at most {maximum} seconds "
+                    f"(default {default}), only when wait_for_check is supplied; "
+                    "an ordinary wait has no deadline.")
+        return (f"wait_seconds bounds the check-wait timeout of at most {maximum} seconds "
+                f"when wait_for_check is supplied; without it the configured default wait "
+                f"is {default} seconds. An ordinary wait has no deadline.")
+    prefix = ("Recorded but schedules" if field else
+              "wait_seconds is recorded but schedules")
+    return (f"{prefix} no wake deadline for a read-only unit without check_job; "
+            f"the value (up to {maximum} seconds, default {default}) is recorded and "
+            "an ordinary wait resumes only on a wake.")
+
+
 def _next_step_carries_handoff(outcomes: tuple[str, ...], config: Config | None = None,
                                role: Role | None = None) -> bool:
     """True only when this unit can actually hand off through next_step."""
@@ -90,10 +122,7 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
         parts.append("Waiting outcomes park until a wake from "
                      + ", ".join(sources[:-1]) + ", or " + sources[-1] + ".")
     if "wait" in selected:
-        default = _wait_seconds_limit(config, "default_wait_seconds")
-        maximum = _wait_seconds_limit(config, "maximum_wait_seconds")
-        parts.append(f"wait_seconds sets a wake deadline of at most {maximum} seconds; "
-                     f"without it the configured default wait is {default} seconds.")
+        parts.append(_wait_deadline_fact(config, role, field=False))
         if "check_job" in (getattr(role, "capabilities", ()) or ()):
             parts.append("wait_for_check selects a check job owned by this unit.")
     if any(outcome in positive["continuation"] for outcome in selected):
@@ -236,8 +265,6 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
                       config: Config | None = None, role: Role | None = None) -> tuple[str, dict]:
     """Describe finish; the typed verdict is advertised only to its holders."""
     can_wait = "wait" in outcomes
-    default_wait = _wait_seconds_limit(config, "default_wait_seconds")
-    maximum_wait = _wait_seconds_limit(config, "maximum_wait_seconds")
     description = (
         "End this work unit and release its model slot and workspace lock. A successful seal ends tool access.\n\n"
         + _writer_continuation_contract(outcomes, config, role)
@@ -261,9 +288,7 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
         "release_checks": array(text(64), 32),
         "ack_events": array(text(64), 512),
         "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS,
-                         "description": (
-                             f"Sets a wake deadline of at most {maximum_wait} seconds; "
-                             f"omitted values use the configured default of {default_wait}.")},
+                         "description": _wait_deadline_fact(config, role, field=True)},
         "next_step": {**text(4096), "minLength": 1,
                       "description": ("Carries the continuation handoff."
                                       if _next_step_carries_handoff(outcomes, config, role)

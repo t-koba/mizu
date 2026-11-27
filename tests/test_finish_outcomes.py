@@ -36,7 +36,9 @@ class FinishOutcomeTests(Fixture):
         self.assertIn("wait_seconds", fields)
         self.assertIn("check job", fields["wait_for_check"]["description"])
         self.assertIn("requires check_job", fields["wait_for_check"]["description"])
-        self.assertIn("wake deadline", fields["wait_seconds"]["description"])
+        self.assertIn("schedules no wake deadline for a read-only unit",
+                      fields["wait_seconds"]["description"])
+        self.assertNotIn("Sets a wake deadline", fields["wait_seconds"]["description"])
         self.assertIn(str(self.config.limits.default_wait_seconds),
                       fields["wait_seconds"]["description"])
         self.assertEqual(fields["next_step"],
@@ -68,11 +70,12 @@ class FinishOutcomeTests(Fixture):
         opening = self.opening()
         self.assertIn("do useful work within your role and capabilities, then finish with mizu_finish", opening)
         description, _ = DEFINITIONS["finish"]
+        self.assertIn("no wake deadline for a read-only unit", opening)
+        self.assertIn("wait_seconds sets a wake deadline", description)
         for text in (opening, description):
             self.assertIn("Finish effects:", text)
             for outcome in ("continue", "wait", "blocked", "done"):
                 self.assertIn(f"{outcome}=[", text)
-            self.assertIn("wait_seconds sets a wake deadline", text)
             expected_step = ("next_step is recorded but applies no handoff here." if text is opening
                              else "next_step carries the continuation handoff.")
             self.assertIn(expected_step, text)
