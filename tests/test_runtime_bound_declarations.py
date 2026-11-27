@@ -288,6 +288,10 @@ DECLARATIONS = {
         'KERNEL_FIELD_MAP_MAX': (
             '64', 'safety',
             'kernel tool field maps / bounded generic property count before declared-field validation'),
+        'MAX_FINISH_EFFECT_CONTRACT_CHARS': (
+            '2048', 'mechanism',
+            'finish / fixed model-facing contract ceiling; derived text is truncated '
+            'so a configured outcome list cannot inflate the prompt'),
     },
     'acceptance.py': {
         'MAX_BYTES': (
