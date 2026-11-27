@@ -25,7 +25,9 @@ Two scopes:
 
 A named record can be selected with --record; the default stays the stage-4
 record. Prints one bounded JSON summary; exit 0 only when every reported check
-passes. The already-captured measurement is reused; this never reruns it.
+passes. A structurally malformed record fails closed with the same bounded
+summary (a failed `record_structure` check) rather than a traceback. The
+already-captured measurement is reused; this never reruns it.
 """
 from __future__ import annotations
 
@@ -85,17 +87,73 @@ def tree_digest_from_git(repo: pathlib.Path, revision: str) -> str:
         return source_digest(pathlib.Path(tmp) / "src")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=pathlib.Path, default=None,
-                        help="full git checkout to recompute source-tree digests from")
-    parser.add_argument("--record", type=pathlib.Path, default=None,
-                        help="evidence record to verify (defaults to stage-4)")
-    args = parser.parse_args(argv)
+def validate_structure(record):
+    """Report whether fields the checks read have the expected container types.
 
-    record_path = args.record or RECORD
-    text = record_path.read_text(encoding="utf-8")
-    record = json.loads(text)
+    The record is external-untrusted. A malformed shape must fail closed with a
+    bounded summary, never an uncaught exception whose traceback could print
+    private paths. Only container types and keys the checks actually read are
+    validated here; value correctness remains the job of ``checks`` below.
+    """
+    if not isinstance(record, dict):
+        return False, "record_not_object"
+    if "schema" not in record:
+        return False, "schema_missing"
+    m = record.get("measurement")
+    if not isinstance(m, dict):
+        return False, "measurement_not_object"
+    if not isinstance(m.get("harness"), str):
+        return False, "harness_not_string"
+    if not isinstance(m.get("harness_script_sha256"), str):
+        return False, "harness_script_sha256_not_string"
+    if not isinstance(m.get("deployment"), dict):
+        return False, "deployment_not_object"
+    if not isinstance(m.get("validity"), dict):
+        return False, "validity_not_object"
+    witness = record.get("witness")
+    if not isinstance(witness, dict) or not isinstance(
+            witness.get("git_recompute"), list):
+        return False, "witness_git_recompute_not_list"
+    for row in witness["git_recompute"]:
+        if not isinstance(row, dict) or not isinstance(row.get("side"), str):
+            return False, "witness_row_invalid"
+        if any(k not in row for k in ("tree_digest", "source_revision",
+                                      "matched_receipt")):
+            return False, "witness_row_incomplete"
+    for side in ("before", "after"):
+        part = record.get(side)
+        if not isinstance(part, dict):
+            return False, f"{side}_not_object"
+        binding = part.get("source_binding")
+        if not isinstance(binding, dict) or not all(
+                isinstance(binding.get(k), str)
+                for k in ("daemon_src_sha256", "source_revision")):
+            return False, f"{side}_binding_invalid"
+        emb = part.get("embedded_receipt")
+        if not isinstance(emb, dict) or not isinstance(
+                part.get("embedded_receipt_sha256"), str):
+            return False, f"{side}_receipt_invalid"
+        src = emb.get("source")
+        if not isinstance(src, dict) or not all(
+                isinstance(src.get(k), str)
+                for k in ("daemon_src_sha256", "source_revision")):
+            return False, f"{side}_receipt_source_invalid"
+        if not isinstance(emb.get("validity"), dict):
+            return False, f"{side}_receipt_validity_invalid"
+    return True, ""
+
+
+def fail_closed_summary(reason, scope):
+    """A bounded summary for a record that cannot be checked. Never echoes
+    record data, so an untrusted record cannot inflate or leak through it."""
+    return {"schema": None, "scope": scope,
+            "checks": {"record_structure": False},
+            "skipped": [], "unattested_deployment": [],
+            "structure_reason": reason, "passed": False}
+
+
+def build_summary(record, text, repo, scope):
+    """Compute the full check set for a structurally valid record."""
     checks: dict[str, bool] = {}
 
     checks["no_private_paths"] = not any(m in text for m in PRIVATE_MARKERS)
@@ -172,14 +230,14 @@ def main(argv: list[str] | None = None) -> int:
     unattested = sorted(k for k in (declared or {}) if k not in attested)
 
     skipped: list[str] = []
-    if args.repo is None:
+    if repo is None:
         skipped = ["before_tree_digest_from_git", "after_tree_digest_from_git",
                    "before_receipt_source_matches_git", "after_receipt_source_matches_git"]
     else:
         for side in ("before", "after"):
             revision = record[side]["source_binding"]["source_revision"]
             try:
-                recomputed = tree_digest_from_git(args.repo, revision)
+                recomputed = tree_digest_from_git(repo, revision)
             except (subprocess.CalledProcessError, OSError):
                 recomputed = None  # unresolvable commit is a failed check, not a crash
             checks[f"{side}_tree_digest_from_git"] = (
@@ -187,11 +245,42 @@ def main(argv: list[str] | None = None) -> int:
             checks[f"{side}_receipt_source_matches_git"] = (
                 recomputed == record[side]["embedded_receipt"]["source"]["daemon_src_sha256"])
 
-    summary = {"schema": record["schema"],
-               "scope": "with_git" if args.repo is not None else "tracked_only",
-               "checks": checks, "skipped": skipped,
-               "unattested_deployment": unattested,
-               "passed": all(checks.values())}
+    return {"schema": record["schema"], "scope": scope,
+            "checks": checks, "skipped": skipped,
+            "unattested_deployment": unattested,
+            "passed": all(checks.values())}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=pathlib.Path, default=None,
+                        help="full git checkout to recompute source-tree digests from")
+    parser.add_argument("--record", type=pathlib.Path, default=None,
+                        help="evidence record to verify (defaults to stage-4)")
+    args = parser.parse_args(argv)
+
+    scope = "with_git" if args.repo is not None else "tracked_only"
+    record_path = args.record or RECORD
+    try:
+        text = record_path.read_text(encoding="utf-8")
+        record = json.loads(text)
+    except (OSError, ValueError):
+        summary = fail_closed_summary("record_unreadable", scope)
+        print(json.dumps(summary, sort_keys=True))
+        return 1
+
+    ok, reason = validate_structure(record)
+    if not ok:
+        print(json.dumps(fail_closed_summary(reason, scope), sort_keys=True))
+        return 1
+    try:
+        summary = build_summary(record, text, args.repo, scope)
+    except Exception:
+        # Backstop: no malformed record may ever produce a traceback. The
+        # specific reason distinguishes this from a structural rejection.
+        summary = fail_closed_summary("check_error", scope)
+        print(json.dumps(summary, sort_keys=True))
+        return 1
     print(json.dumps(summary, sort_keys=True))
     return 0 if summary["passed"] else 1
 

@@ -258,6 +258,39 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         self.assertNotEqual(forged.returncode, 0, forged.stderr)
         self.assertFalse(json.loads(forged.stdout)["checks"]["shape_matched"])
 
+    def test_malformed_records_fail_closed_without_a_traceback(self):
+        """An untrusted malformed shape yields one bounded JSON summary, never
+        an uncaught exception (whose traceback could leak private paths)."""
+        mutations = {
+            "top_level_list": lambda r: [],
+            "deployment_not_dict": lambda r: r["measurement"].__setitem__("deployment", [1]),
+            "measurement_not_dict": lambda r: r.__setitem__("measurement", "bad"),
+            "validity_not_dict": lambda r: r["measurement"].__setitem__("validity", "bad"),
+            "receipt_not_dict": lambda r: r["before"].__setitem__("embedded_receipt", "bad"),
+            "receipt_validity_not_dict": lambda r: r["before"]["embedded_receipt"].__setitem__("validity", "bad"),
+            "receipt_source_not_dict": lambda r: r["before"]["embedded_receipt"].__setitem__("source", "bad"),
+            "binding_not_dict": lambda r: r["before"].__setitem__("source_binding", "bad"),
+            "witness_not_list": lambda r: r["witness"].__setitem__("git_recompute", "bad"),
+            "witness_row_not_dict": lambda r: r["witness"].__setitem__("git_recompute", ["bad"]),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                # Use a temporary record directly; no source checkout needed.
+                record = json.loads(RECORD.read_text(encoding="utf-8"))
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "record.json"
+                    path.write_text(json.dumps(mutate(record)), encoding="utf-8")
+                    proc = subprocess.run(
+                        [sys.executable, str(VERIFIER), "--record", str(path)],
+                        cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                for marker in ("Traceback", "AttributeError", "TypeError", "KeyError"):
+                    self.assertNotIn(marker, proc.stderr)
+                summary = json.loads(proc.stdout)  # must be parseable JSON
+                self.assertIs(summary["passed"], False)
+                self.assertIs(summary["checks"]["record_structure"], False)
+                self.assertTrue(summary["structure_reason"])
+
     def test_matched_shape_validity_and_public_commit_anchor(self):
         record = json.loads(RECORD.read_text(encoding="utf-8"))
         m = record["measurement"]
