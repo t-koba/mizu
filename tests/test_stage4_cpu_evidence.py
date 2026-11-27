@@ -171,6 +171,31 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         self.assertTrue(summary["checks"]["after_receipt_source_bound"])
         self.assertFalse(summary["passed"])
 
+    def test_forged_receipt_validity_fails_shape_checks_with_git(self):
+        # A receipt that denies the steady-state precondition must not be
+        # blessed by an untouched worker-authored measurement summary, even
+        # with refreshed checksums and honest source/git bindings.
+        with tempfile.TemporaryDirectory() as tmp:
+            record, repo = git_source_record(
+                json.loads(RECORD.read_text(encoding="utf-8")), tmp)
+            for side in ("before", "after"):
+                emb = record[side]["embedded_receipt"]
+                emb["validity"]["method"] = "getrusage"
+                emb["validity"]["steady_state_observed"] = False
+                emb["settled"] = False
+                record[side]["embedded_receipt_sha256"] = _canonical_sha(emb)
+            run = run_verifier_on_record(record, repo=repo)
+        self.assertNotEqual(run.returncode, 0, run.stderr)
+        summary = json.loads(run.stdout)
+        self.assertFalse(summary["checks"]["shape_matched"])
+        self.assertFalse(summary["checks"]["validity_matched"])
+        self.assertFalse(summary["checks"]["validity_flags"])
+        self.assertTrue(summary["checks"]["before_embedded_receipt_integrity"])
+        self.assertTrue(summary["checks"]["before_receipt_source_bound"])
+        self.assertTrue(summary["checks"]["before_tree_digest_from_git"])
+        self.assertTrue(summary["checks"]["after_tree_digest_from_git"])
+        self.assertFalse(summary["passed"])
+
     def test_matched_shape_validity_and_public_commit_anchor(self):
         record = json.loads(RECORD.read_text(encoding="utf-8"))
         m = record["measurement"]

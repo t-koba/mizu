@@ -5,8 +5,10 @@ Two scopes:
 * Tracked-only (default): uses only files in the repository. It verifies no
   private paths, the schema, the harness digest against the tracked script,
   each embedded receipt's content digest and source identity against the
-  detached source_binding (an intra-record consistency check), matched
-  shape/validity flags, the recorded witness's consistency with the receipts,
+  detached source_binding (an intra-record consistency check), that each
+  receipt's deployment and validity summary matches the recorded measurement
+  and observes a proc-per-pid steady-state window, the recorded witness's
+  consistency with the receipts,
   and the absence of worker-private IDs. The harness digest is SHA-256 over
   the script's bytes after normalizing CRLF line endings to LF, so a CRLF
   checkout passes while any other byte change fails. It does NOT claim to
@@ -45,6 +47,11 @@ PRIVATE_ID_KEYS = ("check_id", "check_command_id", "check_result_recompute",
 SUPPORTED_SCHEMAS = ("stage4-cpu-evidence-v2", "native-wake-cpu-evidence-v1")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+
+
+DEPLOYMENT_FIELDS = ("projects", "retained_messages", "idle_seconds",
+                     "window_seconds", "warmup_seconds", "repeats", "settled",
+                     "python", "platform")
 
 
 def canonical_sha(obj: object) -> str:
@@ -119,11 +126,33 @@ def main(argv: list[str] | None = None) -> int:
             and witness_rows[side]["source_revision"] == binding["source_revision"]
             and witness_rows[side]["matched_receipt"] is True)
 
+    # The embedded receipts, not the worker-authored measurement summary, own
+    # shape and validity. Recompute the summary claims from each receipt so a
+    # receipt that denies the steady-state precondition cannot be blessed by
+    # an untouched summary. Missing fields fail closed via .get().
+    receipts = [record[side].get("embedded_receipt", {})
+                for side in ("before", "after")]
+    after_receipt = record["after"].get("embedded_receipt", {})
+
+    def receipt_deployment(receipt):
+        return {k: receipt.get(k) for k in DEPLOYMENT_FIELDS}
+
+    def receipt_validity(receipt):
+        validity = receipt.get("validity") or {}
+        return {"method": validity.get("method"),
+                "steady_state_observed": validity.get("steady_state_observed")}
+
     m = record["measurement"]
-    checks["shape_matched"] = bool(m["deployment_matches_after"])
-    checks["validity_matched"] = bool(m["validity_matches_after"])
-    checks["validity_flags"] = (m["validity"]["method"] == "proc-per-pid"
-                                and m["validity"]["steady_state_observed"] is True)
+    checks["shape_matched"] = (
+        m.get("deployment") == receipt_deployment(after_receipt)
+        and all(receipt_deployment(r) == m.get("deployment") for r in receipts))
+    checks["validity_matched"] = (
+        m.get("validity") == receipt_validity(after_receipt)
+        and all(receipt_validity(r) == m.get("validity") for r in receipts))
+    checks["validity_flags"] = all(
+        receipt_validity(r)["method"] == "proc-per-pid"
+        and receipt_validity(r)["steady_state_observed"] is True
+        for r in receipts)
 
     skipped: list[str] = []
     if args.repo is None:
