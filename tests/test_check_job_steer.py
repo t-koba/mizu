@@ -508,27 +508,42 @@ class SteerTests(SteerFixture):
                     template = db.execute('SELECT * FROM check_jobs WHERE id=?',
                                           (seed['id'],)).fetchone()
 
-                def insert_direct(job_id, created_at):
+                insert_sql = f"INSERT INTO check_jobs VALUES ({','.join('?' * len(columns))})"
+                change_sql = ('INSERT INTO check_completion_changes(role, job_id, created_at) '
+                              'VALUES (?, ?, ?)')
+
+                def prepared(job_id, created_at):
                     row = list(template)
                     row[slots['id']] = job_id
                     row[slots['created_at']] = created_at
                     record = json.loads(row[slots['job']])
                     record['id'], record['created_at'] = job_id, created_at
                     row[slots['job']] = json.dumps(record)
+                    return row
+
+                def insert_batch(entries):
+                    # Commit a whole setup batch in one transaction. Committing
+                    # each retained row separately cost an fsync per row and made
+                    # this fixture take ~488 s on Windows, starving the rest of
+                    # the suite of its timeout budget. What this test measures is
+                    # index-bounded reads during _steer_changes, not how the
+                    # fixture rows were committed, so one commit is equivalent.
+                    rows = [prepared(job_id, created_at) for job_id, created_at in entries]
                     with case.project.ledger.read('check_jobs', locked=True) as db:
-                        db.execute(f"INSERT INTO check_jobs VALUES ({','.join('?' * len(columns))})", row)
-                        db.execute('INSERT INTO check_completion_changes(role, job_id, created_at) '
-                                   'VALUES (?, ?, ?)', ('worker', job_id, created_at))
+                        db.executemany(insert_sql, rows)
+                        db.executemany(change_sql,
+                                       [('worker', job_id, created_at)
+                                        for job_id, created_at in entries])
 
                 # History retained before the unit opened has lower seq values
                 # than its cursor floor, whatever its creation timestamps.
-                for index in range(retained):
-                    insert_direct('f' * 32 + f'{index + 1:032x}',
-                                  (base - dt.timedelta(seconds=index + 1)).isoformat(timespec='seconds'))
+                insert_batch([('f' * 32 + f'{index + 1:032x}',
+                               (base - dt.timedelta(seconds=index + 1)).isoformat(timespec='seconds'))
+                              for index in range(retained)])
                 position = check_jobs.completion_position(case.project)
                 # A long-running job completed after the boundary can still be
                 # created before all the retained history it now sits beside.
-                insert_direct('a' * 32, (base - dt.timedelta(days=10)).isoformat(timespec='seconds'))
+                insert_batch([('a' * 32, (base - dt.timedelta(days=10)).isoformat(timespec='seconds'))])
                 with patch.object(check_jobs, 'now', distinct_now):
                     jobs = [case.job(f'printf bounded-{index}') for index in range(2 * page)]
                 newest_first = [job['id'] for job in reversed(jobs)]
