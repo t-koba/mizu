@@ -135,12 +135,17 @@ class FinishOutcomeContractTests(Fixture):
 
     def test_next_step_fact_tracks_continuation(self):
         fact = "next_step carries the continuation handoff."
+        recorded = "next_step is recorded but applies no handoff here."
         role = self.config.roles["consult"]
+        writer = replace(role, workspace="write")
         self.assertIn(fact, _writer_continuation_contract(
-            role.finish_outcomes, self.config, role))
+            writer.finish_outcomes, self.config, writer))
+        reader_text = _writer_continuation_contract(role.finish_outcomes, self.config, role)
+        self.assertNotIn(fact, reader_text)
+        self.assertIn(recorded, reader_text)
         for outcomes in (("done",), ("blocked",), ("wait",)):
             with self.subTest(outcomes=outcomes):
-                limited = replace(role, finish_outcomes=outcomes)
+                limited = replace(writer, finish_outcomes=outcomes)
                 text = _writer_continuation_contract(
                     limited.finish_outcomes, self.config, limited)
                 self.assertNotIn(fact, text)
@@ -149,14 +154,17 @@ class FinishOutcomeContractTests(Fixture):
         role = self.configure(limits='progress_signals = ["code"]\n')
         writer = replace(role, workspace="write")
         prefix = "Immediate next-step handoff after continue requires "
-        self.assertIn(prefix + "continue in the configured no-progress outcomes and "
-                      "a selected work signal among code; otherwise the configured "
-                      "default wait of 1800 seconds applies until a ready work item "
-                      "or another wake.", _writer_continuation_contract(
+        self.assertIn(prefix + "a step differing from the published parent's step, "
+                      "continue in the configured no-progress outcomes, and a selected "
+                      "work signal among code; when any requirement is unmet, no handoff "
+                      "occurs and the configured default wait of 1800 seconds applies "
+                      "until a ready work item or another wake.",
+                      _writer_continuation_contract(
                           writer.finish_outcomes, self.config, writer))
         narrowed = replace(writer, progress_signals=("state",))
-        self.assertIn(prefix + "a configured no-progress outcome and qualifying work "
-                      "signal, but none applies;", _writer_continuation_contract(
+        self.assertIn(prefix + "a step differing from the published parent's step, a "
+                      "configured no-progress outcome and qualifying work signal, but "
+                      "none applies;", _writer_continuation_contract(
                           narrowed.finish_outcomes, self.config, narrowed))
         self.assertNotIn("Immediate next-step handoff", _writer_continuation_contract(
             role.finish_outcomes, self.config, role))

@@ -41,7 +41,7 @@ class FinishOutcomeTests(Fixture):
                       fields["wait_seconds"]["description"])
         self.assertEqual(fields["next_step"],
                          {"type": "string", "minLength": 1, "maxLength": 4096,
-                          "description": "Carries the continuation handoff."})
+                          "description": "Recorded in this unit's snapshot; applies no handoff here."})
         self.assertNotIn("next_step", finish["inputSchema"]["required"])
         contract = _writer_continuation_contract(role.finish_outcomes, self.config, role)
         self.assertIn("\n\n" + contract + "\n\n", finish["description"])
@@ -72,9 +72,10 @@ class FinishOutcomeTests(Fixture):
             self.assertIn("Finish effects:", text)
             for outcome in ("continue", "wait", "blocked", "done"):
                 self.assertIn(f"{outcome}=[", text)
-            for fact in ("wait_seconds sets a wake deadline",
-                         "next_step carries the continuation handoff."):
-                self.assertIn(fact, text)
+            self.assertIn("wait_seconds sets a wake deadline", text)
+            expected_step = ("next_step is recorded but applies no handoff here." if text is opening
+                             else "next_step carries the continuation handoff.")
+            self.assertIn(expected_step, text)
             self.assertNotIn("wait_for_check selects", text)
             for purpose in ("Use outcome=", "ordinary finish", "naming a new proposed follow-up",
                             "to pause until a wake", "to report what prevents", "to mark the work complete"):
