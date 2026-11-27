@@ -496,11 +496,12 @@ full wait object is the declared `body` string), every done or dropped revision
 `kind=completion`, and a valid retirement sidecar one more `kind=completion` at
 its bound revision. Fields with a declared counterpart in
 `examples/development/queues.toml` (`[queues.work.schema]`) are carried in
-full, including description, scope, reason, checks, holder and snapshot; a
-field absent from a source record is omitted, never guessed. Store bookkeeping
-without a declared field (timestamps, origin, actor, delivery and verification
-proofs) is not renamed or dropped from the store; it simply has no message
-counterpart here. Every body is validated against the declaration before the
+full, including description, scope, reason, checks, holder and snapshot. The
+item message also carries `origin` as canonical JSON, so a string message id and
+a legacy structured reference both decode exactly. A field absent from a source
+record is omitted, never guessed. Store bookkeeping without a declared field
+(timestamps, actor, delivery and verification proofs) is not renamed or dropped
+from the store; it simply has no message counterpart here. Every body is validated against the declaration before the
 first append. Message ids are the first 32 hex characters of SHA-256 over
 compact JSON `[tag, item id, revision, kind]` with a tag distinct from
 inventory mode, so a retry with unchanged records is idempotent.

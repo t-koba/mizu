@@ -37,6 +37,7 @@ item = {type = "string", max = 35}
 rev = {type = "integer", min = 1}
 title = {type = "string", max = 200}
 body = {type = "string", max = 32768}
+origin = {type = "string", max = 4096}
 scope = {type = "string", max = 32768}
 reason = {type = "string", max = 16384}
 status = {type = "string", values = ["open", "doing", "blocked", "done", "dropped"]}

@@ -95,6 +95,7 @@ DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 REVISION_FILE = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 TEMP_FILE = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 STATUSES = frozenset({"open", "doing", "blocked", "done", "dropped"})
+MAX_ORIGIN_MESSAGE_CHARS = 4096
 PREVIEW_KEYS = frozenset({"description_preview", "scope_preview", "reason_preview"})
 
 SEED_KEYS = frozenset({"id", "title", "origin", "status", "rev", "holder",
@@ -626,6 +627,11 @@ def chain_body(record: dict, item: str, rev: int, kind: str, schema: dict,
         body["body"] = record["description"]
     if "scope" in record and record["scope"] is not None:
         body["scope"] = record["scope"]
+    if kind == "item" and record.get("origin") is not None:
+        encoded = canonical(record["origin"]).decode("utf-8")
+        if len(encoded) > MAX_ORIGIN_MESSAGE_CHARS:
+            raise ConversionError("work-item origin exceeds its declared field")
+        body["origin"] = encoded
     if reason is not None:
         body["reason"] = reason
     elif record.get("reason") is not None:

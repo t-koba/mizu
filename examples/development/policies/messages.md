@@ -42,6 +42,9 @@ account; it needs no reply.
 A work item is a message. A transition, a wait or a completion is a later message
 referring to the earlier one it changes; a wait uses delayed delivery so it
 wakes its readers when due. A transition or completion carries the evidence a
-reader needs to judge the result. The kernel assigns no state or meaning to
-these messages: it stores, delivers and references them; their meaning is this
-policy.
+reader needs to judge the result. The item's `origin` is the canonical JSON of
+the stored provenance: a quoted string for a message id or free text, or an
+object for a legacy structured reference. Decode it before using it as a
+reference; never treat the encoded field itself as an id. The kernel assigns no
+state or meaning to these messages: it stores, delivers and references them;
+their meaning is this policy.

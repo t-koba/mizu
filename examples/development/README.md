@@ -21,8 +21,9 @@ nothing here specially.
   conversion. Chain mode (`--project-root DIR --item wi_<32hex>`) replays one
   stored item's creation record, numbered revisions and optional retirement
   sidecar into declared `item`, `transition`, `wait` and `completion` messages,
-  carrying full text with no previews or skipped declared fields. Both modes
-  use caller ids chosen for idempotent retries, change no runtime authority and
+  carrying full text with no previews or skipped declared fields, including the
+  item's provenance as a canonical-JSON `origin`. Both modes use caller ids
+  chosen for idempotent retries, change no runtime authority and
   are not product commands. `--dry-run` prints planned messages without
   appending; mixing the two modes' options fails closed.
 - `outcomes.toml` declares which finish outcomes have each positive progress

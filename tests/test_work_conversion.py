@@ -77,9 +77,14 @@ class WorkConversion(Fixture):
                              "--cursor", "0", "--limit", "100")
         return page["messages"]
 
-    def make_item(self, key, title, description, *, scope=None):
+    def make_item(self, key, title, description, *, scope=None, origin=None):
+        options = {}
+        if scope is not None:
+            options["scope"] = scope
+        if origin is not None:
+            options["origin"] = origin
         record = self.store.create(idempotency_key=key, title=title, actor="worker",
-                                   description=description, **({"scope": scope} if scope else {}))
+                                   description=description, **options)
         return record["record"]["work_item"]["id"]
 
     def make_snapshot(self, run):
@@ -215,6 +220,27 @@ class WorkConversion(Fixture):
             [sys.executable, str(SCRIPT), "--project-root", str(self.project.root),
              "--item", item, *args],
             capture_output=True, text=True, env=self.env(), check=False)
+
+    def test_chain_conversion_carries_origin_as_canonical_json(self):
+        message_id = "a" * 32
+        text_item = self.make_item("origin-text", "Text origin", "Described",
+                                   origin=message_id)
+        result = self.convert_chain(text_item, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(rows[0]["body"]["origin"], canonical(message_id).decode("utf-8"))
+        self.assertEqual(json.loads(rows[0]["body"]["origin"]), message_id)
+        for row in rows[1:]:
+            self.assertNotIn("origin", row["body"])
+
+        # Legacy structured origins cannot be created by the product API but
+        # remain readable from stored seeds, so test that shape at the emitter.
+        structured = {"message": message_id, "kind": "proposal"}
+        body = load_script().chain_body(
+            {"title": "Structured origin", "status": "open", "origin": structured},
+            "wi_" + "b" * 32, 1, "item", SCHEMA)
+        self.assertEqual(body["origin"], canonical(structured).decode("utf-8"))
+        self.assertEqual(json.loads(body["origin"]), structured)
 
     def test_chain_conversion_carries_full_events_with_stable_ids(self):
         description = "Full stored description, never a preview. " * 60
