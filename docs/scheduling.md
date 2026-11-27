@@ -22,7 +22,7 @@ holder, that wake likewise observes the code digest rather than the exact
 snapshot ID. Pending role-readable queue messages are a separate role-addressed event
 source, not the project operator wake-generation cursor.
 
-Enabled `answers` and `notices` queues are additional role-addressed input. With
+Enabled `questions` threads (including the operator answers in them) and `notices` are additional role-addressed input. With
 the default `wake = true`, due messages in role-readable queues admit
 event/on-change dispatch and armed daemon readiness before the `done` gate.
 Existing scheduling controls still win, and no queue-message lifecycle is
@@ -267,7 +267,7 @@ timer grants it no special standing. Held CI waits use a separate
 [exact absence and requester test](#exact-sha-work-item-ci-waits).
 
 A role asks the operator by appending to the declared `questions` queue; the
-operator appends a referring message to `answers`. Queue messages carry no
+operator appends a referring answer in the same `questions` thread. Queue messages carry no
 lifecycle beyond what role policy assigns them, and acknowledging a message is
 not an answer.
 

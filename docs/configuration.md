@@ -10,13 +10,17 @@ Environment substitution reads the controller process environment, not
 `ConfigError`); there are no implicit defaults so a missing export cannot
 silently change grants or paths. Prefer literal model aliases for systemd services.
 
-## Questions, answers and notices
+## Shipped queues
 
-Questions, answers and notices are declared `[queues.*]` tables with write,
-read and wake principals and optional body schemas; the kernel enforces the
-declarations, and role policy decides what each message means. See
-[kernel.md](kernel.md) for queue mechanics and the commented
-`config/config.example.toml` for the shipped declarations.
+The shipped template declares four queues: `proposals` for product knowledge,
+`questions` as threads in which the operator's later message carries the answer,
+`notices` for operator and host facts, and `work` for stage-3 work messages
+(items, transitions, waits and completions). Declaring `work` changes no runtime
+authority: the dedicated work-item store stays authoritative for work state.
+These are declared `[queues.*]` tables with write, read and wake principals and
+optional body schemas; the kernel enforces the declarations, and role policy
+decides what each message means. See [kernel.md](kernel.md) for queue mechanics
+and the commented `config/config.example.toml` for the shipped declarations.
 
 ## Observation drivers
 

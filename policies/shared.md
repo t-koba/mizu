@@ -53,4 +53,5 @@ answers or accepts nothing. Write a `proposals` message when you learned
 something about the product that the worker does not know yet: what you
 observed, the evidence and why it matters. Ask the operator through
 `questions` only what the operator alone can settle, with the default you
-follow meanwhile; an answer arrives in `answers` referring to the question.
+follow meanwhile; the operator's answer is a later message in `questions`
+referring to that question.
