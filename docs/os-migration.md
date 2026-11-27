@@ -68,6 +68,13 @@ operator-run mode that reads one item's creation record, whole revision chain
 and optional retirement sidecar directly from the store and emits full-text
 item, transition, wait and completion messages within the declared schema;
 neither slice changes runtime authority before cutover.
+A separate operator-run proof reader,
+`examples/development/work_view.py`, pages the declared `work` messages through
+the public CLI and replays them into a current item view. Explicit cursors page
+history including rows already delivered to the host, so the reads record
+delivery facts; they do not write the dedicated store or change which store is
+authoritative. Bounded pages, schema-checked bodies and fail-closed replay keep
+a partial view from being presented as current.
 
 ## Stages
 

@@ -26,6 +26,13 @@ nothing here specially.
   chosen for idempotent retries, change no runtime authority and
   are not product commands. `--dry-run` prints planned messages without
   appending; mixing the two modes' options fails closed.
+- `work_view.py` is the operator-run proof reader for those messages:
+  `python3 examples/development/work_view.py PROJECT [--pages N]` (N is 1-64,
+  default 64). It pages the `work` queue through the public CLI with explicit
+  cursors of 512 rows, validates each kernel row and declared body, and replays
+  them into deterministic JSON sorted by item id. Explicit cursors include rows
+  already delivered to the host: the reads record delivery facts but do not
+  change work-item authority. A final page still reporting `more` is refused.
 - `outcomes.toml` declares which finish outcomes have each positive progress
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4

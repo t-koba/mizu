@@ -515,6 +515,26 @@ bounded and name only the file, never a private path or stored content.
 Supplying a positional project name, `--limit` or `--closed` together with
 chain options is refused. The modes cannot be combined in one run.
 
+The declared messages can be replayed into a current item view by another
+operator-run userland reader:
+
+```sh
+python3 examples/development/work_view.py PROJECT [--pages N]
+```
+
+`--pages` accepts 1-64 (default 64). Every page is
+`mizu queue PROJECT read work --host --cursor <seq> --limit 512`. An explicit
+cursor pages history including rows already delivered to the host, so these
+reads record delivery facts; they do not write the work-item store or change
+which store is authoritative. Each kernel row and every declared body,
+including undeclared keys, is checked before replay. A seed starts at rev 1, a
+transition advances exactly one revision, a wait parses its declared body into
+a `wait` field, and a completion applies at the current revision. Duplicate
+message ids, unknown kinds, gaps, conflicts and a final page still reporting
+`more` fail closed with a bounded diagnostic. The output is deterministic JSON
+`{"project": ..., "items": [...]}`, sorted by item id, carrying each item's
+current declared fields plus `wait` when present.
+
 For an older deployment, take a verified backup first (see
 [upgrade and rollback](#バージョン更新とロールバック)) and restore the project
 under the current release. To carry a previously tracked item forward, give it
