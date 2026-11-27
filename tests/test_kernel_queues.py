@@ -402,6 +402,35 @@ class QueueStoreTests(unittest.TestCase):
             store = QueueStore(self.root / f"oracle-{trial}", self.queues)
             seqs: list[int] = []
             delivered: set[int] = set()
+
+            def observe(step):
+                for stamp in stamps:
+                    with self.subTest(trial=trial, step=step, now=stamp):
+                        self._indexed_lookups(store, "tasks", "role:alpha", stamp)
+
+            # Directed opening: a delivered later deadline dominates an
+            # earlier one in the same run. Retiring the dominating message
+            # must not expose the survivor before its own deadline; dropping
+            # the dominated gate during that retention fails here.
+            dominating = store.append("tasks", BODY, "operator", now=NOW,
+                                      deliver_at=EVEN_LATER)
+            survivor = store.append("tasks", BODY, "operator", now=NOW,
+                                    deliver_at=LATER)
+            live = store.append("tasks", BODY, "operator", now=NOW)
+            seqs.extend((dominating["seq"], survivor["seq"], live["seq"]))
+            for made in (dominating, survivor):
+                store.record_delivery("tasks", made["seq"], "role:alpha", "oracle",
+                                      now=NOW, handed=True)
+                delivered.add(made["seq"])
+            body = store._message("tasks", dominating["seq"])
+            store._remove_message("tasks", dominating["seq"], body)
+            seqs.remove(dominating["seq"])
+            delivered.discard(dominating["seq"])
+            facts = store.pending("tasks", "role:alpha", newest=0, now=NOW)
+            self.assertEqual((facts["count"], facts["through"], facts["more"]),
+                             (0, 1, True))
+            observe("dominated-gate-survives-retirement")
+
             for step in range(12):
                 action = rng.choice(("append", "deliver", "retire")) if seqs else "append"
                 if action == "append":
@@ -423,9 +452,7 @@ class QueueStoreTests(unittest.TestCase):
                         store._remove_message("tasks", seq, message)
                     seqs.remove(seq)
                     delivered.discard(seq)
-                for stamp in stamps:
-                    with self.subTest(trial=trial, step=step, now=stamp):
-                        self._indexed_lookups(store, "tasks", "role:alpha", stamp)
+                observe(step)
 
     def test_gate_validation_cost_is_linear_in_fragmented_runs(self):
         """Fragmented gates are validated in one pass, not one scan per gate."""
