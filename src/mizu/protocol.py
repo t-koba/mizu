@@ -20,7 +20,7 @@ from .snapshot import WRITER_HANDOFF_PROGRESS_SIGNALS
 #: names the effect and states what the scheduler does with it.
 _FINISH_EFFECTS = (
     ("progress", "counts as progress for dispatch"),
-    ("no_progress", "is subject to unchanged-input continuation and recovery"),
+    ("no_progress", "is subject to same-input continuation and recovery"),
     ("continuation", "admits another unit through handoff or allowance"),
     ("idle", "is eligible for the idle-with-open-work diagnostic"),
     ("waiting", "parks this unit and accepts ready work"),
