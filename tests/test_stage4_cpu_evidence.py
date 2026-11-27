@@ -1,4 +1,5 @@
 """The tracked stage-4 CPU evidence record is path-free, ID-free and tamper-evident."""
+import hashlib
 import json
 import subprocess
 import sys
@@ -28,7 +29,7 @@ def anchor_commits_available(record):
     return True
 
 
-def run_verifier_on_record(record):
+def run_verifier_on_record(record, repo=None):
     """Run the verifier with --repo over a temporary record/harness tree."""
     with tempfile.TemporaryDirectory() as tmp:
         fake_root = Path(tmp)
@@ -43,7 +44,54 @@ def run_verifier_on_record(record):
         harness.write_bytes((ROOT / "scripts" / "daemon-cpu.py").read_bytes())
         return subprocess.run(
             [sys.executable, str(fake_root / "scripts" / "verify-stage4-cpu-evidence.py"),
-             "--repo", str(ROOT)], cwd=fake_root, capture_output=True, text=True)
+             "--repo", str(repo if repo is not None else ROOT)], cwd=fake_root,
+            capture_output=True, text=True)
+
+
+def _source_digest(src):
+    """Same recipe as the verifier's tree_digest_from_git after extraction."""
+    digest = hashlib.sha256()
+    for path in sorted((src / "mizu").rglob("*.py")):
+        digest.update(str(path.relative_to(src)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def git_source_record(base_record, tmp):
+    """Fabricate a record whose source identity is pinned to a real git commit.
+
+    Returns (record, repo). Both sides' bindings, embedded sources and witness
+    rows point at a disposable committed src/mizu tree, so git-backed checks
+    can be exercised without ROOT having .git or the named public anchors.
+    """
+    repo = Path(tmp) / "source-repo"
+    source = repo / "src" / "mizu" / "sample.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    env_args = ["git", "-C", str(repo)]
+    subprocess.run(env_args + ["init", "-q"], check=True, capture_output=True)
+    subprocess.run(env_args + ["add", "src/mizu/sample.py"], check=True,
+                   capture_output=True)
+    subprocess.run(env_args + ["-c", "user.email=test@example.invalid", "-c",
+                               "user.name=test", "commit", "-q", "-m", "source"],
+                   check=True, capture_output=True)
+    revision = subprocess.run(env_args + ["rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    digest = _source_digest(repo / "src")
+    record = json.loads(json.dumps(base_record))
+    for side in ("before", "after"):
+        record[side]["source_binding"]["source_revision"] = revision
+        record[side]["source_binding"]["daemon_src_sha256"] = digest
+        emb = record[side]["embedded_receipt"]
+        emb["source"]["source_revision"] = revision
+        emb["source"]["daemon_src_sha256"] = digest
+        record[side]["embedded_receipt_sha256"] = _canonical_sha(emb)
+    for row in record["witness"]["git_recompute"]:
+        row["source_revision"] = revision
+        row["tree_digest"] = digest
+    return record, repo
 
 
 class Stage4CpuEvidenceTests(unittest.TestCase):
@@ -102,13 +150,17 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
     def test_forged_receipt_source_fails_binding_check_with_git(self):
         # Refreshing the inline checksum over a forged embedded source must
         # not pass while the detached binding, witness and git tree are honest.
-        record = json.loads(RECORD.read_text(encoding="utf-8"))
-        source = record["before"]["embedded_receipt"]["source"]
-        source["daemon_src_sha256"] = "f" * 64
-        source["source_revision"] = "1" * 40
-        record["before"]["embedded_receipt_sha256"] = _canonical_sha(
-            record["before"]["embedded_receipt"])
-        run = run_verifier_on_record(record)
+        # A disposable git repo supplies the source tree so this regression
+        # runs even where ROOT has no .git or named anchor commits.
+        with tempfile.TemporaryDirectory() as tmp:
+            record, repo = git_source_record(
+                json.loads(RECORD.read_text(encoding="utf-8")), tmp)
+            source = record["before"]["embedded_receipt"]["source"]
+            source["daemon_src_sha256"] = "f" * 64
+            source["source_revision"] = "1" * 40
+            record["before"]["embedded_receipt_sha256"] = _canonical_sha(
+                record["before"]["embedded_receipt"])
+            run = run_verifier_on_record(record, repo=repo)
         self.assertNotEqual(run.returncode, 0, run.stderr)
         summary = json.loads(run.stdout)
         self.assertFalse(summary["checks"]["before_receipt_source_bound"])

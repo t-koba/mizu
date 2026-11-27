@@ -17,8 +17,9 @@ Two scopes:
   digest from the named git commit with the harness's own recipe and compares
   it to both the detached binding and the embedded receipt's source digest.
   The commit tree is external to the record, so this check is non-circular
-  and fails on falsified numbers. A reader reproduces it with a full clone;
-  the named commits are ancestors of HEAD in the public history.
+  and establishes which source a receipt names; it does NOT authenticate the
+  recorded CPU numbers. A reader reproduces it with a full clone; the named
+  commits are ancestors of HEAD in the public history.
 
 A named record can be selected with --record; the default stays the stage-4
 record. Prints one bounded JSON summary; exit 0 only when every reported check
