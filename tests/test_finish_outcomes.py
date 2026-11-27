@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
@@ -27,19 +28,41 @@ class FinishOutcomeTests(Fixture):
         self.assertEqual(role.finish_outcomes, ("continue", "wait", "blocked", "done"))
         [finish] = tool_definitions(("finish",), role=role)
         self.assertEqual((finish["description"], finish["inputSchema"]),
-                         finish_definition(role.finish_outcomes, review_verdict=False))
+                         finish_definition(role.finish_outcomes, review_verdict=False, role=role))
         self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
         fields = finish["inputSchema"]["properties"]
         self.assertEqual(fields["outcome"]["enum"], ["continue", "wait", "blocked", "done"])
         self.assertIn("wait_for_check", fields)
         self.assertIn("wait_seconds", fields)
-        self.assertEqual(fields["next_step"], {"type": "string", "minLength": 1, "maxLength": 4096})
+        self.assertIn("check job", fields["wait_for_check"]["description"])
+        self.assertIn("requires check_job", fields["wait_for_check"]["description"])
+        self.assertIn("wake deadline", fields["wait_seconds"]["description"])
+        self.assertIn(str(self.config.limits.default_wait_seconds),
+                      fields["wait_seconds"]["description"])
+        self.assertEqual(fields["next_step"],
+                         {"type": "string", "minLength": 1, "maxLength": 4096,
+                          "description": "Carries the continuation handoff."})
         self.assertNotIn("next_step", finish["inputSchema"]["required"])
         contract = _writer_continuation_contract(role.finish_outcomes, self.config, role)
         self.assertIn("\n\n" + contract + "\n\n", finish["description"])
         for advice in ("Use outcome=wait with wait_seconds=N", "Use outcome=wait with wait_for_check=<id>",
                        "For a writable role, outcome=done requires successful verification."):
             self.assertNotIn(advice, finish["description"])
+
+    def test_check_wait_fact_and_schema_follow_the_capability(self):
+        role = self.config.roles["consult"]
+        checker = replace(role, capabilities=(*role.capabilities, "check_job"))
+        [finish] = tool_definitions(("finish",), role=checker, config=self.config)
+        self.assertIn("wait_for_check selects a check job owned by this unit.",
+                      finish["description"])
+        fields = finish["inputSchema"]["properties"]
+        self.assertIn("requires check_job", fields["wait_for_check"]["description"])
+
+    def test_writable_done_states_the_verification_fact(self):
+        role = self.config.roles["worker"]
+        [finish] = tool_definitions(("finish",), role=role, config=self.config)
+        self.assertIn("Writable units accept done only after configured verification passes.",
+                      finish["description"])
 
     def test_default_opening_states_effects_not_refusals(self):
         opening = self.opening()
@@ -49,6 +72,10 @@ class FinishOutcomeTests(Fixture):
             self.assertIn("Finish effects:", text)
             for outcome in ("continue", "wait", "blocked", "done"):
                 self.assertIn(f"{outcome}=[", text)
+            for fact in ("wait_seconds sets a wake deadline",
+                         "next_step carries the continuation handoff."):
+                self.assertIn(fact, text)
+            self.assertNotIn("wait_for_check selects", text)
             for purpose in ("Use outcome=", "ordinary finish", "naming a new proposed follow-up",
                             "to pause until a wake", "to report what prevents", "to mark the work complete"):
                 self.assertNotIn(purpose, text)
@@ -68,10 +95,11 @@ class FinishOutcomeTests(Fixture):
         self.assertNotIn("wait_seconds", fields)
         description = finish["description"]
         self.assertNotRegex(description, r"wait=\[|wait_for_check|wait_seconds")
-        self.assertIn("blocked=[no_progress, waiting, ready_check]", description)
+        self.assertIn("blocked=[no_progress]", description)
         self.assertNotIn("done=[", description)
+        self.assertNotIn("parks this unit", description)
         opening = self.opening()
-        self.assertIn("blocked=[no_progress, waiting, ready_check]", opening)
+        self.assertIn("blocked=[no_progress]", opening)
         self.assertNotRegex(opening, r"wait=\[|done=\[")
 
     def test_no_parking_outcomes_have_no_parking_description(self):
@@ -87,6 +115,7 @@ class FinishOutcomeTests(Fixture):
         opening = self.opening()
         self.assertIn("done=[]", opening)
         self.assertIn("done is terminal; only an operator can reopen.", opening)
+        self.assertNotIn("Writable units accept done only after configured verification passes.", opening)
         self.assertNotRegex(opening, r"waiting=\[|Waiting outcomes park|continuation=\[|next_step")
 
     def test_blocked_only_description_omits_continuation(self):

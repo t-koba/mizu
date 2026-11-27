@@ -25,14 +25,29 @@ _FINISH_EFFECTS = (
     ("waiting", "parks this unit and accepts ready work"),
     ("ready_check", "requires ready-work evidence at finish"),
 )
+#: The ready-inventory parking gate runs on the writer finish path only. A
+#: read-only unit cannot be parked by it, so its contract omits these effects;
+#: an unbound listing keeps the full manual.
+_WRITER_ONLY_EFFECTS = frozenset({"waiting", "ready_check"})
 #: Fixed upper bound for the derived contract, independent of configuration.
 MAX_FINISH_EFFECT_CONTRACT_CHARS = 2048
+
+
+def _wait_seconds_limit(config, name: str) -> int:
+    """Resolve one bounded configured wait setting for the derived contract."""
+    fallback = getattr(Limits(), name)
+    try:
+        value = getattr(config.limits, name)
+    except (AttributeError, TypeError):
+        return fallback
+    return value if type(value) is int and 1 <= value <= MAX_WAIT_SECONDS else fallback
 
 
 def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | None = None,
                                   role: Role | None = None) -> str:
     """State the resolved scheduler effects of the available finish outcomes."""
     effects = outcome_effects(config, role)
+    writer = role is None or getattr(role, "workspace", None) == "write"
     positive = {
         "progress": effects.progress,
         "no_progress": effects.no_progress,
@@ -41,6 +56,9 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
         "waiting": effects.waiting,
         "ready_check": effects.ready_check,
     }
+    if not writer:
+        for name in _WRITER_ONLY_EFFECTS:
+            positive[name] = ()
     selected = tuple(outcome for outcome in FINISH_OUTCOMES if outcome in outcomes)
     parts = ["Finish effects: " + "; ".join(
         f"{outcome}=[{', '.join(name for name, _ in _FINISH_EFFECTS if outcome in positive[name])}]"
@@ -52,6 +70,8 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
                                if name in used) + ".")
     if "done" in selected:
         parts.append("done is terminal; only an operator can reopen.")
+        if writer:
+            parts.append("Writable units accept done only after configured verification passes.")
     if "waiting" in used:
         sources = ["messages"]
         if "wait" in selected:
@@ -59,14 +79,15 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
         sources.append("an operator wake")
         parts.append("Waiting outcomes park until a wake from "
                      + ", ".join(sources[:-1]) + ", or " + sources[-1] + ".")
-        if "wait" in selected:
-            try:
-                default = config.limits.default_wait_seconds
-            except (AttributeError, TypeError):
-                default = Limits().default_wait_seconds
-            if type(default) is not int or not 1 <= default <= MAX_WAIT_SECONDS:
-                default = Limits().default_wait_seconds
-            parts.append(f"Without a deadline, the configured default wait is {default} seconds.")
+    if "wait" in selected:
+        default = _wait_seconds_limit(config, "default_wait_seconds")
+        maximum = _wait_seconds_limit(config, "maximum_wait_seconds")
+        parts.append(f"wait_seconds sets a wake deadline of at most {maximum} seconds; "
+                     f"without it the configured default wait is {default} seconds.")
+        if "check_job" in (getattr(role, "capabilities", ()) or ()):
+            parts.append("wait_for_check selects a check job owned by this unit.")
+    if any(outcome in positive["continuation"] for outcome in selected):
+        parts.append("next_step carries the continuation handoff.")
     return " ".join(parts)[:MAX_FINISH_EFFECT_CONTRACT_CHARS]
 
 
@@ -189,6 +210,8 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
                       config: Config | None = None, role: Role | None = None) -> tuple[str, dict]:
     """Describe finish; the typed verdict is advertised only to its holders."""
     can_wait = "wait" in outcomes
+    default_wait = _wait_seconds_limit(config, "default_wait_seconds")
+    maximum_wait = _wait_seconds_limit(config, "maximum_wait_seconds")
     description = (
         "End this work unit and release its model slot and workspace lock. A successful seal ends tool access.\n\n"
         + _writer_continuation_contract(outcomes, config, role)
@@ -207,11 +230,16 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
         "summary": text(12000), "state": text(32000),
         **({"review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]}}
            if review_verdict else {}),
-        "wait_for_check": text(64),
+        "wait_for_check": {**text(64), "description": (
+            "Selects a check job owned by this unit; requires check_job.")},
         "release_checks": array(text(64), 32),
         "ack_events": array(text(64), 512),
-        "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
-        "next_step": {**text(4096), "minLength": 1},
+        "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS,
+                         "description": (
+                             f"Sets a wake deadline of at most {maximum_wait} seconds; "
+                             f"omitted values use the configured default of {default_wait}.")},
+        "next_step": {**text(4096), "minLength": 1,
+                      "description": "Carries the continuation handoff."},
         "next_profile": text(63), "next_reason": text(256),
     }
     if not can_wait:
