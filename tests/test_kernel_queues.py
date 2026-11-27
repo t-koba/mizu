@@ -14,6 +14,7 @@ from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.fs import atomic_write, canonical
 from mizu.kernel import QueueStore, parse_queues
+from mizu.kernel import queues as queue_module
 from mizu.kernel.queues import (MAX_REFS, MAX_RETENTION_SCAN, PAGE_DEFAULT, PAGE_MAX,
                                 _DELIVERY_UNIT_MAX, _instant)
 from mizu.project import Project
@@ -454,6 +455,112 @@ class QueueStoreTests(unittest.TestCase):
         after = self.store.pending("tasks", "role:alpha", newest=0, now=LATER)
         self.assertEqual((after["count"], after["through"]), (1, 4))
         self.assertTrue(self.store.due("tasks", "role:alpha", now=LATER))
+
+    def test_elapsed_gates_ignored_via_until_without_rewriting(self):
+        """Elapsed gates are ignored via until; the file keeps every gate."""
+        store = QueueStore(self.root / "compacted", self.queues)
+        elapsed = [store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+                   for _ in range(3)]
+        future = store.append("tasks", BODY, "operator", now=NOW, deliver_at=EVEN_LATER)
+        store.append("tasks", BODY, "operator", now=NOW)  # undelivered wake
+        for made in (*elapsed, future):
+            store.record_delivery("tasks", made["seq"], "role:alpha", "opening",
+                                  now=NOW, handed=True)
+        path = self.root / "compacted" / "queues" / "tasks" / "skip" / "role_alpha.json"
+        seqs = [made["seq"] for made in (*elapsed, future)]
+        stored = json.loads(path.read_text())
+        self.assertEqual(stored["until"], EVEN_LATER)
+        self.assertEqual([gate[0] for gate in stored["gates"]], seqs)
+        # Simulate legacy state for the one-time upgrade.
+        atomic_write(path, canonical({"runs": stored["runs"], "gates": stored["gates"]}))
+        self.assertNotIn("until", json.loads(path.read_text()))
+
+        # (a) Before the deadline every gate is still recorded and still blocks.
+        self._indexed_lookups(store, "tasks", "role:alpha", NOW)
+        before = store.pending("tasks", "role:alpha", newest=0, now=NOW)
+        self.assertEqual((before["count"], before["through"], before["more"]), (0, 0, True))
+        page = store.read("tasks", "role:alpha", now=NOW)
+        self.assertEqual((page["next"], page["delayed"]), (0, True))
+        # One lookup upgraded legacy state, preserving every gate.
+        upgraded = json.loads(path.read_text())
+        self.assertEqual(upgraded["until"], EVEN_LATER)
+        self.assertEqual([gate[0] for gate in upgraded["gates"]], seqs)
+        self.assertEqual(upgraded["runs"], stored["runs"])
+        upgraded_bytes = path.read_bytes()
+        # The retention path without a stamp still sees all gates unfiltered.
+        self.assertEqual(store._skip_index("tasks", "role:alpha", 5)[1],
+                         tuple((seq, LATER) for seq in seqs[:3])
+                         + ((future["seq"], EVEN_LATER),))
+
+        # (d) At LATER elapsed gates are crossed but the future gate still stops the scan.
+        self._indexed_lookups(store, "tasks", "role:alpha", LATER)
+        mid = store.pending("tasks", "role:alpha", newest=2, now=LATER)
+        self.assertEqual((mid["count"], mid["through"], mid["more"]), (0, 3, True))
+        mid_page = store.read("tasks", "role:alpha", now=LATER)
+        self.assertEqual((mid_page["next"], mid_page["delayed"]), (3, True))
+        self.assertFalse(store.due("tasks", "role:alpha", now=LATER))
+        self.assertIsNone(store.next_delivery("tasks", "role:alpha", now=LATER))
+        self.assertEqual([gate[0] for gate in json.loads(path.read_text())["gates"]], seqs)
+        self.assertEqual(path.read_bytes(), upgraded_bytes)
+
+        def lookups(stamp):
+            return (store.pending("tasks", "role:alpha", newest=2, now=stamp),
+                    store.due("tasks", "role:alpha", now=stamp),
+                    store.next_delivery("tasks", "role:alpha", now=stamp),
+                    store.read("tasks", "role:alpha", now=stamp))
+
+        real = queue_module._instant
+        parsed = []
+
+        def counting(value, where):
+            if where == "deliver_at":
+                parsed.append(value)
+            return real(value, where)
+
+        # (b) At the max deadline the upgraded until lets repeated observations
+        # skip parsing gate deadlines while seeing the same facts as a full scan.
+        with patch.object(queue_module, "_instant", side_effect=counting):
+            first = lookups(EVEN_LATER)
+            self.assertEqual(parsed, [])
+            for _ in range(3):
+                self.assertEqual(lookups(EVEN_LATER), first)
+            self.assertEqual(parsed, [])
+        self.assertEqual(path.read_bytes(), upgraded_bytes)
+        self.assertEqual(json.loads(path.read_text())["until"], EVEN_LATER)
+        self.assertEqual([gate[0] for gate in json.loads(path.read_text())["gates"]], seqs)
+        self._indexed_lookups(store, "tasks", "role:alpha", EVEN_LATER)
+        self.assertEqual((first[0]["count"], first[0]["through"]), (1, 5))
+        self.assertEqual([m["seq"] for m in first[0]["messages"]], [5])
+        runs, gates = store._skip_index("tasks", "role:alpha", 5,
+                                        stamp=real(EVEN_LATER, "now"), compact=True)
+        self.assertEqual(runs, ((1, 4),))
+        self.assertEqual(gates, ())
+        self.assertEqual(path.read_bytes(), upgraded_bytes)
+
+        # (c) An earlier explicit now after a later one still sees the gates.
+        self._indexed_lookups(store, "tasks", "role:alpha", NOW)
+        again = store.pending("tasks", "role:alpha", newest=0, now=NOW)
+        self.assertEqual((again["count"], again["through"], again["more"]), (0, 0, True))
+        self.assertTrue(store.read("tasks", "role:alpha", now=NOW)["delayed"])
+        self.assertEqual([gate[0] for gate in json.loads(path.read_text())["gates"]], seqs)
+
+        # (e) Malformed gate structure or invalid until fails closed without rewrite.
+        stamp = real(EVEN_LATER, "now")
+        for payload in (
+            canonical({"runs": [[1, 4]], "gates": [[1, "not-a-time"], [4, EVEN_LATER]]}),
+            canonical({"runs": [[1, 4]], "gates": [[5, LATER]]}),
+            canonical({"runs": [[1, 4]],
+                       "gates": [[1, LATER], [2, LATER], [3, LATER], [4, EVEN_LATER]],
+                       "until": "not-a-time"}),
+            canonical({"runs": [[1, 4]], "gates": [[1, LATER]], "until": 123}),
+            canonical({"runs": [[1, 4]], "gates": [[5, LATER]], "until": EVEN_LATER}),
+        ):
+            with self.subTest(payload=payload[:60]):
+                atomic_write(path, payload)
+                self.assertEqual(store._skip_index("tasks", "role:alpha", 5,
+                                                   stamp=stamp, compact=True), ((), ()))
+                self._indexed_lookups(store, "tasks", "role:alpha", LATER)
+                self.assertEqual(path.read_bytes(), payload)
 
     def test_corrupt_skip_index_fails_closed_to_a_full_scan(self):
         """Malformed derived state never licenses skipping undelivered rows."""

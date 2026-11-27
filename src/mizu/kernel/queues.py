@@ -65,6 +65,7 @@ _ID = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _DELIVERY_KEYS = frozenset({"unit", "at"})
 _SKIP_KEYS = frozenset({"runs", "gates"})
+_SKIP_UNTIL_KEYS = frozenset({"runs", "gates", "until"})
 _RETIRE_KEYS = frozenset({"id", "queue", "seq", "id_generated", "refs"})
 # Prior versions wrote intents without outgoing refs; accept them so an
 # interrupted removal survives an upgrade and its pointer still retires.
@@ -622,20 +623,28 @@ class QueueStore:
         return (self.root / self._relative(queue, "skip")
                 / (self._actor(actor).replace(":", "_") + ".json"))
 
-    def _skip_index(self, queue: str, actor: str, head: int) -> tuple[tuple, tuple]:
+    def _skip_index(self, queue: str, actor: str, head: int, *,
+                    stamp: dt.datetime | None = None,
+                    compact: bool = False) -> tuple[tuple, tuple]:
         """Validated delivered runs and delayed gates for one reader.
 
         Each run is ``(start, end)``: every message in it has a delivery fact
         for ``actor``. Each gate is ``(seq, deliver_at)`` for a delivered
-        delayed message in a run. Missing or malformed state fails closed to
-        empty runs, i.e. a full scan; no fact is inferred from the index.
+        delayed message in a run. ``until`` is the maximum gate deadline, or
+        None when there are no gates. Missing or malformed state fails closed
+        to empty runs, i.e. a full scan; no fact is inferred from the index.
+        When ``stamp`` shows every gate elapsed (``until`` at or before it),
+        gates are ignored for this observation without parsing deadlines or
+        rewriting. With ``compact=True`` a legacy file without ``until`` gains
+        one while keeping every gate; no lookup ever drops a gate.
         """
         name = self._relative(queue, "skip", self._actor(actor).replace(":", "_") + ".json")
         try:
             stored = self._optional_json(name)
         except (Denied, ValueError, RecursionError):
             return (), ()
-        if not isinstance(stored, Mapping) or set(stored) != _SKIP_KEYS:
+        if (not isinstance(stored, Mapping)
+                or set(stored) not in (_SKIP_KEYS, _SKIP_UNTIL_KEYS)):
             return (), ()
         raw_runs, raw_gates = stored["runs"], stored["gates"]
         if (not isinstance(raw_runs, list) or not isinstance(raw_gates, list)
@@ -650,7 +659,31 @@ class QueueStore:
                 return (), ()
             runs.append((item[0], item[1]))
             previous = item[1]
+        legacy = "until" not in stored
+        until_dt: dt.datetime | None = None
+        if not legacy:
+            raw_until = stored["until"]
+            if raw_until is None:
+                until_dt = None
+            elif isinstance(raw_until, str):
+                try:
+                    until_dt = _instant(raw_until, "until")
+                except Denied:
+                    return (), ()
+            else:
+                return (), ()
+        if stamp is not None and until_dt is not None and until_dt <= stamp:
+            previous = 0
+            for item in raw_gates:
+                if (not isinstance(item, list) or len(item) != 2
+                        or type(item[0]) is not int or type(item[1]) is not str
+                        or item[0] <= previous or item[0] > head
+                        or not any(start <= item[0] <= end for start, end in runs)):
+                    return (), ()
+                previous = item[0]
+            return tuple(runs), ()
         gates: list[tuple[int, str]] = []
+        deadlines: list[dt.datetime] = []
         previous = 0
         for item in raw_gates:
             if (not isinstance(item, list) or len(item) != 2
@@ -659,11 +692,21 @@ class QueueStore:
                     or not any(start <= item[0] <= end for start, end in runs)):
                 return (), ()
             try:
-                _instant(item[1], "deliver_at")
+                deadlines.append(_instant(item[1], "deliver_at"))
             except Denied:
                 return (), ()
             gates.append((item[0], item[1]))
             previous = item[0]
+        if stamp is not None and compact and legacy:
+            if deadlines:
+                until = gates[max(range(len(deadlines)),
+                                  key=lambda i: deadlines[i])][1]
+            else:
+                until = None
+            atomic_write(self._skip_path(queue, actor),
+                         canonical({"runs": [list(run) for run in runs],
+                                    "gates": [list(gate) for gate in gates],
+                                    "until": until}))
         return tuple(runs), tuple(gates)
 
     @staticmethod
@@ -709,6 +752,16 @@ class QueueStore:
                 _instant(deadline, "deliver_at")
                 gates.append((seq, deadline))
             gates.sort()
+            if gates:
+                latest: str | None = gates[0][1]
+                latest_dt = _instant(latest, "deliver_at")
+                for _, at in gates[1:]:
+                    at_dt = _instant(at, "deliver_at")
+                    if at_dt > latest_dt:
+                        latest, latest_dt = at, at_dt
+                until: str | None = latest
+            else:
+                until = None
             before = next((i for i, run in enumerate(runs) if run[1] == seq - 1), None)
             after = next((i for i, run in enumerate(runs) if run[0] == seq + 1), None)
             if before is not None and after is not None:
@@ -722,7 +775,8 @@ class QueueStore:
                 runs.append((seq, seq))
                 runs.sort()
             atomic_write(path, canonical({"runs": [list(run) for run in runs],
-                                          "gates": [list(gate) for gate in gates]}))
+                                          "gates": [list(gate) for gate in gates],
+                                          "until": until}))
         except (Denied, ValueError, RecursionError):
             path.unlink(missing_ok=True)  # a corrupt summary licenses no skip
 
@@ -758,7 +812,8 @@ class QueueStore:
             seq = (cursor if cursor is not None
                    else max(self._retained(declaration.name), 0))
             # An explicit cursor pages history: delivered rows are returned.
-            index = (self._skip_index(declaration.name, actor, head)
+            index = (self._skip_index(declaration.name, actor, head,
+                                      stamp=stamp, compact=True)
                      if cursor is None else ((), ()))
             rows, delayed = [], False
             # Bound the page by rows returned, not by positions examined:
@@ -796,7 +851,8 @@ class QueueStore:
         delivered to ``actor``, and ends at a not-yet-due message (head-of-line)
         or the queue head. A delivered prefix is skipped, not counted, so it
         cannot hide a later undelivered message. ``messages`` holds the oldest
-        ``newest`` (0..PAGE_MAX) of the counted messages. Nothing is written.
+        ``newest`` (0..PAGE_MAX) of the counted messages. No delivery or body
+        is written; the derived skip index may gain an until field, never dropping gates.
         """
         declaration = self._grant(queue, actor, write=False)
         if type(newest) is not int or not 0 <= newest <= PAGE_MAX:
@@ -804,7 +860,9 @@ class QueueStore:
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        index = self._skip_index(declaration.name, actor, head)
+        with self._locked():
+            index = self._skip_index(declaration.name, actor, head,
+                                     stamp=stamp, compact=True)
         count, rows = 0, []
         # Count undelivered messages, not examined positions: a delivered
         # run of any length cannot hide the next undelivered message.
@@ -834,13 +892,16 @@ class QueueStore:
         when it is delivered. Besides the queue's ``wake`` list, a reply wakes
         the author of the message it refers to (see ``_wakes``), so a thread
         reaches whoever started it. An undelivered message stays read-pending;
-        it just does not wake again.
+        it just does not wake again. No delivery or body is written; the
+        derived skip index may gain an until field, never dropping gates.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        index = self._skip_index(declaration.name, actor, head)
+        with self._locked():
+            index = self._skip_index(declaration.name, actor, head,
+                                     stamp=stamp, compact=True)
         # Scan to the head, stopping at the first not-yet-due message. A long
         # delivered run is skipped, not counted, so it cannot hide a wake.
         while seq < head:
@@ -964,13 +1025,16 @@ class QueueStore:
         checked. Retry/cancellation: none. Evidence: the message's stored
         ``deliver_at`` field. Failure: raises ``Denied`` for an undeclared
         queue, an invalid actor, a missing read grant or a corrupt
-        ``deliver_at``. Read-only; takes no lock and records no delivery.
+        ``deliver_at``. Records no delivery or body write; the derived skip
+        index may gain an until field, under the lock, never dropping gates.
         """
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
         seq = max(self._retained(declaration.name), 0)
-        index = self._skip_index(declaration.name, actor, head)
+        with self._locked():
+            index = self._skip_index(declaration.name, actor, head,
+                                     stamp=stamp, compact=True)
         # As in ``due``, delivered rows are skipped without ending the scan,
         # so a delivered run cannot hide a later actionable deadline.
         while seq < head:
