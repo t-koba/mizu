@@ -364,31 +364,35 @@ class CiRequests:
                 exclusive=True)
             return True
 
-    def establish_publication_empty(self, publication_id: str) -> bool:
-        """Record a certified publication's known emptiness as a durable index.
+    def establish_publication_empty(self, publication_id: str) -> list | None:
+        """Serve a publication's durable seek index, creating it if certifiable.
 
-        Under the writer lock, a publication with no index gets an empty index
-        only when the ledger has no legacy marker naming it. This proof is
-        publication-local: unrelated request writes cannot revoke it. No
-        activity token is rotated here; callers suppress OSError, Denied,
-        LimitExceeded, ValueError, TypeError and MizuError as before.
+        Under the writer lock this returns the validated ``(request_id, date)``
+        entries of an index that already exists, which may name real requests,
+        or ``[]`` after writing a fresh empty index for a publication certified
+        free of legacy markers naming it. It returns ``None`` when the
+        publication id or existing index is invalid, or the publication-local
+        certification cannot be completed. Callers treat ``None`` as uncertain
+        and keep the publication on the conservative shared scan. No activity
+        token is rotated here; callers suppress OSError, Denied, LimitExceeded,
+        ValueError, TypeError and MizuError as before.
         """
         if not isinstance(publication_id, str) or not _HEX64.fullmatch(publication_id):
-            return False
+            return None
         with lock(self.lock):
             entries, invalid = self._seek_read(publication_id)
             if invalid:
-                return False
+                return None
             if entries is not None:
-                return True
+                return entries
             if not self._retire_legacy_seeks():
-                return False
+                return None
             if not self._seek_certifiable(publication_id):
-                return False
+                return None
             mkdir(self.root / SEEK_DIR)
             write_json(self._seek_path(publication_id), {
                 "version": SEEK_VERSION, "publication_id": publication_id, "entries": []})
-            return True
+            return []
 
     def _retire_legacy_seeks(self) -> bool:
         """Remove superseded flat index files before first seek certification."""
@@ -543,23 +547,25 @@ class CiRequests:
         The shared reader's configured name and candidate limits apply before
         date filtering, so a candidate cap reached before that window makes
         only pages naming a scanned publication incomplete instead of proving
-        absence. A publication with no index is known empty only when its
-        ledger is certified free of markers naming that publication: this
-        publication-local proof needs neither a shared scan nor an incomplete
-        page and is robust to unrelated writes. It is recorded as a durable
-        per-publication empty seek index under the writer lock. Without that
-        proof the publication stays on the conservative shared scan; activity
-        tokens and filesystem timestamps never prove emptiness here. A query
-        naming both indexed and legacy publications receives the indexed items
-        plus the conservative legacy result.
+        absence. A publication whose first index lookup misses is resolved
+        under the writer lock: an index found there is served through its
+        entries, a publication certified free of markers naming it gets a
+        durable empty index and needs neither a shared scan nor an incomplete
+        page, and an uncertain result leaves the publication on the
+        conservative shared scan. That publication-local proof is robust to
+        unrelated writes; activity tokens and filesystem timestamps never
+        prove emptiness here. A query naming both indexed and legacy
+        publications receives the indexed items plus the conservative legacy
+        result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
-        is not an identity and is not returned. An index is only created for a
-        publication whose ledger was certified free of legacy markers under
-        the writer lock. A missing index falls back to the shared scan, while
-        a malformed, stale or ambiguous index or candidate makes only pages
-        naming that publication incomplete; a stopped shared scan makes only
-        pages naming a scanned publication incomplete. Invalid dates or filters
-        raise ``Denied``.
+        is not an identity and is not returned. An empty index is only created
+        for a publication whose ledger was certified free of legacy markers
+        under the writer lock, and entries observed under that lock are
+        revalidated against their own markers and outcomes. An unestablished
+        index falls back to the shared scan, while a malformed, stale or
+        ambiguous index or candidate makes only pages naming that publication
+        incomplete; a stopped shared scan makes only pages naming a scanned
+        publication incomplete. Invalid dates or filters raise ``Denied``.
         """
         prepared = {}
         for key, query in queries.items():
@@ -596,11 +602,14 @@ class CiRequests:
                 indexed[publication_id] = entries
             elif _HEX64.fullmatch(publication_id):
                 # Only the publication-local, timestamp-free proof can end the
-                # scan. A failed or unavailable proof leaves the publication
+                # scan. An index observed under the lock is served through its
+                # entries; a missing or uncertain result leaves the publication
                 # on the conservative shared scan.
                 with contextlib.suppress(OSError, Denied, LimitExceeded,
                                          ValueError, TypeError, MizuError):
-                    if self.establish_publication_empty(publication_id):
+                    established = self.establish_publication_empty(publication_id)
+                    if established is not None:
+                        indexed[publication_id] = established
                         continue
                 legacy.add(publication_id)
             else:

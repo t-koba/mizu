@@ -1087,6 +1087,33 @@ class CiRequestTests(Fixture):
         self.assertEqual(pages, {"head": {"items": [], "incomplete": True}})
         self.assertFalse(store._seek_path(publication).exists())
 
+    def test_stale_unlocked_seek_miss_cannot_hide_an_existing_index(self):
+        """A first miss before the lock must not serve a real entry as empty."""
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        publication = "f" * 64
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2026-06-02T00:00:00+00:00"})
+        real_seek_read = store._seek_read
+        calls = 0
+
+        def seek_read(publication_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None, False  # Stale observation taken before the lock.
+            return real_seek_read(publication_id)
+
+        window = dt.date(2026, 1, 1)
+        with patch.object(store, "_seek_read", side_effect=seek_read), \
+                patch.object(store, "_rows",
+                             side_effect=AssertionError("shared scan used")) as scan:
+            pages = store.matching_many({"head": ([publication], window)})
+        scan.assert_not_called()
+        self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
+
     def test_established_empty_index_grows_after_unrelated_dispatch(self):
         store = CiRequests(self.project.root, CiRequestEvidence())
         self.write_activity()
@@ -1121,7 +1148,7 @@ class CiRequestTests(Fixture):
         publication = self.fresh_receipt()["publication_id"]
         self.make_legacy_publication(publication)
         instant = dt.datetime.fromisoformat("2036-10-22T12:00:00+00:00")
-        with patch.object(store, "establish_publication_empty", return_value=False):
+        with patch.object(store, "establish_publication_empty", return_value=None):
             for window in (instant, instant + dt.timedelta(microseconds=1)):
                 with self.subTest(window=window), \
                         patch.object(store, "_rows", return_value=([], True)) as scan:
@@ -1166,7 +1193,7 @@ class CiRequestTests(Fixture):
         for failure in (None, Denied("proof unavailable"), OSError("unreadable")):
             with self.subTest(failure=failure):
                 proof = (patch.object(store, "establish_publication_empty",
-                                      return_value=False) if failure is None else
+                                      return_value=None) if failure is None else
                          patch.object(store, "establish_publication_empty",
                                       side_effect=failure))
                 with proof, patch.object(store, "_rows", wraps=store._rows) as scan:
