@@ -51,7 +51,9 @@ are SHA-256 over compact JSON ``[chain tag, item id, revision, kind]`` (first
 32 hex characters), distinct from inventory ids, so retries are idempotent.
 Store bookkeeping with no declared counterpart (timestamps, origin, actor,
 delivery and verification proofs) is not renamed or invented here; this is a
-message conversion, not an authority migration.
+message conversion, not an authority migration. A completion carries only a
+canonical digest of its completion-proof bundle as `proof`, never the proof
+objects themselves.
 
 Both modes only read the dedicated work-item store and change no runtime
 authority: it stays authoritative until cutover. There is no runtime
@@ -646,6 +648,12 @@ def chain_body(record: dict, item: str, rev: int, kind: str, schema: dict,
             body["snapshot"] = record["snapshot_id"]
         if "checks" in record and record["checks"] is not None:
             body["checks"] = record["checks"]
+        if kind == "completion":
+            bundle = {name: record[name] for name in (
+                "verification", "delivered_tree", "delivery", "delivery_schema",
+                "verification_scope", "completion_policy", "completion_evidence",
+            ) if record.get(name) is not None}
+            body["proof"] = hashlib.sha256(canonical(bundle)).hexdigest()
 
     unknown = set(body) - set(schema)
     if unknown:

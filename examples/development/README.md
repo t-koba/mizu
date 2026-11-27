@@ -42,7 +42,11 @@ nothing here specially.
   malformed id, missing chain, malformed row, extra queue item or any
   mismatch is a bounded refusal; success prints only
   `{"project": name, "checked": N, "matched": true}`. It writes no work items
-  and switches no authority.
+  and switches no authority. Non-retirement chain completions carry a canonical
+  `proof` digest of the verified completion evidence, which the gate compares, so
+  `matched: true` also confirms that the queue completion proof equals the
+  store's; the dedicated store stays authoritative until the cutover slice and
+  the gate does not itself perform a cutover.
 - `outcomes.toml` declares which finish outcomes have each positive progress
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4

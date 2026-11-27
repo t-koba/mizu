@@ -85,6 +85,11 @@ duplicate id, missing chain, malformed row, extra queue item or any mismatch
 is a bounded refusal; it prints
 `{"project": ..., "checked": N, "matched": true}` only on an exact match. The
 gate adds no runtime migration command and does not switch authority.
+The chain conversion carries a canonical `proof` digest of the verified
+completion evidence in each non-retirement completion message, and the gate
+compares it, so `matched: true` also confirms that the queue completion proof
+equals the store's. The dedicated store stays authoritative until the cutover
+slice; the gate does not itself perform a cutover.
 
 ## Stages
 

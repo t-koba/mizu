@@ -44,3 +44,4 @@ status = {type = "string", values = ["open", "doing", "blocked", "done", "droppe
 holder = {type = "principal"}
 snapshot = {type = "digest"}
 checks = {type = "list", item = {type = "string", max = 256}, max_items = 64}
+proof = {type = "digest"}

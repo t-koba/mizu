@@ -235,7 +235,8 @@ class ReplayRules(unittest.TestCase):
                            body="A body", holder="role:auditor", reason="Waiting")
         wait_a = row("wait", ITEM_A, 2, 4, title="A", status="blocked", body="{\"kind\": \"ci\"}")
         completion_a = row("completion", ITEM_A, 2, 5, title="A", status="done",
-                           body="A body", reason="Finished", snapshot="c" * 64)
+                           body="A body", reason="Finished", snapshot="c" * 64,
+                           proof="d" * 64)
         pending = VIEW.project([seed_b, seed_a, transition_a, wait_a], SCHEMA)
         self.assertEqual(pending[0]["wait"], {"kind": "ci"})
         self.assertEqual(pending[0]["holder"], "role:auditor")
@@ -247,11 +248,13 @@ class ReplayRules(unittest.TestCase):
         self.assertNotIn("holder", items[0])
         self.assertEqual(items[0]["reason"], "Finished")
         self.assertEqual(items[0]["snapshot"], "c" * 64)
+        self.assertEqual(items[0]["proof"], "d" * 64)
         self.assertEqual(items[0]["status"], "done")
 
     def test_transition_replaces_state_clearing_wait_and_proof_fields(self):
         seed = row("item", ITEM_A, 1, 1, body="Body", holder="role:worker",
-                   snapshot="a" * 64, checks=["a"], origin=canonical("origin").decode().rstrip("\n"))
+                   snapshot="a" * 64, checks=["a"], proof="a" * 64,
+                   origin=canonical("origin").decode().rstrip("\n"))
         wait = row("wait", ITEM_A, 1, 2, status="open", body="{\"kind\": \"ci\"}")
         transition = row("transition", ITEM_A, 2, 3, status="doing", body="Body")
         items = VIEW.project([seed, wait, transition], SCHEMA)
@@ -259,6 +262,7 @@ class ReplayRules(unittest.TestCase):
         self.assertNotIn("holder", items[0])
         self.assertNotIn("snapshot", items[0])
         self.assertNotIn("checks", items[0])
+        self.assertNotIn("proof", items[0])
         self.assertEqual(json.loads(items[0]["origin"]), "origin")
 
     def test_refuses_malformed_and_out_of_order_messages(self):

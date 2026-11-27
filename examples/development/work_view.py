@@ -202,7 +202,7 @@ def project(messages, schema=None) -> list[dict]:
             for name in ("title", "body", "scope", "reason"):
                 if name in body:
                     updated[name] = body[name]
-            for name in ("holder", "snapshot", "checks"):
+            for name in ("holder", "snapshot", "checks", "proof"):
                 if name in body:
                     updated[name] = body[name]
                 else:

@@ -500,8 +500,9 @@ full, including description, scope, reason, checks, holder and snapshot. The
 item message also carries `origin` as canonical JSON, so a string message id and
 a legacy structured reference both decode exactly. A field absent from a source
 record is omitted, never guessed. Store bookkeeping without a declared field
-(timestamps, actor, delivery and verification proofs) is not renamed or dropped
-from the store; it simply has no message counterpart here. Every body is validated against the declaration before the
+(timestamps and actor) is not renamed or dropped from the store; a completion
+carries a canonical `proof` digest of its verified completion-evidence subset,
+not the proof objects themselves. Every body is validated against the declaration before the
 first append. Message ids are the first 32 hex characters of SHA-256 over
 compact JSON `[tag, item id, revision, kind]` with a tag distinct from
 inventory mode, so a retry with unchanged records is idempotent.
@@ -553,6 +554,11 @@ stored item, malformed row or mismatch is a bounded stderr error with exit 1;
 success prints only `{"project": ..., "checked": N, "matched": true}`. The
 gate writes no work items, switches no authority and adds no product migration
 command.
+The chain conversion carries a canonical `proof` digest of the verified
+completion evidence in each non-retirement completion message, and the gate
+compares it, so `matched: true` also confirms that the queue completion proof
+equals the store's. The dedicated store stays authoritative until the cutover
+slice; the gate does not itself perform a cutover.
 
 For an older deployment, take a verified backup first (see
 [upgrade and rollback](#バージョン更新とロールバック)) and restore the project

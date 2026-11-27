@@ -188,6 +188,30 @@ class GateRules(unittest.TestCase):
         with self.assertRaisesRegex(GATE.ConversionError, "does not reproduce"):
             GATE.compare_views(store_view, queue_view, [ITEM_A])
 
+    def test_missing_or_changed_completion_proof_is_refused(self):
+        seed = row("item", ITEM_A, 1, 1, body="Body", status="open")
+        completion = row("completion", ITEM_A, 1, 2, body="Body", status="done",
+                         proof="a" * 64)
+        store_view = GATE.project([seed, completion], SCHEMA)
+        changed = (
+            row("completion", ITEM_A, 1, 2, body="Body", status="done"),
+            row("completion", ITEM_A, 1, 2, body="Body", status="done",
+                proof="b" * 64),
+        )
+        for other in changed:
+            with self.subTest(body=other["body"]):
+                queue_view = GATE.project([seed, other], SCHEMA)
+                with self.assertRaisesRegex(GATE.ConversionError, "does not reproduce"):
+                    GATE.compare_views(store_view, queue_view, [ITEM_A])
+
+    def test_matching_completion_proof_compares_equal(self):
+        seed = row("item", ITEM_A, 1, 1, body="Body", status="open")
+        completion = row("completion", ITEM_A, 1, 2, body="Body", status="done",
+                         proof="a" * 64)
+        store_view = GATE.project([seed, completion], SCHEMA)
+        queue_view = GATE.project([seed, completion], SCHEMA)
+        GATE.compare_views(store_view, queue_view, [ITEM_A])
+
     def test_extra_and_missing_queue_items_are_refused(self):
         seed_a = row("item", ITEM_A, 1, 1)
         seed_b = row("item", ITEM_B, 1, 2)
