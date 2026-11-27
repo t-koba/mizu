@@ -920,6 +920,137 @@ class QueueStoreTests(unittest.TestCase):
         resumed.append("events", {"n": 2}, "host", now=NOW)  # triggers recovery + prune
         self.assertFalse((root / "queues" / "ids" / ("b" * 32 + ".json")).exists())
 
+    def test_interrupted_generated_pointer_is_reconciled_after_reopen(self):
+        """A fault after the body unlink leaves an intent that retention finishes."""
+        root = self.root / "retire-recovery"
+        store = QueueStore(root, self.queues)
+        ids = root / "queues" / "ids"
+        retire = root / "queues" / "retire"
+
+        caller = store.append("notes", {}, "host", id="c" * 32, now=OLD)
+        self.deliver(store, "notes", caller, now=NOW)
+        store.read("notes", "role:alpha", now=NOW)  # age retention prunes the caller id
+        caller_pointer = ids / (caller["id"] + ".json")
+        self.assertTrue(caller_pointer.exists())
+        self.assertNotIn("id_generated", json.loads(caller_pointer.read_text(encoding="utf-8")))
+
+        victim = store.append("notes", {}, "host", now=OLD)
+        live = store.append("notes", {}, "host", now=NOW)  # not due for removal
+        self.deliver(store, "notes", victim, now=NOW)
+        victim_pointer = ids / (victim["id"] + ".json")
+        live_pointer = ids / (live["id"] + ".json")
+        victim_body = root / "queues" / "notes" / "messages" / f"{victim['seq']:020d}.json"
+        victim_facts = root / "queues" / "notes" / "delivery" / f"{victim['seq']:020d}"
+        skip = root / "queues" / "notes" / "skip" / "role_alpha.json"
+
+        real_remove = store._remove_delivery
+
+        def fail_once(queue, seq):
+            if seq == victim["seq"]:
+                raise OSError("injected delivery failure")
+            real_remove(queue, seq)
+
+        with patch.object(store, "_remove_delivery", side_effect=fail_once):
+            with self.assertRaisesRegex(OSError, "injected"):
+                store.append("notes", {}, "host", now=NOW)
+
+        intent = retire / (victim["id"] + ".json")
+        self.assertFalse(victim_body.exists())
+        self.assertTrue(victim_facts.is_dir())  # interrupted dependent cleanup
+        self.assertEqual(json.loads(skip.read_text(encoding="utf-8"))["runs"], [[victim["seq"]] * 2])
+        self.assertTrue(victim_pointer.exists())
+        self.assertEqual(json.loads(intent.read_text(encoding="utf-8")),
+                         {"id": victim["id"], "queue": "notes", "seq": victim["seq"],
+                          "id_generated": True})
+
+        resumed = QueueStore(root, self.queues)
+        resumed.append("notes", {}, "host", now=NOW)  # reopen + append runs retention
+        self.assertFalse(victim_pointer.exists())
+        self.assertFalse(intent.exists())
+        self.assertFalse(victim_facts.exists())
+        self.assertFalse(skip.exists())  # derived runs finished too
+        self.assertTrue(caller_pointer.exists())  # caller tombstone survives
+        self.assertTrue(live_pointer.exists())  # pointer to a live message survives
+        self.assertTrue((root / "queues" / "notes" / "messages"
+                         / f"{live['seq']:020d}.json").exists())
+        self.assertEqual(resumed.message(live["id"], "role:alpha"), live)
+
+    def test_retirement_reconciliation_is_bounded_and_idempotent(self):
+        root = self.root / "retire-bounded"
+        store = QueueStore(root, self.queues)
+        pointers, retire = root / "queues" / "ids", root / "queues" / "retire"
+        ids = ("a" * 32, "b" * 32)
+        for message_id, seq in zip(ids, (1, 2)):
+            atomic_write(pointers / (message_id + ".json"),
+                         canonical({"queue": "notes", "seq": seq, "id_generated": True}))
+            atomic_write(retire / (message_id + ".json"),
+                         canonical({"id": message_id, "queue": "notes", "seq": seq,
+                                    "id_generated": True}))
+        with patch("mizu.kernel.queues.MAX_RETIRE_RECONCILE", 1):
+            store._reconcile_retirements()
+            self.assertEqual(len(list(retire.glob("*.json"))), 1)
+            self.assertEqual(sum((pointers / (item + ".json")).exists() for item in ids), 1)
+            store._reconcile_retirements()  # the other intent is the next bounded pass
+        self.assertEqual(list(retire.glob("*.json")), [])
+        for message_id in ids:
+            self.assertFalse((pointers / (message_id + ".json")).exists())
+        store._reconcile_retirements()  # a completed reconciliation changes nothing
+        self.assertEqual(list(retire.glob("*.json")), [])
+
+        # A crash after the pointer unlink but before the intent unlink is a
+        # no-op completion: no pointer to remove, but the intent still expires.
+        orphan = "d" * 32
+        atomic_write(retire / (orphan + ".json"),
+                     canonical({"id": orphan, "queue": "notes", "seq": 3,
+                                "id_generated": True}))
+        store._reconcile_retirements()
+        self.assertFalse((retire / (orphan + ".json")).exists())
+
+    def test_malformed_retire_intent_licenses_no_deletion(self):
+        root = self.root / "retire-unsafe"
+        store = QueueStore(root, self.queues)
+        pointers, retire = root / "queues" / "ids", root / "queues" / "retire"
+        cases = [
+            {"id": "1" * 32, "queue": "notes", "seq": 1},  # no generated marker
+            {"id": "2" * 32, "queue": "notes", "seq": 1, "id_generated": False},
+            {"id": "3" * 32, "queue": "notes", "seq": 2, "id_generated": True},  # wrong seq
+            {"id": "4" * 32, "queue": "missing", "seq": 1, "id_generated": True},
+            {"id": "5" * 32, "queue": "notes", "seq": 1, "id_generated": True, "extra": 1},
+        ]
+        for index, intent in enumerate(cases):
+            message_id = intent["id"]
+            with self.subTest(index=index):
+                pointer = pointers / (message_id + ".json")
+                atomic_write(pointer, canonical({"queue": "notes", "seq": 1,
+                                                 "id_generated": True}))
+                path = retire / (message_id + ".json")
+                atomic_write(path, canonical(intent))
+                store._reconcile_retirements()
+                self.assertTrue(pointer.exists())
+                self.assertTrue(path.exists())
+        broken = "6" * 32
+        atomic_write(pointers / (broken + ".json"),
+                     canonical({"queue": "notes", "seq": 1, "id_generated": True}))
+        atomic_write(retire / (broken + ".json"), b"not json")
+        store._reconcile_retirements()
+        self.assertTrue((pointers / (broken + ".json")).exists())
+
+        # A well-formed intent over a caller-supplied tombstone is unsafe, and
+        # so is one over a pointer whose body is still live.
+        caller_id = "a" * 32
+        atomic_write(pointers / (caller_id + ".json"), canonical({"queue": "notes", "seq": 1}))
+        atomic_write(retire / (caller_id + ".json"),
+                     canonical({"id": caller_id, "queue": "notes", "seq": 1,
+                                "id_generated": True}))
+        live = store.append("notes", {}, "host", now=NOW)
+        live_intent = retire / (live["id"] + ".json")
+        atomic_write(live_intent, canonical({"id": live["id"], "queue": "notes",
+                                             "seq": live["seq"], "id_generated": True}))
+        store._reconcile_retirements()
+        self.assertTrue((pointers / (caller_id + ".json")).exists())
+        self.assertTrue((pointers / (live["id"] + ".json")).exists())
+        self.assertTrue(live_intent.exists())
+
     def test_migrate_cursors_converts_once_without_importing_woken(self):
         queue = self.root / "queues" / "tasks"
         for seq in range(1, 5):

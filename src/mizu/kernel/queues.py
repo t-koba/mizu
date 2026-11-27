@@ -11,6 +11,8 @@ Layout under the project root:
                                          with its message, a caller id stays a tombstone
   queues/refs/<id>/to.json                 bounded pointers to messages referring to <id>
   queues/intent.json                       the one in-flight append (crash recovery)
+  queues/retire/<id>.json                  durable retirement intent naming a generated
+                                           id pointer, finished by a bounded retention pass
   locks/queues.lock                        serialises writes
   wake/<role>                              touched on a due append to a waking queue
 
@@ -19,7 +21,10 @@ body and are bound to an authenticated principal by the caller. Validation is
 fail-closed and carries no queue name, role name or message meaning. Message
 files are create-only and complete; the queue lock serialises writes and the
 bounded retention that appends and reads may run, completing an interrupted
-append before starting another operation.
+append before starting another operation. A removal records its generated-id
+retirement before unlinking the body; later retention passes reconcile those
+intents, unlinking a pointer only when its body is gone and the pointer still
+matches the generated one named by the intent.
 """
 from __future__ import annotations
 
@@ -43,6 +48,8 @@ PAGE_MAX = 512
 PAGE_DEFAULT = 64
 MAX_REFS = 512
 MAX_RETENTION_SCAN = 256
+#: Retirement intents reconciled per retention pass, never unbounded storage.
+MAX_RETIRE_RECONCILE = MAX_RETENTION_SCAN
 MAX_RETAIN_LAST = 64
 DELIVERY_MAX_PRINCIPALS = 512
 DEFAULT_RETAIN_DAYS = 30
@@ -56,6 +63,7 @@ _ID = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _DELIVERY_KEYS = frozenset({"unit", "at"})
 _SKIP_KEYS = frozenset({"runs", "gates"})
+_RETIRE_KEYS = frozenset({"id", "queue", "seq", "id_generated"})
 _DELIVERY_UNIT_MAX = 128
 _TYPES = ("string", "integer", "boolean", "instant", "digest", "id", "principal", "list")
 _FIELD_KEYS = frozenset({"type", "required", "max", "min", "values", "item", "max_items"})
@@ -1070,7 +1078,9 @@ class QueueStore:
             return
         if directory.is_symlink() or not directory.is_dir():
             raise Denied("Corrupt skip directory")
-        head = self._head(queue)
+        # The removed seq may have been the last body: include it so its own
+        # index entry stays readable and can be retired rather than left stale.
+        head = max(self._head(queue), seq)
         for path in sorted(directory.glob("*.json")):
             try:
                 actor = self._cursor_principal(path.stem)
@@ -1094,27 +1104,120 @@ class QueueStore:
             else:
                 path.unlink(missing_ok=True)
 
+    def _retire_path(self, message_id: str) -> Path:
+        """Durable intent licensing the retirement of one generated id pointer."""
+        return self.root / self._relative("retire", f"{message_id}.json")
+
+    def _write_retire_intent(self, message_id: str, queue: str, seq: int) -> None:
+        """Record the pointer to retire before any part of the body is unlinked."""
+        atomic_write(self._retire_path(message_id),
+                     canonical({"id": message_id, "queue": queue, "seq": seq,
+                                "id_generated": True}))
+
+    def _read_retire_intent(self, path: Path) -> dict | None:
+        """Validate one intent strictly; malformed or unsafe ones license nothing."""
+        if path.is_symlink() or not path.is_file() or not _ID.fullmatch(path.stem):
+            return None
+        try:
+            stored = self._optional_json(self._relative("retire", path.name))
+        except (Denied, ValueError, RecursionError):
+            return None
+        if (not isinstance(stored, Mapping) or set(stored) != _RETIRE_KEYS
+                or stored["id"] != path.stem or not isinstance(stored["queue"], str)
+                or stored["queue"] not in self.queues
+                or type(stored["seq"]) is not int or stored["seq"] < 1
+                or stored["id_generated"] is not True):
+            return None
+        return dict(stored)
+
+    @staticmethod
+    def _matches_retire_intent(pointer: Mapping, intent: Mapping) -> bool:
+        """Whether a pointer is exactly the generated one an intent names."""
+        return (pointer.get("queue") == intent["queue"]
+                and pointer.get("seq") == intent["seq"]
+                and pointer.get("id_generated") is True)
+
+    def _retire_pointer(self, intent: Mapping) -> None:
+        """Unlink a validated generated pointer, then its intent.
+
+        Called only after the body and its dependent facts are gone. An absent
+        pointer means an earlier pass finished the unlink and only the intent
+        remains. A pointer that is corrupt or is not the generated pointer the
+        intent names licenses no deletion, and keeps both records.
+        """
+        message_id = intent["id"]
+        try:
+            pointer = self._id_pointer(message_id)
+        except Denied:
+            return
+        if pointer is not None and not self._matches_retire_intent(pointer, intent):
+            return
+        if pointer is not None:
+            (self.root / self._relative("ids", message_id + ".json")).unlink(missing_ok=True)
+        self._retire_path(message_id).unlink(missing_ok=True)
+
+    def _reconcile_retirements(self) -> None:
+        """Finish a bounded number of outstanding generated-pointer retirements.
+
+        Retention starts each pass with this: a body that is still present
+        stays with retention, a matching pointer whose body is gone is unlinked
+        after its delivery facts and skip entries, and malformed or unsafe
+        intents license no deletion and remain for a later pass.
+        """
+        directory = self.root / self._relative("retire")
+        if not directory.exists():
+            return
+        if directory.is_symlink() or not directory.is_dir():
+            raise Denied("Corrupt retirement directory")
+        paths = []
+        for path in directory.glob("*.json"):
+            paths.append(path)
+            if len(paths) >= MAX_RETIRE_RECONCILE:
+                break
+        for path in paths:
+            intent = self._read_retire_intent(path)
+            if intent is None:
+                continue
+            try:
+                if self._message(intent["queue"], intent["seq"]) is not None:
+                    continue  # a live body is retention's decision, not an intent's
+                pointer = self._id_pointer(intent["id"])
+                if pointer is not None and not self._matches_retire_intent(pointer, intent):
+                    continue  # a caller tombstone or a changed pointer licenses nothing
+                self._remove_delivery(intent["queue"], intent["seq"])
+                self._remove_skip(intent["queue"], intent["seq"])
+                self._retire_pointer(intent)
+            except Denied:
+                continue  # unsafe state licenses no deletion; leave the intent
+
     def _remove_message(self, queue: str, seq: int, message: Mapping) -> None:
         """Unlink a message, its delivery facts, and a generated id pointer.
 
-        Caller-supplied ids keep their tombstone (the idempotency contract);
-        generated ids have no caller and must not leave a permanent pointer.
-        Pointers to live referenced messages are not touched here: retention
-        leaves such messages on disk and ``_remove_ref`` retires them when the
-        last referrer goes away.
+        A generated id gets a durable retirement intent before the body is
+        unlinked, so an interrupted cleanup can be finished by retention on a
+        later pass. Caller-supplied ids keep their tombstone (the idempotency
+        contract). Pointers to live referenced messages are not touched here:
+        retention leaves such messages on disk and ``_remove_ref`` retires them
+        when the last referrer goes away.
         """
         if (not isinstance(message, Mapping) or message.get("queue") != queue
                 or message.get("seq") != seq):
             raise Denied("Corrupt queue message")
+        message_id = message.get("id")
+        try:
+            pointer = self._id_pointer(message_id) if isinstance(message_id, str) else None
+        except Denied:
+            pointer = None  # never delete a pointer we cannot validate as generated
+        generated = (isinstance(pointer, Mapping) and pointer.get("id_generated") is True
+                     and pointer.get("queue") == queue and pointer.get("seq") == seq)
+        if generated:
+            self._write_retire_intent(message_id, queue, seq)
         (self.root / self._relative(queue, "messages", f"{seq:020d}.json")).unlink(missing_ok=True)
         self._remove_delivery(queue, seq)
         self._remove_skip(queue, seq)
-        try:
-            pointer = self._id_pointer(message["id"])
-        except (Denied, KeyError):
-            pointer = None  # never delete a pointer we cannot validate as generated
-        if isinstance(pointer, Mapping) and pointer.get("id_generated") is True:
-            (self.root / self._relative("ids", message["id"] + ".json")).unlink(missing_ok=True)
+        if generated:
+            self._retire_pointer({"id": message_id, "queue": queue, "seq": seq,
+                                  "id_generated": True})
 
     def _remove_ref(self, target: str, message_id: str) -> None:
         entries = self._refs_to(target)
@@ -1160,6 +1263,7 @@ class QueueStore:
         the newest facts. Its writer removes it when the last ref goes away
         (see ``_remove_ref``).
         """
+        self._reconcile_retirements()
         path = self.root / self._relative(queue, "retain.json")
         cursor = self._retained(queue)
         head = self._head(queue)
@@ -1179,6 +1283,7 @@ class QueueStore:
 
     def _retain(self, queue: str, declaration: Queue, stamp: dt.datetime) -> None:
         """Remove bounded old messages only when every reader was delivered to."""
+        self._reconcile_retirements()
         path = self.root / self._relative(queue, "retain.json")
         stored = self._optional_json(self._relative(queue, "retain.json"))
         cursor = stored.get("seq") if isinstance(stored, Mapping) else None
