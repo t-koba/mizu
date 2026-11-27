@@ -5,13 +5,14 @@ import re
 
 from . import reviews
 from .config import (FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Limits, Role,
-                     outcome_effects)
+                     outcome_effects, role_progress_signals)
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
 from .prompt_sections import WORK_CAPABILITIES
 from .work_item_seed import MAX_ORIGIN_CHARS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 from .kernel.queues import PAGE_MAX as QUEUE_PAGE_MAX
+from .snapshot import WRITER_HANDOFF_PROGRESS_SIGNALS
 
 
 #: Mechanism facts advertised for each scheduler effect, in fixed order. Which
@@ -88,6 +89,18 @@ def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | No
             parts.append("wait_for_check selects a check job owned by this unit.")
     if any(outcome in positive["continuation"] for outcome in selected):
         parts.append("next_step carries the continuation handoff.")
+    if writer and "continue" in selected and "continue" in positive["continuation"]:
+        signals = [name for name in role_progress_signals(config, role)
+                   if name in WRITER_HANDOFF_PROGRESS_SIGNALS]
+        if "continue" in effects.no_progress and signals:
+            condition = ("continue in the configured no-progress outcomes and "
+                         "a selected work signal among " + ", ".join(signals))
+        else:
+            condition = "a configured no-progress outcome and qualifying work signal, but none applies"
+        default = _wait_seconds_limit(config, "default_wait_seconds")
+        parts.append("Immediate next-step handoff after continue requires " + condition
+                     + f"; otherwise the configured default wait of {default} seconds applies "
+                     "until a ready work item or another wake.")
     return " ".join(parts)[:MAX_FINISH_EFFECT_CONTRACT_CHARS]
 
 

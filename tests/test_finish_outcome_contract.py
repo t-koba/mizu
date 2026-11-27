@@ -76,6 +76,7 @@ class FinishOutcomeContractTests(Fixture):
         self.assertIn("Writable units accept done only after configured verification passes.", text)
         self.assertIn("the configured default wait is 47 seconds", text)
         self.assertIn("messages, check results, a deadline, or an operator wake", text)
+        self.assertNotIn("Immediate next-step handoff", text)
 
     def test_role_override_changes_described_effects(self):
         role = self.configure(
@@ -143,6 +144,22 @@ class FinishOutcomeContractTests(Fixture):
                 text = _writer_continuation_contract(
                     limited.finish_outcomes, self.config, limited)
                 self.assertNotIn(fact, text)
+
+    def test_next_step_readiness_fact_tracks_configured_signals(self):
+        role = self.configure(limits='progress_signals = ["code"]\n')
+        writer = replace(role, workspace="write")
+        prefix = "Immediate next-step handoff after continue requires "
+        self.assertIn(prefix + "continue in the configured no-progress outcomes and "
+                      "a selected work signal among code; otherwise the configured "
+                      "default wait of 1800 seconds applies until a ready work item "
+                      "or another wake.", _writer_continuation_contract(
+                          writer.finish_outcomes, self.config, writer))
+        narrowed = replace(writer, progress_signals=("state",))
+        self.assertIn(prefix + "a configured no-progress outcome and qualifying work "
+                      "signal, but none applies;", _writer_continuation_contract(
+                          narrowed.finish_outcomes, self.config, narrowed))
+        self.assertNotIn("Immediate next-step handoff", _writer_continuation_contract(
+            role.finish_outcomes, self.config, role))
 
     def test_tool_description_and_unit_opening_share_the_derived_text(self):
         role = self.configure(effects='waiting = ["blocked"]\n')
