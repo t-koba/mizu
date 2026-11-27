@@ -19,7 +19,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import support  # noqa: F401  (puts src on the path)
-from support import Fixture, bind_delivery
+from support import Fixture, bind_delivery, write_fixture_json
+from mizu.fs import canonical
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "examples" / "development" / "convert_work.py"
@@ -34,6 +35,12 @@ def load_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def chain_id(item, rev, kind):
+    seed = json.dumps(["work-item-chain-conversion-v1", item, rev, kind],
+                      separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(seed).hexdigest()[:32]
 
 
 def expected_id(item, rev, status):
@@ -201,6 +208,172 @@ class WorkConversion(Fixture):
         audit = self.store.audit()
         self.assertTrue(audit["consistent"])
         self.assertEqual(audit["items"], 1)
+
+    def convert_chain(self, item, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--project-root", str(self.project.root),
+             "--item", item, *args],
+            capture_output=True, text=True, env=self.env(), check=False)
+
+    def test_chain_conversion_carries_full_events_with_stable_ids(self):
+        description = "Full stored description, never a preview. " * 60
+        scope = "Full accepted scope, never a preview. " * 60
+        reason = "Full blocked reason, never a preview. " * 60
+        completion_reason = "Full completion reason, never a preview. " * 60
+        item = self.make_item("chain", "Chain item", description, scope=scope)
+        self.store.transition(item, expected_rev=1, status="doing", actor="worker",
+                              reason="Claimed")
+        wait = {"kind": "deadline", "at": "2035-01-01T00:00:00+00:00"}
+        self.store.transition(item, expected_rev=2, status="blocked", actor="worker",
+                              wait=wait, reason=reason)
+        self.store.transition(item, expected_rev=3, status="doing", actor="worker",
+                              reason="Resumed")
+        snapshot = self.make_snapshot("chain-run")
+        bind_delivery(self.project, item, snapshot["id"], expected_rev=4)
+        self.store.transition(item, expected_rev=5, status="done", actor="worker",
+                              reason=completion_reason, snapshot_id=snapshot["id"])
+        before_files = self.seed_fingerprint()
+
+        result = self.convert_chain(item)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.messages()
+        self.assertEqual(len(rows), 8)
+        kinds = [row["body"]["kind"] for row in rows]
+        self.assertEqual(kinds, ["item", "transition", "transition", "wait",
+                                 "transition", "transition", "transition", "completion"])
+        by_event = {(row["body"]["rev"], row["body"]["kind"]): row["body"] for row in rows}
+        self.assertEqual((by_event[(1, "item")]["body"], by_event[(1, "item")]["scope"]),
+                         (description, scope))
+        self.assertEqual(by_event[(3, "transition")]["reason"], reason)
+        self.assertEqual(by_event[(3, "wait")]["body"],
+                         json.dumps(wait, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")))
+        self.assertEqual(by_event[(3, "wait")]["status"], "blocked")
+        self.assertEqual(by_event[(6, "completion")]["reason"], completion_reason)
+        self.assertEqual(by_event[(6, "completion")]["snapshot"], snapshot["id"])
+        self.assertEqual(by_event[(2, "transition")]["holder"], "role:worker")
+        self.assertNotIn("holder", by_event[(6, "completion")])
+        for row in rows:
+            body = row["body"]
+            self.assertLessEqual(set(body), set(SCHEMA))
+            self.assertTrue(set(body).isdisjoint(
+                {"description_preview", "scope_preview", "reason_preview"}))
+            self.assertRegex(row["id"], MESSAGE_ID)
+            self.assertEqual(len({row["id"] for row in rows}), len(rows))
+            self.assertEqual(row["id"], chain_id(body["item"], body["rev"], body["kind"]))
+            self.assertNotEqual(row["id"], expected_id(body["item"], body["rev"],
+                                                       body["status"]))
+        self.assertEqual(self.seed_fingerprint(), before_files)
+
+        retry = self.convert_chain(item)
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(self.messages(), rows)
+        self.assertEqual(self.seed_fingerprint(), before_files)
+
+    def test_chain_conversion_refuses_mixed_or_missing_options(self):
+        root = str(self.project.root)
+        item = "wi_" + "a" * 32
+        cases = (
+            ["sample", "--project-root", root, "--item", item],
+            ["--project-root", root],
+            ["--item", item],
+            ["--project-root", root, "--item", item, "--limit", "5"],
+            ["--project-root", root, "--item", item, "--closed", "3"],
+            ["sample", "--item", item, "--project-root", root],
+            ["--project-root", root, "--item", "wi_bad"],
+        )
+        before_files = self.seed_fingerprint()
+        for args in cases:
+            with self.subTest(args=args):
+                result = self.convert(*args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertLessEqual(len(result.stderr), 1024)
+                self.assertNotIn(root, result.stderr)
+        self.assertEqual(self.messages(), [])
+        self.assertEqual(self.seed_fingerprint(), before_files)
+
+    def test_chain_conversion_refuses_malformed_oversized_and_missing_files(self):
+        item = self.make_item("chain-bad", "Chain item", "Stored description")
+        self.store.transition(item, expected_rev=1, status="doing", actor="worker",
+                              reason="Claimed")
+        directory = self.project.root / "work-items" / item
+        backup = {path.name: path.read_bytes() for path in directory.iterdir()}
+
+        def restore():
+            for path in directory.iterdir():
+                path.unlink()
+            for name, data in backup.items():
+                (directory / name).write_bytes(data)
+
+        cases = (
+            ("missing seed", lambda: (directory / "create.json").unlink(),
+             "create.json is missing"),
+            ("oversized seed", lambda: (directory / "create.json").write_bytes(b"x" * 131073),
+             "byte bound"),
+            ("unexpected seed field",
+             lambda: (directory / "create.json").write_text(json.dumps(
+                 {**json.loads((directory / "create.json").read_text()), "extra": 1})),
+             "unexpected direct shape"),
+            ("preview seed field", lambda: (directory / "create.json").write_text(json.dumps(
+                 {**json.loads((directory / "create.json").read_text()),
+                  "work_item": {**json.loads((directory / "create.json").read_text())["work_item"],
+                                "description_preview": "short"}})),
+             "unexpected work-item shape"),
+            ("malformed revision", lambda: (directory / "2.json").write_text("{"),
+             "not valid JSON"),
+            ("oversized revision", lambda: (directory / "2.json").write_bytes(b" " * 131594),
+             "byte bound"),
+            ("gapped revisions", lambda: (directory / "2.json").rename(directory / "4.json"),
+             "gapped work-item history"),
+            ("unexpected entry", lambda: (directory / "notes.json").write_text("{}"),
+             "unexpected work-item directory entry"),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(case=label):
+                restore()
+                mutate()
+                before_files = self.seed_fingerprint()
+                result = self.convert_chain(item)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(expected, result.stderr)
+                self.assertLessEqual(len(result.stderr), 1024)
+                self.assertNotIn(str(self.project.root), result.stderr)
+                self.assertEqual(self.messages(), [])
+                self.assertEqual(self.seed_fingerprint(), before_files)
+        restore()
+
+    def test_chain_conversion_includes_a_valid_retirement_completion(self):
+        reason = ("Retirement reason stored in full, not a preview. " * 40).strip()
+        item = self.make_item("retired", "Retired item", "Stored description")
+        self.store.transition(item, expected_rev=1, status="doing", actor="worker",
+                              reason="Claimed")
+        directory = self.project.root / "work-items" / item
+        seed = json.loads((directory / "create.json").read_text())["work_item"]
+        revision = json.loads((directory / "2.json").read_text())
+        chain_hash = hashlib.sha256()
+        for record in (seed, revision):
+            chain_hash.update(canonical(record) + b"\n")
+        request = {"id": item, "expected_rev": 2, "status": "dropped",
+                   "actor": "worker", "reason": reason}
+        retirement = {"schema": 1, "request": request,
+                      "request_sha256": hashlib.sha256(canonical(request)).hexdigest(),
+                      "chain_sha256": chain_hash.hexdigest(),
+                      "created_at": "2030-01-01T00:00:00+00:00"}
+        write_fixture_json(directory / "retirement.json", retirement)
+        before_files = self.seed_fingerprint()
+
+        result = self.convert_chain(item)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.messages()
+        self.assertEqual([row["body"]["kind"] for row in rows],
+                         ["item", "transition", "completion"])
+        completion = rows[-1]
+        self.assertEqual(completion["body"]["reason"], reason)
+        self.assertEqual(completion["body"]["status"], "dropped")
+        self.assertEqual(completion["body"]["rev"], 2)
+        self.assertNotIn("holder", completion["body"])
+        self.assertEqual(completion["id"], chain_id(item, 2, "completion"))
+        self.assertEqual(self.seed_fingerprint(), before_files)
 
 
 if __name__ == "__main__":

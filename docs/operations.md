@@ -461,17 +461,58 @@ migration command.
 
 Converting current work items into `work` queue messages is an operator-run
 userland example procedure, `examples/development/convert_work.py`, not a
-product command. It reads a bounded work-items inventory through the public
-CLI and appends `item` messages with deterministic ids. It never writes the
-dedicated work-item store, adds no runtime dual-write and changes no runtime
-authority: that store stays authoritative until cutover. Run it as
-`python3 examples/development/convert_work.py PROJECT [--limit N] [--closed N]
-[--dry-run]`, with `MIZU_CONFIG` to select a non-default private config;
-`--limit` accepts 1-100 (default 25), `--closed` 0-100 (default 10), and
-`--dry-run` prints planned bodies without appending. The inventory exposes
-bounded previews rather than full text, so the result is a projection, not a
-lossless conversion and not sufficient on its own for a cutover. The product
-itself still ships no migration command.
+product command. It never writes the dedicated work-item store, adds no runtime
+dual-write and changes no runtime authority: that store stays authoritative
+until cutover. `MIZU_CONFIG` selects a non-default private config; `--dry-run`
+prints planned messages without appending. The product itself ships no
+migration command.
+
+Inventory mode reads a bounded work-items inventory through the public CLI and
+appends `item` messages with deterministic ids:
+
+```sh
+python3 examples/development/convert_work.py PROJECT [--limit N] [--closed N] [--dry-run]
+```
+
+`--limit` accepts 1-100 (default 25) and `--closed` 0-100 (default 10). The
+inventory exposes bounded previews rather than full text, so this result is a
+projection, not a lossless conversion and not sufficient on its own for a
+cutover.
+
+Chain mode converts one item's whole stored revision chain instead:
+
+```sh
+python3 examples/development/convert_work.py \
+    --project-root DIR --item wi_<32hex> [--dry-run]
+```
+
+`DIR` is the managed project root (`data/projects/<name>` under the selected
+config); its directory name is the project name used for the public queue CLI.
+The procedure reads `DIR/work-items/<id>/create.json`, the numbered revision
+files in ascending order and `retirement.json` if present. It emits one
+declared message per event: the creation becomes `kind=item`, every numbered
+revision `kind=transition`, every record carrying a wait also `kind=wait` (the
+full wait object is the declared `body` string), every done or dropped revision
+`kind=completion`, and a valid retirement sidecar one more `kind=completion` at
+its bound revision. Fields with a declared counterpart in
+`examples/development/queues.toml` (`[queues.work.schema]`) are carried in
+full, including description, scope, reason, checks, holder and snapshot; a
+field absent from a source record is omitted, never guessed. Store bookkeeping
+without a declared field (timestamps, origin, actor, delivery and verification
+proofs) is not renamed or dropped from the store; it simply has no message
+counterpart here. Every body is validated against the declaration before the
+first append. Message ids are the first 32 hex characters of SHA-256 over
+compact JSON `[tag, item id, revision, kind]` with a tag distinct from
+inventory mode, so a retry with unchanged records is idempotent.
+
+Chain mode reads only pinned regular files under a fixed bound (128 KiB for the
+creation and retirement files, 128 KiB plus the resolution allowance for
+revision files) and refuses symlinks, unexpected directory entries, unknown
+JSON fields, preview fields, gapped or out-of-range revisions, unsafe sidecars
+and broken identities or bindings before any queue write. Diagnostics are
+bounded and name only the file, never a private path or stored content.
+Supplying a positional project name, `--limit` or `--closed` together with
+chain options is refused. The modes cannot be combined in one run.
 
 For an older deployment, take a verified backup first (see
 [upgrade and rollback](#バージョン更新とロールバック)) and restore the project

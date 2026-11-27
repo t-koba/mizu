@@ -63,8 +63,11 @@ and changes no runtime authority. The dedicated work-item store stays
 authoritative until the stage's cutover slice: there is no runtime dual-write,
 and the example only prepares messages for policies that read the queue.
 The public inventory exposes bounded previews, so these messages are a
-projection, not a lossless conversion; a later slice must carry full records
-before any cutover.
+projection, not a lossless conversion. The later chain slice adds a separate
+operator-run mode that reads one item's creation record, whole revision chain
+and optional retirement sidecar directly from the store and emits full-text
+item, transition, wait and completion messages within the declared schema;
+neither slice changes runtime authority before cutover.
 
 ## Stages
 
