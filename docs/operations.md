@@ -459,6 +459,20 @@ or `migrate-work-items` subcommand, and no `--legacy` inventory or
 resolution sidecars, and no runtime diagnostic tells an operator to run a
 migration command.
 
+Converting current work items into `work` queue messages is an operator-run
+userland example procedure, `examples/development/convert_work.py`, not a
+product command. It reads a bounded work-items inventory through the public
+CLI and appends `item` messages with deterministic ids. It never writes the
+dedicated work-item store, adds no runtime dual-write and changes no runtime
+authority: that store stays authoritative until cutover. Run it as
+`python3 examples/development/convert_work.py PROJECT [--limit N] [--closed N]
+[--dry-run]`, with `MIZU_CONFIG` to select a non-default private config;
+`--limit` accepts 1-100 (default 25), `--closed` 0-100 (default 10), and
+`--dry-run` prints planned bodies without appending. The inventory exposes
+bounded previews rather than full text, so the result is a projection, not a
+lossless conversion and not sufficient on its own for a cutover. The product
+itself still ships no migration command.
+
 For an older deployment, take a verified backup first (see
 [upgrade and rollback](#バージョン更新とロールバック)) and restore the project
 under the current release. To carry a previously tracked item forward, give it

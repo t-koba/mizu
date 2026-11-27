@@ -55,6 +55,17 @@ plain-English judgements made by roles under policy, and delivery is a kernel
 fact recorded when content is handed to a reader. Old record files appear only as stored data for those conversions
 and as historical manifests; see [operations](operations.md) for the procedures.
 
+The first stage-3 slice projects a bounded current work-item inventory through
+the operator-run example procedure `examples/development/convert_work.py`. It
+reads the inventory with the public CLI and appends declared `item` messages to
+the `work` queue with caller ids chosen for idempotent retries; it is userland
+and changes no runtime authority. The dedicated work-item store stays
+authoritative until the stage's cutover slice: there is no runtime dual-write,
+and the example only prepares messages for policies that read the queue.
+The public inventory exposes bounded previews, so these messages are a
+projection, not a lossless conversion; a later slice must carry full records
+before any cutover.
+
 ## Stages
 
 Each stage: implement the kernel part, express the affected workflow in the

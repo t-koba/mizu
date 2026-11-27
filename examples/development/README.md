@@ -14,6 +14,11 @@ nothing here specially.
 - `policies/messages.md` says what a message in each queue means and what its
   reader does with it. Compose it into the role policies of the roles that
   read or write these queues.
+- `convert_work.py` is an operator-run, userland-only procedure that copies a
+  bounded work-item inventory into `work` messages with deterministic ids.
+  Its inventory fields are previews, so the result is a projection, not a
+  lossless conversion. It changes no runtime authority and is not a product
+  command.
 - `outcomes.toml` declares which finish outcomes have each positive progress
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4
