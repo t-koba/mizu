@@ -64,6 +64,11 @@ class ShippedQueueDeclarations(unittest.TestCase):
                 self.assertNotIn("questions / answers /", text)
                 self.assertNotIn("Questions, answers, notices and proposals", text)
                 self.assertNotIn("Role questions, answers, notices and proposals", text)
+                flat = " ".join(text.split())
+                self.assertNotIn("questions, questions", flat)
+                if name == "docs/architecture.md":
+                    self.assertIn("proposals, decisions, questions carrying their answers, "
+                                  "notices and receipts", flat)
 
 
 if __name__ == "__main__":
