@@ -145,11 +145,13 @@ def _proposal_wait_contract(context: Context) -> dict:
         "external-untrusted; observing a merge or acknowledging it never transitions a work item.")}
 
 
-def _unit_begins_statement(outcomes: tuple[str, ...]) -> str:
+def _unit_begins_statement(context: Context) -> str:
     # Keep the opening first and stable for a given role across full and delta prompts.
     return ("A new work unit begins. This is not an acknowledgement of a previous "
             "seal: do useful work within your role and capabilities, then finish "
-            "with mizu_finish and a short state. " + _writer_continuation_contract(outcomes))
+            "with mizu_finish and a short state. "
+            + _writer_continuation_contract(context.role.finish_outcomes,
+                                            context.config, context.role))
 
 
 # Saturating display bound, not an admission/aging policy.
@@ -555,7 +557,7 @@ def prompt_for(context: Context) -> str:
     if "vcs_read" not in set(context.role.capabilities):
         ci_branch = None
     return json.dumps(_validate_opening(prompt_sections.shape(context, {
-                       "unit": _unit_begins_statement(context.role.finish_outcomes),
+                       "unit": _unit_begins_statement(context),
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "admission": context.admission,
@@ -650,7 +652,7 @@ def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
     return json.dumps(_validate_opening(prompt_sections.shape(context, {
-                       "unit": _unit_begins_statement(context.role.finish_outcomes),
+                       "unit": _unit_begins_statement(context),
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        **(grant_transition or {}),

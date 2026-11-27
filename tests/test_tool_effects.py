@@ -14,7 +14,8 @@ class ToolEffectTests(Fixture):
         # A bound role only sees the typed verdict when a host config
         # authorizes its review seal; an unbound listing keeps the full manual.
         return finish_definition(role.finish_outcomes,
-                                 review_verdict=config is not None and reviews.authorized(config, role))
+                                 review_verdict=config is not None and reviews.authorized(config, role),
+                                 config=config, role=role)
 
     def test_appends_verbatim_only_to_the_named_tool(self):
         statement = '  Warm the café cache for "offline" builds.  '

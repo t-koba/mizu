@@ -4,7 +4,8 @@ from __future__ import annotations
 import re
 
 from . import reviews
-from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Role
+from .config import (FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Limits, Role,
+                     outcome_effects)
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
 from .prompt_sections import WORK_CAPABILITIES
@@ -13,15 +14,60 @@ from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS
 from .kernel.queues import PAGE_MAX as QUEUE_PAGE_MAX
 
 
-def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
-    purposes = (
-        ("continue", "Use outcome=continue as the ordinary finish with a typed "
-                     "`next_step` naming a new proposed follow-up."),
-        ("wait", "Use outcome=wait to pause until a wake event."),
-        ("blocked", "Use outcome=blocked to report what prevents further work."),
-        ("done", "Use outcome=done to mark the work complete."),
-    )
-    return " ".join(purpose for outcome, purpose in purposes if outcome in outcomes)
+#: Mechanism facts advertised for each scheduler effect, in fixed order. Which
+#: outcomes are positive comes from ``config.outcome_effects``; this table only
+#: names the effect and states what the scheduler does with it.
+_FINISH_EFFECTS = (
+    ("progress", "counts as progress for dispatch"),
+    ("no_progress", "is subject to unchanged-input continuation and recovery"),
+    ("continuation", "admits another unit through handoff or allowance"),
+    ("idle", "is eligible for the idle-with-open-work diagnostic"),
+    ("waiting", "parks this unit and accepts ready work"),
+    ("ready_check", "requires ready-work evidence at finish"),
+)
+#: Fixed upper bound for the derived contract, independent of configuration.
+MAX_FINISH_EFFECT_CONTRACT_CHARS = 2048
+
+
+def _writer_continuation_contract(outcomes: tuple[str, ...], config: Config | None = None,
+                                  role: Role | None = None) -> str:
+    """State the resolved scheduler effects of the available finish outcomes."""
+    effects = outcome_effects(config, role)
+    positive = {
+        "progress": effects.progress,
+        "no_progress": effects.no_progress,
+        "continuation": effects.continuation,
+        "idle": effects.idle,
+        "waiting": effects.waiting,
+        "ready_check": effects.ready_check,
+    }
+    selected = tuple(outcome for outcome in FINISH_OUTCOMES if outcome in outcomes)
+    parts = ["Finish effects: " + "; ".join(
+        f"{outcome}=[{', '.join(name for name, _ in _FINISH_EFFECTS if outcome in positive[name])}]"
+        for outcome in selected) + "."]
+    used = {name for name, names in positive.items()
+            if any(outcome in names for outcome in selected)}
+    if used:
+        parts.append("; ".join(f"{name}: {meaning}" for name, meaning in _FINISH_EFFECTS
+                               if name in used) + ".")
+    if "done" in selected:
+        parts.append("done is terminal; only an operator can reopen.")
+    if "waiting" in used:
+        sources = ["messages"]
+        if "wait" in selected:
+            sources += ["check results", "a deadline"]
+        sources.append("an operator wake")
+        parts.append("Waiting outcomes park until a wake from "
+                     + ", ".join(sources[:-1]) + ", or " + sources[-1] + ".")
+        if "wait" in selected:
+            try:
+                default = config.limits.default_wait_seconds
+            except (AttributeError, TypeError):
+                default = Limits().default_wait_seconds
+            if type(default) is not int or not 1 <= default <= MAX_WAIT_SECONDS:
+                default = Limits().default_wait_seconds
+            parts.append(f"Without a deadline, the configured default wait is {default} seconds.")
+    return " ".join(parts)[:MAX_FINISH_EFFECT_CONTRACT_CHARS]
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
@@ -139,16 +185,13 @@ WORK_ITEM_WAIT_SCHEMA = obj({
                    minItems=1, uniqueItems=True)}, ("kind",))
 
 
-def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True) -> tuple[str, dict]:
+def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True,
+                      config: Config | None = None, role: Role | None = None) -> tuple[str, dict]:
     """Describe finish; the typed verdict is advertised only to its holders."""
     can_wait = "wait" in outcomes
     description = (
         "End this work unit and release its model slot and workspace lock. A successful seal ends tool access.\n\n"
-        + _writer_continuation_contract(outcomes)
-        + ("\n\nUse outcome=wait with wait_seconds=N to set a wake deadline without keeping a command running. "
-           "New work can wake you sooner. Use outcome=wait with wait_for_check=<id> to resume when the check "
-           "completes or new input arrives." if can_wait else "")
-        + ("\n\nFor a writable role, outcome=done requires successful verification." if "done" in outcomes else "")
+        + _writer_continuation_contract(outcomes, config, role)
         + "\n\nUse release_checks to cancel obsolete check subscriptions on a successful finish; "
         "other subscribers are unaffected. "
         "Use ack_events for unique handled ack_tokens delivered to your role: terminal work items and CI waits. "
@@ -677,7 +720,8 @@ def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
             # An unbound listing keeps the full manual; a bound role sees the
             # seal only when the host authorizes it as an independent reviewer.
             can_review = config is not None and reviews.authorized(config, role)
-            description, schema = finish_definition(role.finish_outcomes, review_verdict=can_review)
+            description, schema = finish_definition(role.finish_outcomes, review_verdict=can_review,
+                                        config=config, role=role)
         else:
             description, schema = grant_aware_definition(name, granted)
         if config is not None and (statement := config.tool_effects.get(name)):
