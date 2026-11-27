@@ -75,6 +75,16 @@ history including rows already delivered to the host, so the reads record
 delivery facts; they do not write the dedicated store or change which store is
 authoritative. Bounded pages, schema-checked bodies and fail-closed replay keep
 a partial view from being presented as current.
+A separate read-only pre-cutover gate,
+`examples/development/verify_work_conversion.py`, checks that the declared
+queue reproduces that store view before the stage-3 authority cutover. It
+reads one complete inventory (100 open and 100 closed rows) and the queue
+once, converts each stored chain with the same userland chain procedure and
+compares both current views as exact canonical JSON. An incomplete page,
+duplicate id, missing chain, malformed row, extra queue item or any mismatch
+is a bounded refusal; it prints
+`{"project": ..., "checked": N, "matched": true}` only on an exact match. The
+gate adds no runtime migration command and does not switch authority.
 
 ## Stages
 

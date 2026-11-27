@@ -33,6 +33,16 @@ nothing here specially.
   them into deterministic JSON sorted by item id. Explicit cursors include rows
   already delivered to the host: the reads record delivery facts but do not
   change work-item authority. A final page still reporting `more` is refused.
+- `verify_work_conversion.py` is the operator-run pre-cutover gate:
+  `python3 examples/development/verify_work_conversion.py --project-root DIR [--pages N]`
+  (N is 1-64, default 64). It reads a complete work-items inventory (100 open
+  and 100 closed rows), replays each stored chain into the same declared
+  current view as the queue, and compares the two as exact canonical JSON
+  restricted to the inventoried ids. An incomplete page, duplicate or
+  malformed id, missing chain, malformed row, extra queue item or any
+  mismatch is a bounded refusal; success prints only
+  `{"project": name, "checked": N, "matched": true}`. It writes no work items
+  and switches no authority.
 - `outcomes.toml` declares which finish outcomes have each positive progress
   effect (daemon self-admission, no-progress policy, writer continuation,
   idle diagnostic and wait-style ready-work acceptance). It is stage-4

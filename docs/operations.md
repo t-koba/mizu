@@ -534,6 +534,25 @@ message ids, unknown kinds, gaps, conflicts and a final page still reporting
 `more` fail closed with a bounded diagnostic. The output is deterministic JSON
 `{"project": ..., "items": [...]}`, sorted by item id, carrying each item's
 current declared fields plus `wait` when present.
+Before a stage-3 authority cutover, an operator can check that the declared
+queue reproduces the dedicated store with another read-only userland gate:
+
+```sh
+python3 examples/development/verify_work_conversion.py --project-root DIR [--pages N]
+```
+
+`DIR` is the managed project root (its name is the project name) and `--pages`
+is 1-64 (default 64). The gate reads
+`mizu work-items PROJECT --limit 100 --closed 100` and refuses an incomplete
+page (continuation cursor, overflow, truncation or a disagreeing total). It
+converts each inventoried item's whole stored chain with the same chain
+procedure, replays both store and queue messages through the declared
+projection and compares the current views as exact canonical JSON restricted
+to the inventoried ids. Any queue item absent from the inventory, missing
+stored item, malformed row or mismatch is a bounded stderr error with exit 1;
+success prints only `{"project": ..., "checked": N, "matched": true}`. The
+gate writes no work items, switches no authority and adds no product migration
+command.
 
 For an older deployment, take a verified backup first (see
 [upgrade and rollback](#バージョン更新とロールバック)) and restore the project
