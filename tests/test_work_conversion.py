@@ -21,6 +21,7 @@ from unittest.mock import patch
 import support  # noqa: F401  (puts src on the path)
 from support import Fixture, bind_delivery, write_fixture_json
 from mizu.fs import canonical
+from mizu.work_items import MAX_REVISIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "examples" / "development" / "convert_work.py"
@@ -342,18 +343,107 @@ class WorkConversion(Fixture):
                 self.assertEqual(self.seed_fingerprint(), before_files)
         restore()
 
+    def test_chain_conversion_accepts_imported_seeds_with_and_without_waits(self):
+        item = self.make_item("imported", "Imported item", "Stored description")
+        directory = self.project.root / "work-items" / item
+        seed = json.loads((directory / "create.json").read_text())["work_item"]
+        wait = {"kind": "deadline", "at": "2035-01-01T00:00:00+00:00"}
+        cases = (
+            ({"status": "open"}, ["item"], "open"),
+            ({"status": "blocked", "wait": wait}, ["item", "wait"], "blocked"),
+        )
+        for changes, kinds, status in cases:
+            with self.subTest(status=status):
+                (directory / "create.json").unlink()
+                write_fixture_json(directory / "create.json",
+                                   {"kind": "imported", "work_item": {**seed, **changes}})
+                before_files = self.seed_fingerprint()
+                result = self.convert_chain(item, "--dry-run")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = [json.loads(line) for line in result.stdout.splitlines()]
+                self.assertEqual([row["body"]["kind"] for row in rows], kinds)
+                self.assertEqual(rows[0]["body"]["status"], status)
+                self.assertEqual(self.seed_fingerprint(), before_files)
+
+    def test_chain_conversion_ignores_only_recognized_temporary_entries(self):
+        item = self.make_item("chain-temporary", "Temporary item", "Stored description")
+        self.store.transition(item, expected_rev=1, status="doing", actor="worker",
+                              reason="Claimed")
+        directory = self.project.root / "work-items" / item
+        temporary = directory / ".new-Ab_12345"
+        temporary.write_text("{}", encoding="utf-8")
+
+        result = self.convert_chain(item, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([row["body"]["kind"] for row in rows], ["item", "transition"])
+        self.assertEqual(self.messages(), [])
+
+        temporary.unlink()
+        (directory / ".new-short").write_text("{}", encoding="utf-8")
+        result = self.convert_chain(item, "--dry-run")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("unexpected work-item directory entry", result.stderr)
+        (directory / ".new-short").unlink()
+
+        (directory / ".new-abcdefgh").mkdir()
+        result = self.convert_chain(item, "--dry-run")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("unrecognized work-item temporary", result.stderr)
+        (directory / ".new-abcdefgh").rmdir()
+        self.assertEqual(self.messages(), [])
+
+    def test_chain_conversion_refuses_symlinked_work_items_directory(self):
+        item = self.make_item("chain-link", "Linked item", "Stored description")
+        store_directory = self.project.root / "work-items"
+        real_directory = self.project.root / "work-items-real"
+        store_directory.rename(real_directory)
+        try:
+            os.symlink("work-items-real", store_directory)
+        except OSError as exc:
+            real_directory.rename(store_directory)
+            self.skipTest(f"symlink creation unavailable: {exc}")
+        try:
+            result = self.convert_chain(item)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("pinned store directory", result.stderr)
+            self.assertNotIn(str(self.project.root), result.stderr)
+            self.assertEqual(self.messages(), [])
+        finally:
+            store_directory.unlink()
+            real_directory.rename(store_directory)
+
     def test_chain_conversion_includes_a_valid_retirement_completion(self):
         reason = ("Retirement reason stored in full, not a preview. " * 40).strip()
         item = self.make_item("retired", "Retired item", "Stored description")
         self.store.transition(item, expected_rev=1, status="doing", actor="worker",
                               reason="Claimed")
+        snapshot = self.make_snapshot("retirement-run")
+        bind_delivery(self.project, item, snapshot["id"], expected_rev=2)
         directory = self.project.root / "work-items" / item
+        template = json.loads((directory / "3.json").read_text())
+        previous = template
+        for rev in range(4, MAX_REVISIONS):
+            status = "open" if rev % 2 == 0 else "doing"
+            record = {**template, "rev": rev, "status": status,
+                      "holder": "worker" if status == "doing" else None,
+                      "transition": {"from": previous["status"], "to": status}}
+            write_fixture_json(directory / f"{rev}.json", record)
+            previous = record
+        self.store.transition(item, expected_rev=MAX_REVISIONS - 1, status="doing",
+                              actor="worker", snapshot_id=snapshot["id"])
+        last_path = directory / f"{MAX_REVISIONS}.json"
+        # Legacy stored proof fields on the last revision; retirement clears
+        # them from its terminal projection.
+        last = {**json.loads(last_path.read_text()), "snapshot_id": snapshot["id"],
+                "checks": ["check-a", "check-b"]}
+        last_path.write_bytes(canonical(last))
         seed = json.loads((directory / "create.json").read_text())["work_item"]
-        revision = json.loads((directory / "2.json").read_text())
         chain_hash = hashlib.sha256()
-        for record in (seed, revision):
+        for record in [seed] + [json.loads((directory / f"{rev}.json").read_text())
+                                for rev in range(2, MAX_REVISIONS + 1)]:
             chain_hash.update(canonical(record) + b"\n")
-        request = {"id": item, "expected_rev": 2, "status": "dropped",
+        request = {"id": item, "expected_rev": MAX_REVISIONS, "status": "dropped",
                    "actor": "worker", "reason": reason}
         retirement = {"schema": 1, "request": request,
                       "request_sha256": hashlib.sha256(canonical(request)).hexdigest(),
@@ -362,17 +452,23 @@ class WorkConversion(Fixture):
         write_fixture_json(directory / "retirement.json", retirement)
         before_files = self.seed_fingerprint()
 
-        result = self.convert_chain(item)
+        result = self.convert_chain(item, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
-        rows = self.messages()
-        self.assertEqual([row["body"]["kind"] for row in rows],
-                         ["item", "transition", "completion"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(len(rows), MAX_REVISIONS + 1)
+        self.assertEqual([row["body"]["kind"] for row in rows[:2]],
+                         ["item", "transition"])
         completion = rows[-1]
+        self.assertEqual(completion["body"]["kind"], "completion")
         self.assertEqual(completion["body"]["reason"], reason)
         self.assertEqual(completion["body"]["status"], "dropped")
-        self.assertEqual(completion["body"]["rev"], 2)
+        self.assertEqual(completion["body"]["rev"], MAX_REVISIONS)
+        self.assertEqual(rows[-2]["body"]["snapshot"], snapshot["id"])
+        self.assertEqual(rows[-2]["body"]["checks"], ["check-a", "check-b"])
+        self.assertNotIn("snapshot", completion["body"])
+        self.assertNotIn("checks", completion["body"])
         self.assertNotIn("holder", completion["body"])
-        self.assertEqual(completion["id"], chain_id(item, 2, "completion"))
+        self.assertEqual(completion["id"], chain_id(item, MAX_REVISIONS, "completion"))
         self.assertEqual(self.seed_fingerprint(), before_files)
 
 

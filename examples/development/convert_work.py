@@ -93,6 +93,7 @@ IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
 PRINCIPAL = re.compile(r"(?:role:(?:\*|[a-z][a-z0-9_-]{0,62})|host|operator)\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 REVISION_FILE = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
+TEMP_FILE = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 STATUSES = frozenset({"open", "doing", "blocked", "done", "dropped"})
 PREVIEW_KEYS = frozenset({"description_preview", "scope_preview", "reason_preview"})
 
@@ -305,14 +306,34 @@ def planned(inventory: object, schema: dict) -> list[dict]:
 
 # ---- Chain mode: bounded, read-only replay of one item's stored records ----
 
+def _reparse(info: os.stat_result) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def pinned_store_directory(root: Path, item: str) -> Path:
+    """Refuse any symlink or reparse component from the root to the item."""
+    directory = root / "work-items" / item
+    components = (root, root / "work-items", directory)
+    try:
+        infos = [component.lstat() for component in components]
+    except OSError:
+        raise ConversionError("work item is missing or unreadable") from None
+    for info in infos:
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or _reparse(info)):
+            raise ConversionError("work item path is not a pinned store directory")
+    return directory
+
+
 def read_store_file(root: Path, item: str, name: str, maximum: int) -> dict:
     """Read one pinned regular store file, refusing paths, links and oversize."""
-    path = root / "work-items" / item / name
+    path = pinned_store_directory(root, item) / name
     try:
         info = path.lstat()
     except OSError:
         raise ConversionError(f"{name} is missing or unreadable") from None
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or _reparse(info) or info.st_nlink != 1):
         raise ConversionError(f"{name} is not a regular store file")
     if info.st_size > maximum:
         raise ConversionError(f"{name} exceeds its byte bound")
@@ -336,14 +357,8 @@ def read_store_file(root: Path, item: str, name: str, maximum: int) -> dict:
 
 
 def revision_numbers(root: Path, item: str) -> list[int]:
-    """Enumerate only contiguous, bounded, regular numbered revision files."""
-    directory = root / "work-items" / item
-    try:
-        info = directory.lstat()
-    except OSError:
-        raise ConversionError("work item is missing") from None
-    if not stat.S_ISDIR(info.st_mode):
-        raise ConversionError("work item is not a directory")
+    """Enumerate contiguous regular revisions, ignoring recognized temporaries."""
+    directory = pinned_store_directory(root, item)
     try:
         with os.scandir(directory) as entries:
             names = sorted(entry.name for entry in entries)
@@ -351,9 +366,18 @@ def revision_numbers(root: Path, item: str) -> list[int]:
         raise ConversionError("work item directory cannot be scanned") from None
     if len(names) > MAX_DIRECTORY_ENTRIES:
         raise ConversionError("work item directory exceeds its entry bound")
-    revisions = []
+    revisions, temporaries, committed = [], [], []
     for name in names:
         if name in ("create.json", "retirement.json"):
+            try:
+                info = (directory / name).lstat()
+            except OSError:
+                continue  # read_store_file reports the required creation record.
+            if stat.S_ISREG(info.st_mode):
+                committed.append((info.st_dev, info.st_ino))
+            continue
+        if TEMP_FILE.fullmatch(name):
+            temporaries.append(name)
             continue
         if REVISION_FILE.fullmatch(name) is None:
             raise ConversionError("unexpected work-item directory entry")
@@ -366,10 +390,26 @@ def revision_numbers(root: Path, item: str) -> list[int]:
             raise ConversionError("work-item revision is unreadable") from None
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ConversionError("work-item revision is not a regular file")
+        committed.append((info.st_dev, info.st_ino))
         revisions.append(revision)
-    if revisions != list(range(2, len(revisions) + 2)):
+    # Match the store's ordinary read: a lone regular temporary is an
+    # uncommitted leftover, and a second link is accepted only when exactly one
+    # committed record identifies the same inode. Anything else fails closed.
+    for name in temporaries:
+        try:
+            info = (directory / name).lstat()
+        except OSError:
+            raise ConversionError("unrecognized work-item temporary") from None
+        if not stat.S_ISREG(info.st_mode) or _reparse(info):
+            raise ConversionError("unrecognized work-item temporary")
+        if info.st_nlink == 1:
+            continue
+        if info.st_nlink == 2 and committed.count((info.st_dev, info.st_ino)) == 1:
+            continue
+        raise ConversionError("unrecognized work-item temporary")
+    if sorted(revisions) != list(range(2, len(revisions) + 2)):
         raise ConversionError("gapped work-item history")
-    return revisions
+    return sorted(revisions)
 
 
 def text_field(value: object, where: str, *, limit: int = MAX_TEXT) -> str:
@@ -430,13 +470,12 @@ def validate_seed(seed: object, item: str, *, imported: bool) -> dict:
     allowed = SEED_KEYS | SEED_OPTIONAL | ({"wait"} if imported else set())
     if not SEED_KEYS <= keys or not keys <= allowed or PREVIEW_KEYS & keys:
         raise ConversionError("create.json has an unexpected work-item shape")
-    if ("wait" in seed) != imported:
-        raise ConversionError("create.json wait does not match its kind")
+    blocked = imported and "wait" in seed
     if seed["id"] != item or not ITEM_ID.fullmatch(item):
         raise ConversionError("create.json item identity is invalid")
     if type(seed["rev"]) is not int or seed["rev"] != 1:
         raise ConversionError("create.json revision is invalid")
-    if seed["status"] != ("blocked" if imported else "open"):
+    if seed["status"] != ("blocked" if blocked else "open"):
         raise ConversionError("create.json status is invalid")
     if seed["holder"] is not None:
         raise ConversionError("create.json holder must be null")
@@ -510,7 +549,7 @@ def validate_revision(record: dict, previous: dict, item: str, rev: int) -> None
         text_field(record["description"], "revision description")
     if "scope" in record:
         if record["scope"] is None:
-            if "scope" in previous:
+            if previous.get("scope") is not None:
                 raise ConversionError("revision cleared the accepted scope")
         else:
             text_field(record["scope"], "revision scope")
@@ -568,7 +607,7 @@ def load_chain(root: Path, item: str) -> tuple[list[dict], dict | None]:
         chain.append(record)
         previous = record
     try:
-        (root / "work-items" / item / "retirement.json").lstat()
+        (pinned_store_directory(root, item) / "retirement.json").lstat()
     except OSError:
         return chain, None
     retirement = read_store_file(root, item, "retirement.json", MAX_FILE_BYTES)
@@ -594,10 +633,13 @@ def chain_body(record: dict, item: str, rev: int, kind: str, schema: dict,
     holder = record.get("holder")
     if not terminal and isinstance(holder, str) and ROLE.fullmatch(holder):
         body["holder"] = "role:" + holder
-    if record.get("snapshot_id") is not None:
-        body["snapshot"] = record["snapshot_id"]
-    if "checks" in record and record["checks"] is not None:
-        body["checks"] = record["checks"]
+    # Retirement projects a terminal state with snapshot and proof fields
+    # cleared; its completion must not inherit them from the last revision.
+    if not terminal:
+        if record.get("snapshot_id") is not None:
+            body["snapshot"] = record["snapshot_id"]
+        if "checks" in record and record["checks"] is not None:
+            body["checks"] = record["checks"]
 
     unknown = set(body) - set(schema)
     if unknown:
