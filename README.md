@@ -35,7 +35,7 @@ Mizu のカーネルが提供するのは、作業単位の実行、スケジュ
 ハーネス情報 ─> 専用Searcher ─> Maintainer ─> 候補コピー ─> 人間の明示的な昇格
 ```
 
-役割間の受け渡しは宣言されたキュー（proposals / questions / answers / notices）を通じて行い、誰が書き込み・読み取り・起床を受け取るかは設定で決めます。Worker はタスクの実装を継続するだけでなく、待機（wait）・ブロック（blocked）・完了（completed）を自ら判断できます。待機中のポーリングや監視に LLM を消費することはありません。MoA（Mixture of Agents）は独立した相談結果を Worker が主導して統合する仕組みであり、単純な多数決ではありません。
+役割間の受け渡しは宣言されたキュー（proposals / questions / notices / work）を通じて行い、誰が書き込み・読み取り・起床を受け取るかは設定で決めます。Worker はタスクの実装を継続するだけでなく、待機（wait）・ブロック（blocked）・完了（completed）を自ら判断できます。待機中のポーリングや監視に LLM を消費することはありません。MoA（Mixture of Agents）は独立した相談結果を Worker が主導して統合する仕組みであり、単純な多数決ではありません。
 
 ## クイックスタート
 

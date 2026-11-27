@@ -18,7 +18,8 @@ record state. Roles, what each queue carries and what a reader does with it,
 what completion or publication requires, and what models are told are
 deployment configuration and policy. [os-migration.md](os-migration.md) records
 the stages that removed the built-in workflow: proposals, decisions, questions,
-answers, notices and receipts are now queues, work items and host records, and
+questions carrying their answers, notices and receipts are now queues, work
+items and host records, and
 role policy text. A Markdown policy explains which work to choose; it cannot
 grant capabilities or change limits.
 
@@ -86,7 +87,8 @@ JSON is the machine format; Markdown is the human policy/report format.
 
 [Shared records](shared-records.md) are a bounded immutable store with
 manifest-scoped reads and exact receipts for CI waits and host publisher
-outcomes. Questions, answers, notices and proposals are declared queues; their
+outcomes. Questions (with answers in the same threads), notices, proposals and work are
+declared queues; their
 routing, wake rules and meaning are configuration and role policy, not a
 runtime authority marker or adapter.
 

@@ -2,7 +2,8 @@
 
 `SharedRecords` is a bounded immutable record store with exact per-role receipts.
 Its live uses are receipt-pinned CI-wait delivery and declared host publisher
-outcomes. Role questions, answers, notices and proposals are declared queues
+outcomes. Role questions (with answers in the same threads), notices,
+proposals and work are declared queues
 ([kernel.md](kernel.md)); decisions, work items and waits are role policy and
 work-item records. There is no delivery-activation marker, fallback delivery route,
 dual-write path or runtime cutover for those families.

@@ -58,6 +58,12 @@ class ShippedQueueDeclarations(unittest.TestCase):
         self.assertNotIn("`answers`", scheduling)
         self.assertIn("operator appends a referring answer in the same `questions` thread",
                       scheduling)
+        for name in ("README.md", "docs/architecture.md", "docs/shared-records.md"):
+            with self.subTest(doc=name):
+                text = (ROOT / name).read_text(encoding="utf-8")
+                self.assertNotIn("questions / answers /", text)
+                self.assertNotIn("Questions, answers, notices and proposals", text)
+                self.assertNotIn("Role questions, answers, notices and proposals", text)
 
 
 if __name__ == "__main__":
