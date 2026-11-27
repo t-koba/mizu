@@ -28,6 +28,24 @@ def anchor_commits_available(record):
     return True
 
 
+def run_verifier_on_record(record):
+    """Run the verifier with --repo over a temporary record/harness tree."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_root = Path(tmp)
+        (fake_root / "docs" / "evidence").mkdir(parents=True)
+        (fake_root / "scripts").mkdir()
+        (fake_root / "docs" / "evidence" / "stage4-cpu-evidence.json").write_text(
+            json.dumps(record), encoding="utf-8")
+        (fake_root / "scripts" / "verify-stage4-cpu-evidence.py").write_bytes(
+            VERIFIER.read_bytes())
+        harness = fake_root / "scripts" / "daemon-cpu.py"
+        harness.parent.mkdir(parents=True, exist_ok=True)
+        harness.write_bytes((ROOT / "scripts" / "daemon-cpu.py").read_bytes())
+        return subprocess.run(
+            [sys.executable, str(fake_root / "scripts" / "verify-stage4-cpu-evidence.py"),
+             "--repo", str(ROOT)], cwd=fake_root, capture_output=True, text=True)
+
+
 class Stage4CpuEvidenceTests(unittest.TestCase):
     def test_record_is_tracked_path_free_and_id_free(self):
         text = RECORD.read_text(encoding="utf-8")
@@ -75,24 +93,31 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         record["before"]["source_binding"]["daemon_src_sha256"] = "f" * 64
         record["before"]["embedded_receipt_sha256"] = _canonical_sha(
             record["before"]["embedded_receipt"])
-        with tempfile.TemporaryDirectory() as tmp:
-            fake_root = Path(tmp)
-            (fake_root / "docs" / "evidence").mkdir(parents=True)
-            (fake_root / "scripts").mkdir()
-            (fake_root / "docs" / "evidence" / "stage4-cpu-evidence.json").write_text(
-                json.dumps(record), encoding="utf-8")
-            (fake_root / "scripts" / "verify-stage4-cpu-evidence.py").write_bytes(
-                VERIFIER.read_bytes())
-            harness = fake_root / "scripts" / "daemon-cpu.py"
-            harness.parent.mkdir(parents=True, exist_ok=True)
-            harness.write_bytes((ROOT / "scripts" / "daemon-cpu.py").read_bytes())
-            run = subprocess.run(
-                [sys.executable, str(fake_root / "scripts" / "verify-stage4-cpu-evidence.py"),
-                 "--repo", str(ROOT)], cwd=fake_root, capture_output=True, text=True)
+        run = run_verifier_on_record(record)
         self.assertNotEqual(run.returncode, 0)
         summary = json.loads(run.stdout)
         self.assertFalse(summary["checks"]["before_tree_digest_from_git"])
         self.assertFalse(summary["checks"]["before_witness_consistent"])
+
+    def test_forged_receipt_source_fails_binding_check_with_git(self):
+        # Refreshing the inline checksum over a forged embedded source must
+        # not pass while the detached binding, witness and git tree are honest.
+        record = json.loads(RECORD.read_text(encoding="utf-8"))
+        source = record["before"]["embedded_receipt"]["source"]
+        source["daemon_src_sha256"] = "f" * 64
+        source["source_revision"] = "1" * 40
+        record["before"]["embedded_receipt_sha256"] = _canonical_sha(
+            record["before"]["embedded_receipt"])
+        run = run_verifier_on_record(record)
+        self.assertNotEqual(run.returncode, 0, run.stderr)
+        summary = json.loads(run.stdout)
+        self.assertFalse(summary["checks"]["before_receipt_source_bound"])
+        self.assertFalse(summary["checks"]["before_receipt_source_matches_git"])
+        self.assertTrue(summary["checks"]["before_tree_digest_from_git"])
+        self.assertTrue(summary["checks"]["before_embedded_receipt_integrity"])
+        self.assertTrue(summary["checks"]["before_witness_consistent"])
+        self.assertTrue(summary["checks"]["after_receipt_source_bound"])
+        self.assertFalse(summary["passed"])
 
     def test_matched_shape_validity_and_public_commit_anchor(self):
         record = json.loads(RECORD.read_text(encoding="utf-8"))

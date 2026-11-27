@@ -4,18 +4,21 @@ Two scopes:
 
 * Tracked-only (default): uses only files in the repository. It verifies no
   private paths, the schema, the harness digest against the tracked script,
-  each embedded receipt's content digest, matched shape/validity flags, the
-  recorded witness's consistency with the receipts, and the absence of
-  worker-private IDs. The harness digest is SHA-256 over the script's bytes
-  after normalizing CRLF line endings to LF, so a CRLF checkout passes while
-  any other byte change fails. It does NOT claim to prove the source-tree link
-  from fields that live in the record: that would be circular.
+  each embedded receipt's content digest and source identity against the
+  detached source_binding (an intra-record consistency check), matched
+  shape/validity flags, the recorded witness's consistency with the receipts,
+  and the absence of worker-private IDs. The harness digest is SHA-256 over
+  the script's bytes after normalizing CRLF line endings to LF, so a CRLF
+  checkout passes while any other byte change fails. It does NOT claim to
+  prove the source-tree link from fields that live in the record: that would
+  be circular.
 
 * With git (--repo <checkout>): additionally recomputes each source-tree
-  digest from the named git commit with the harness's own recipe. The commit
-  tree is external to the record, so this check is non-circular and fails on
-  falsified numbers. A reader reproduces it with a full clone; the named
-  commits are ancestors of HEAD in the public history.
+  digest from the named git commit with the harness's own recipe and compares
+  it to both the detached binding and the embedded receipt's source digest.
+  The commit tree is external to the record, so this check is non-circular
+  and fails on falsified numbers. A reader reproduces it with a full clone;
+  the named commits are ancestors of HEAD in the public history.
 
 A named record can be selected with --record; the default stays the stage-4
 record. Prints one bounded JSON summary; exit 0 only when every reported check
@@ -103,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
         checks[f"{side}_embedded_receipt_integrity"] = (
             canonical_sha(record[side]["embedded_receipt"])
             == record[side]["embedded_receipt_sha256"])
+        receipt_source = record[side]["embedded_receipt"]["source"]
+        checks[f"{side}_receipt_source_bound"] = (
+            receipt_source["daemon_src_sha256"] == claimed
+            and receipt_source["source_revision"] == binding["source_revision"])
         checks[f"{side}_tree_commit"] = bool(HEX40.fullmatch(binding["source_revision"]))
         # Consistency of the recorded (external-untrusted) witness with the
         # receipt claim. NOT a proof of the tree link by itself.
@@ -119,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
 
     skipped: list[str] = []
     if args.repo is None:
-        skipped = ["before_tree_digest_from_git", "after_tree_digest_from_git"]
+        skipped = ["before_tree_digest_from_git", "after_tree_digest_from_git",
+                   "before_receipt_source_matches_git", "after_receipt_source_matches_git"]
     else:
         for side in ("before", "after"):
             revision = record[side]["source_binding"]["source_revision"]
@@ -129,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
                 recomputed = None  # unresolvable commit is a failed check, not a crash
             checks[f"{side}_tree_digest_from_git"] = (
                 recomputed == record[side]["source_binding"]["daemon_src_sha256"])
+            checks[f"{side}_receipt_source_matches_git"] = (
+                recomputed == record[side]["embedded_receipt"]["source"]["daemon_src_sha256"])
 
     summary = {"schema": record["schema"],
                "scope": "with_git" if args.repo is not None else "tracked_only",
