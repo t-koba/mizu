@@ -242,6 +242,41 @@ class WorkConversion(Fixture):
         self.assertEqual(body["origin"], canonical(structured).decode("utf-8"))
         self.assertEqual(json.loads(body["origin"]), structured)
 
+    def test_converted_completion_proof_binds_the_stored_evidence(self):
+        # Value-pin the digest independently of chain_body: a constant or
+        # wrong-field digest must fail this test (reviewer seq 360).
+        fields = ("verification", "delivered_tree", "delivery", "delivery_schema",
+                  "verification_scope", "completion_policy", "completion_evidence")
+
+        def expected_proof(record):
+            bundle = {name: record[name] for name in fields
+                      if record.get(name) is not None}
+            return hashlib.sha256(canonical(bundle)).hexdigest()
+
+        item = self.make_item("proof", "Proof item", "Proof description")
+        snapshot = self.make_snapshot("proof-run")
+        self.store.transition(item, expected_rev=1, status="doing", actor="worker")
+        bind_delivery(self.project, item, snapshot["id"], expected_rev=2)
+        self.store.transition(item, expected_rev=3, status="done", actor="worker",
+                              reason="Finished", snapshot_id=snapshot["id"])
+        record = self.store.get(item)
+
+        result = self.convert_chain(item)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        completion = [row for row in self.messages()
+                      if row["body"]["kind"] == "completion"]
+        self.assertEqual(len(completion), 1)
+        self.assertEqual(completion[0]["body"]["proof"], expected_proof(record))
+
+        # One evidence change must move the emitted digest, and the emitter
+        # must still agree with an independent computation of the new bundle.
+        changed = {**record, "verification": {**record["verification"],
+                                              "code_digest": "0" * 64}}
+        emitted = load_script().chain_body(changed, item, record["rev"],
+                                           "completion", SCHEMA)
+        self.assertNotEqual(emitted["proof"], completion[0]["body"]["proof"])
+        self.assertEqual(emitted["proof"], expected_proof(changed))
+
     def test_chain_conversion_carries_full_events_with_stable_ids(self):
         description = "Full stored description, never a preview. " * 60
         scope = "Full accepted scope, never a preview. " * 60
