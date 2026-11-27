@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .config import CiRequestEvidence, TOML_INTEGER_MAX
 from .errors import Denied, LimitExceeded, MizuError
-from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, safe_read_info, write_json
+from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, write_json
 from .process import ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
@@ -390,16 +390,6 @@ class CiRequests:
                 "version": SEEK_VERSION, "publication_id": publication_id, "entries": []})
             return True
 
-    def _establish_empty_seek(self, publication_id: str, instant: dt.datetime) -> bool:
-        """Record known emptiness when a validated activity token is fresh.
-
-        The freshness gate remains a fallback; publication-local certification
-        itself does not depend on the global activity token.
-        """
-        if not self._fresh_activity(instant):
-            return False
-        return self.establish_publication_empty(publication_id)
-
     def _retire_legacy_seeks(self) -> bool:
         """Remove superseded flat index files before first seek certification."""
         maximum = self.policy.name_processing_limit
@@ -463,35 +453,6 @@ class CiRequests:
                 raise Denied("Invalid CI request activity token")
         return digest(canonical([generation, info.st_dev, info.st_ino,
                                  info.st_mtime_ns, info.st_ctime_ns]))
-
-    def _fresh_activity(self, instant: dt.datetime) -> bool:
-        """A validated activity token predating ``instant`` proves quiet publication.
-
-        Every request write rotates ``ACTIVITY`` under the writer lock before
-        any dispatch, outcome or resolution record exists. Read the token's
-        bytes and timestamps from one pinned regular-file observation: a valid
-        32-hex generation whose modification and change timestamps both predate
-        the exact window instant proves no request write has happened since. A
-        missing, special, unreadable, malformed or unstable token cannot prove
-        absence and leaves the publication on the conservative scan.
-        """
-        if instant.tzinfo is None or instant.utcoffset() is None:
-            return False
-        try:
-            raw, info = safe_read_info(self.project_root, ACTIVITY, 64)
-            generation = loads_finite(raw)
-            mtime, ctime = info.st_mtime_ns, info.st_ctime_ns
-            epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
-            delta = instant - epoch
-        except (MizuError, OSError, ValueError, UnicodeError, RecursionError,
-                AttributeError, TypeError, OverflowError):
-            return False
-        if (not isinstance(generation, str) or not _ACTIVITY_TOKEN.fullmatch(generation)
-                or any(type(value) is not int or value < 0 for value in (mtime, ctime))):
-            return False
-        cutoff_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
-                     + delta.microseconds * 1000)
-        return mtime < cutoff_ns and ctime < cutoff_ns
 
     def revoke_quiet_activity(self) -> bool:
         """Rotate the durable quiet-observation token without recording a request."""
@@ -582,16 +543,15 @@ class CiRequests:
         The shared reader's configured name and candidate limits apply before
         date filtering, so a candidate cap reached before that window makes
         only pages naming a scanned publication incomplete instead of proving
-        absence. A publication with no index is known empty when the ledger is
-        certified free of markers naming that publication: publication-local
-        certification needs neither a shared scan nor an incomplete page and
-        is robust to unrelated writes. It is recorded as a durable per-publication
-        empty seek index under the writer lock. A validated activity token
-        predating the exact query instant remains a fallback proof of emptiness
-        for that window; without either proof the publication stays on the
-        conservative shared scan. A query naming both
-        indexed and legacy publications receives the indexed items plus the
-        conservative legacy result.
+        absence. A publication with no index is known empty only when its
+        ledger is certified free of markers naming that publication: this
+        publication-local proof needs neither a shared scan nor an incomplete
+        page and is robust to unrelated writes. It is recorded as a durable
+        per-publication empty seek index under the writer lock. Without that
+        proof the publication stays on the conservative shared scan; activity
+        tokens and filesystem timestamps never prove emptiness here. A query
+        naming both indexed and legacy publications receives the indexed items
+        plus the conservative legacy result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. An index is only created for a
         publication whose ledger was certified free of legacy markers under
@@ -601,7 +561,7 @@ class CiRequests:
         pages naming a scanned publication incomplete. Invalid dates or filters
         raise ``Denied``.
         """
-        prepared, instants = {}, {}
+        prepared = {}
         for key, query in queries.items():
             try:
                 publication_ids, not_before = query
@@ -610,11 +570,9 @@ class CiRequests:
             if isinstance(not_before, dt.datetime):
                 if not_before.tzinfo is None or not_before.utcoffset() is None:
                     raise Denied("Invalid CI request publication window")
-                instant = not_before.astimezone(dt.timezone.utc)
-                cutoff = instant.date()
+                cutoff = not_before.astimezone(dt.timezone.utc).date()
             elif isinstance(not_before, dt.date):
                 cutoff = not_before
-                instant = dt.datetime.combine(cutoff, dt.time.min, tzinfo=dt.timezone.utc)
             else:
                 raise Denied("Invalid CI request publication window")
             try:
@@ -624,19 +582,11 @@ class CiRequests:
             if any(not isinstance(value, str) or not value for value in wanted):
                 raise Denied("Invalid CI request publication filter")
             prepared[key] = (wanted, cutoff.isoformat())
-            instants[key] = instant
         if not prepared:
             return {}
         earliest = min(cutoff for _, cutoff in prepared.values())
-        # One publication can appear in several windows; the earliest exact
-        # instant decides whether its quiet token can prove absence for all.
-        publication_instants = {}
-        for key, (wanted, _) in prepared.items():
-            for publication_id in wanted:
-                previous = publication_instants.get(publication_id)
-                if previous is None or instants[key] < previous:
-                    publication_instants[publication_id] = instants[key]
-        publications = frozenset(publication_instants)
+        publications = frozenset(publication_id for wanted, _ in prepared.values()
+                                  for publication_id in wanted)
         indexed, invalid_publications, legacy = {}, set(), set()
         for publication_id in publications:
             entries, invalid = self._seek_read(publication_id)
@@ -645,19 +595,12 @@ class CiRequests:
             elif entries is not None:
                 indexed[publication_id] = entries
             elif _HEX64.fullmatch(publication_id):
-                # A publication-local proof of emptiness is independent of the
-                # global activity token, which any unrelated write rotates.
-                # The freshness token stays as a fallback: when it proves no
-                # write since the publication, this window needs no scan even
-                # if no durable index can be written. Otherwise the shared
-                # scan remains conservative.
+                # Only the publication-local, timestamp-free proof can end the
+                # scan. A failed or unavailable proof leaves the publication
+                # on the conservative shared scan.
                 with contextlib.suppress(OSError, Denied, LimitExceeded,
                                          ValueError, TypeError, MizuError):
                     if self.establish_publication_empty(publication_id):
-                        continue
-                    if self._fresh_activity(publication_instants[publication_id]):
-                        self._establish_empty_seek(
-                            publication_id, publication_instants[publication_id])
                         continue
                 legacy.add(publication_id)
             else:
@@ -717,11 +660,11 @@ class CiRequests:
         shared rows. Bounds: the shared reader's configured name and candidate
         limits apply before date filtering to scanned publications; if they
         end the scan before the window, only pages naming a scanned
-        publication are incomplete rather than evidence of absence. A fresh
-        publication's known emptiness may be recorded as a durable empty seek
-        index under the writer lock; a failed write leaves the read answer
-        intact. No new policy is added, and ``daily()`` keeps its own page and
-        order.
+        publication are incomplete rather than evidence of absence. A
+        publication whose ledger is locally certified empty may get a durable
+        empty seek index under the writer lock; a failed certification or write
+        leaves the read answer on the conservative scan. No new policy is
+        added, and ``daily()`` keeps its own page and order.
         Trust: locally recorded evidence; a dispatch that cannot be validated
         is not an identity and is not returned. Failure: unreadable evidence,
         an unreadable dispatch marker, or a stopped scan returns no items with

@@ -2465,16 +2465,16 @@ absence or an unvalidated identity.
 
 Every request write first rotates the durable activity token at
 `evidence/ci-request-activity.json` under the writer lock, before any dispatch,
-outcome or resolution record. A publication with no index is known empty when
-that file is a regular file whose modification and change timestamps are both
-strictly earlier than the query's exact window instant: because no request
-write could have followed that token, the publication needs no ledger scan and
-its empty page is complete. Date windows use midnight UTC; datetime windows
-are converted to UTC, and naive datetimes are refused. A missing, unreadable or
-nonregular token, malformed timestamp metadata, or either timestamp at or after
-the cutoff keeps the publication on the conservative scan. Seek indexes still
-win over freshness, and uncertainty from other publications in the same query
-still marks that query's page incomplete.
+outcome or resolution record. The token's content and filesystem timestamps are
+a local identity for quiescence observation during a CI wait scan, never a
+proof that a publication has no requests. A publication with no index is known
+empty only when its ledger is certified free of markers naming that publication
+under the writer lock; that publication-local proof needs no shared scan and is
+recorded as a durable empty seek index. A failed or unavailable certification
+leaves the publication on the conservative shared scan. Date windows use
+midnight UTC; datetime windows are converted to UTC, and naive datetimes are
+refused. Uncertainty from other publications in the same query still marks that
+query's page incomplete.
 
 Local publication-receipt reads have an independent `[publication_evidence]`
 policy owner, shared by the CLI listing, runtime `publications` operation and
