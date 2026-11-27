@@ -367,30 +367,122 @@ class QueueStoreTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in page["messages"]], [delayed["id"]])
         self.assertTrue(self.store.delivered("tasks", delayed["seq"], "role:alpha"))
         self.assertFalse(self.store.due("tasks", "role:alpha", now=later))
-    def test_ready_lookups_skip_the_delivered_prefix_regardless_of_history(self):
-        """pending/due/next_delivery read work tracks changes, not retained history."""
-        def reads_for(count):
-            root = self.root / f"floor-{count}"
-            store = QueueStore(root, self.queues)
-            for index in range(count):
-                made = store.append("tasks", BODY, "operator", now=NOW)
-                self.deliver(store, "tasks", made, readers=("role:alpha",), now=NOW)
-            real = store._message
-            seen = []
-            def counted(*args, **kwargs):
-                seen.append(1)
-                return real(*args, **kwargs)
-            with patch.object(store, "_message", side_effect=counted):
-                facts = store.pending("tasks", "role:alpha", newest=0, now=NOW)
-                self.assertFalse(store.due("tasks", "role:alpha", now=NOW))
-                self.assertIsNone(store.next_delivery("tasks", "role:alpha", now=NOW))
-            self.assertEqual((facts["count"], facts["more"]), (0, False))
-            return len(seen)
 
-        small, large = reads_for(16), reads_for(128)
-        # A fully delivered prefix costs a bounded number of reads, not one
-        # read per retained message, so both sizes do the same amount of work.
-        self.assertEqual(small, large)
+    def _indexed_lookups(self, store, queue, actor, now):
+        """Compare indexed lookups with a no-index scan; count body loads."""
+        real = store._message
+        loads = []
+
+        def counted(*args, **kwargs):
+            loads.append(1)
+            return real(*args, **kwargs)
+
+        def scans():
+            return (store.pending(queue, actor, newest=0, now=now),
+                    store.due(queue, actor, now=now),
+                    store.next_delivery(queue, actor, now=now))
+
+        with patch.object(store, "_message", side_effect=counted):
+            indexed_scans = scans()
+        with patch.object(store, "_skip_index", return_value=((), ())):
+            self.assertEqual(indexed_scans, scans())  # a full scan sees the same facts
+            plain_page = store.read(queue, actor, now=now)
+        self.assertEqual(store.read(queue, actor, now=now), plain_page)
+        return len(loads)  # retention's own cursor check is not a lookup scan
+
+    def test_expired_delayed_head_and_delivered_suffix_skip_independently_of_history(self):
+        """An expired delivered deadline joins its delivered run once it is due."""
+        loads = []
+        for count in (16, 128):
+            store = QueueStore(self.root / f"expired-{count}", self.queues)
+            for index in range(count):
+                options = {"deliver_at": LATER} if index == 0 else {}
+                store.append("tasks", BODY, "operator", now=NOW, **options)
+            for seq in range(1, count + 1):
+                store.record_delivery("tasks", seq, "role:alpha", "read", now=LATER)
+            # At an earlier observation time the delivered message is still a
+            # boundary: the run may not be crossed even though it has a fact.
+            self._indexed_lookups(store, "tasks", "role:alpha", NOW)
+            loads.append(self._indexed_lookups(store, "tasks", "role:alpha", LATER))
+            facts = store.pending("tasks", "role:alpha", newest=0, now=LATER)
+            self.assertEqual((facts["count"], facts["through"], facts["more"]),
+                             (0, count, False))
+            self.assertFalse(store.due("tasks", "role:alpha", now=LATER))
+            self.assertIsNone(store.next_delivery("tasks", "role:alpha", now=LATER))
+        # Crossing the whole run costs no body load, at either retained size.
+        self.assertEqual(loads, [0, 0])
+
+    def test_undelivered_head_and_delivered_suffix_skip_independently_of_history(self):
+        """A delivered run after one non-waking head is skipped without crossing it."""
+        loads = []
+        for count in (16, 128):
+            store = QueueStore(self.root / f"head-{count}", self.queues)
+            store.append("notes", {}, "host", now=NOW)  # no wake list for role:alpha
+            for index in range(1, count):
+                made = store.append("notes", {}, "host", now=NOW)
+                self.deliver(store, "notes", made, readers=("role:alpha",), now=NOW)
+            loads.append(self._indexed_lookups(store, "notes", "role:alpha", NOW))
+            facts = store.pending("notes", "role:alpha", newest=1, now=NOW)
+            self.assertEqual((facts["count"], facts["through"], facts["more"]),
+                             (1, count, False))
+            self.assertEqual([message["seq"] for message in facts["messages"]], [1])
+            self.assertFalse(store.due("notes", "role:alpha", now=NOW))
+            self.assertIsNone(store.next_delivery("notes", "role:alpha", now=NOW))
+        # Each scan loads only the head, whatever the retained suffix length.
+        self.assertEqual(loads, [3, 3])
+
+    def test_delivered_future_message_inside_a_run_still_stops_the_scan(self):
+        """A handoff fact cannot hide the deadline boundary at an earlier now."""
+        first = self.store.append("tasks", BODY, "operator", now=NOW)
+        future = self.store.append("tasks", BODY, "operator", now=NOW, deliver_at=LATER)
+        tail = self.store.append("tasks", BODY, "operator", now=NOW)
+        self.store.append("tasks", BODY, "operator", now=NOW)  # undelivered wake
+        self.deliver(self.store, "tasks", first, readers=("role:alpha",), now=NOW)
+        self.store.record_delivery("tasks", future["seq"], "role:alpha", "opening",
+                                   now=NOW, handed=True)
+        self.deliver(self.store, "tasks", tail, readers=("role:alpha",), now=NOW)
+        for index, stamp in enumerate((NOW, LATER)):
+            with self.subTest(now=stamp):
+                self._indexed_lookups(self.store, "tasks", "role:alpha", stamp)
+        before = self.store.pending("tasks", "role:alpha", newest=0, now=NOW)
+        self.assertEqual((before["count"], before["through"], before["more"]), (0, 1, True))
+        self.assertEqual(self.store.read("tasks", "role:alpha", now=NOW)["next"], 1)
+        self.assertTrue(self.store.read("tasks", "role:alpha", now=NOW)["delayed"])
+        self.assertFalse(self.store.due("tasks", "role:alpha", now=NOW))
+        self.assertIsNone(self.store.next_delivery("tasks", "role:alpha", now=NOW))
+        after = self.store.pending("tasks", "role:alpha", newest=0, now=LATER)
+        self.assertEqual((after["count"], after["through"]), (1, 4))
+        self.assertTrue(self.store.due("tasks", "role:alpha", now=LATER))
+
+    def test_corrupt_skip_index_fails_closed_to_a_full_scan(self):
+        """Malformed derived state never licenses skipping undelivered rows."""
+        message = self.store.append("tasks", BODY, "operator", now=NOW)
+        path = self.root / "queues" / "tasks" / "skip" / "role_alpha.json"
+        for payload in (b"not json", canonical({"runs": [[1, 2]], "gates": []}),
+                        canonical({"runs": [[1, 1]], "gates": [[2, LATER]]})):
+            with self.subTest(payload=payload[:40]):
+                atomic_write(path, payload)
+                self._indexed_lookups(self.store, "tasks", "role:alpha", NOW)
+                facts = self.store.pending("tasks", "role:alpha", newest=0, now=NOW)
+                self.assertEqual((facts["count"], facts["through"]), (1, 1))
+        self.deliver(self.store, "tasks", message, readers=("role:alpha",), now=NOW)
+        self.assertEqual(self.store.pending("tasks", "role:alpha", now=NOW)["count"], 0)
+
+    def test_removal_retires_the_messages_entry_from_delivered_runs(self):
+        """Retention removes a message's derived skip entry with its facts."""
+        raw = copy.deepcopy(DECLARATIONS)
+        raw["events"] = {"write": ["host"], "read": ["operator", "role:alpha"],
+                         "retain_last": 2}
+        store = QueueStore(self.root / "retained-runs", parse_queues(raw))
+        first = store.append("events", {}, "host", now=NOW)
+        second = store.append("events", {}, "host", now=NOW)
+        store.record_delivery("events", first["seq"], "role:alpha", "read", now=NOW)
+        store.record_delivery("events", second["seq"], "role:alpha", "read", now=NOW)
+        path = self.root / "retained-runs" / "queues" / "events" / "skip" / "role_alpha.json"
+        self.assertEqual(json.loads(path.read_text())["runs"], [[1, 2]])
+        store.append("events", {}, "host", now=NOW)
+        self.assertEqual(json.loads(path.read_text())["runs"], [[2, 2]])
+        self.assertEqual(store.pending("events", "role:alpha", newest=0, now=NOW)["count"], 1)
 
     def test_floor_never_crosses_a_delayed_message(self):
         """The derived floor preserves exact head-of-line for delayed messages."""

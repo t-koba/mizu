@@ -4,6 +4,7 @@ Layout under the project root:
   queues/<queue>/messages/<seq:020d>.json  immutable messages, create-only
   queues/<queue>/head.json                 last assigned sequence (derived)
   queues/<queue>/delivery/<seq:020d>/<principal>.json  create-only delivery facts
+  queues/<queue>/skip/<principal>.json     derived delivered runs and deadline gates
   queues/delivery-migration.json           one-time cursor/woken conversion marker
   queues/<queue>/retain.json               first sequence not yet considered for removal
   queues/ids/<id>.json                     global id -> (queue, seq); a generated id retires
@@ -54,6 +55,7 @@ PRINCIPAL = re.compile(r"(?:role:(?:\*|[a-z][a-z0-9_-]{0,62})|host|operator)\Z")
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _DELIVERY_KEYS = frozenset({"unit", "at"})
+_SKIP_KEYS = frozenset({"runs", "gates"})
 _DELIVERY_UNIT_MAX = 128
 _TYPES = ("string", "integer", "boolean", "instant", "digest", "id", "principal", "list")
 _FIELD_KEYS = frozenset({"type", "required", "max", "min", "values", "item", "max_items"})
@@ -598,55 +600,118 @@ class QueueStore:
             return existing
         record = {"unit": unit, "at": at}
         atomic_write(self._delivery_path(queue, seq, actor), canonical(record), exclusive=True)
-        # Every fact write advances the contiguous prefix; callers hold the
-        # queue lock, so the floor and the facts it summarizes move together.
-        self._advance_floor(queue, actor)
+        # Every fact write extends the derived runs; callers hold the queue
+        # lock, so the index and the facts it summarizes move together.
+        self._extend_skip(queue, seq, actor)
         return record
 
-    def _floor_path(self, queue: str, actor: str) -> Path:
-        return (self.root / self._relative(queue, "floor")
+    def _skip_path(self, queue: str, actor: str) -> Path:
+        return (self.root / self._relative(queue, "skip")
                 / (self._actor(actor).replace(":", "_") + ".json"))
 
-    def _floor(self, queue: str, actor: str, head: int) -> int:
-        """Contiguous delivered prefix for ``actor``; 0 when absent or corrupt.
+    def _skip_index(self, queue: str, actor: str, head: int) -> tuple[tuple, tuple]:
+        """Validated delivered runs and delayed gates for one reader.
 
-        The floor is a kernel fact derived from delivery facts: it is advanced
-        only under the lock and only over messages that carry a delivery fact
-        for ``actor`` and have no ``deliver_at``. Immediate messages are due at
-        every ``now``, so skipping a delivered one can never hide a wake or a
-        head-of-line boundary. Delayed messages are deliberately not crossed,
-        keeping exact delayed ordering for any observation time. A corrupt or
-        unreadable floor fails closed to 0 (a full scan), never to a skip.
+        Each run is ``(start, end)``: every message in it has a delivery fact
+        for ``actor``. Each gate is ``(seq, deliver_at)`` for a delivered
+        delayed message in a run. Missing or malformed state fails closed to
+        empty runs, i.e. a full scan; no fact is inferred from the index.
         """
+        name = self._relative(queue, "skip", self._actor(actor).replace(":", "_") + ".json")
         try:
-            stored = self._optional_json(
-                self._relative(queue, "floor", self._actor(actor).replace(":", "_") + ".json"))
+            stored = self._optional_json(name)
         except (Denied, ValueError, RecursionError):
-            return 0
-        value = stored.get("seq") if isinstance(stored, Mapping) else None
-        return value if type(value) is int and 0 <= value <= head else 0
+            return (), ()
+        if not isinstance(stored, Mapping) or set(stored) != _SKIP_KEYS:
+            return (), ()
+        raw_runs, raw_gates = stored["runs"], stored["gates"]
+        if (not isinstance(raw_runs, list) or not isinstance(raw_gates, list)
+                or len(raw_runs) > head or len(raw_gates) > head):
+            return (), ()
+        runs: list[tuple[int, int]] = []
+        previous = 0
+        for item in raw_runs:
+            if (not isinstance(item, list) or len(item) != 2
+                    or type(item[0]) is not int or type(item[1]) is not int
+                    or item[0] <= previous or item[1] < item[0] or item[1] > head):
+                return (), ()
+            runs.append((item[0], item[1]))
+            previous = item[1]
+        gates: list[tuple[int, str]] = []
+        previous = 0
+        for item in raw_gates:
+            if (not isinstance(item, list) or len(item) != 2
+                    or type(item[0]) is not int or type(item[1]) is not str
+                    or item[0] <= previous or item[0] > head
+                    or not any(start <= item[0] <= end for start, end in runs)):
+                return (), ()
+            try:
+                _instant(item[1], "deliver_at")
+            except Denied:
+                return (), ()
+            gates.append((item[0], item[1]))
+            previous = item[0]
+        return tuple(runs), tuple(gates)
 
-    def _advance_floor(self, queue: str, actor: str) -> None:
-        """Extend ``actor``'s contiguous delivered prefix; called under the lock.
+    @staticmethod
+    def _skip_to(index: tuple[tuple, tuple], seq: int, stamp: dt.datetime) -> int:
+        """Skip delivered, due messages starting at ``seq + 1``.
 
-        Every delivery-fact write attempts this, so an out-of-order by-ID
-        delivery that fills a gap is crossed once the earlier seq is delivered.
-        The walk starts at the stored floor and stops at its first non-crossable
-        seq, so a run of in-order deliveries costs O(1) per write.
+        A delivered message with a future ``deliver_at`` is a head-of-line
+        boundary at this observation time, so the scan stops just before it.
+        All other messages in a delivered run are due at every ``now`` and can
+        be crossed without changing what a scan sees.
         """
-        head = self._head(queue)
-        floor = self._floor(queue, actor, head)
-        start = floor
-        while floor < head:
-            candidate = floor + 1
-            message = self._message(queue, candidate)
-            if message is None or message.get("deliver_at") is not None:
-                break  # a gap or a delayed message is never crossed
-            if self._delivery(queue, candidate, actor) is None:
+        runs, gates = index
+        for start, end in runs:
+            if end < seq + 1:
+                continue
+            if start > seq + 1:
                 break
-            floor = candidate
-        if floor != start:
-            atomic_write(self._floor_path(queue, actor), canonical({"seq": floor}))
+            for gate_seq, deadline in gates:
+                if gate_seq > end:
+                    break
+                if gate_seq > seq and _instant(deadline, "deliver_at") > stamp:
+                    return gate_seq - 1
+            return end
+        return seq
+
+    def _extend_skip(self, queue: str, seq: int, actor: str) -> None:
+        """Add one delivery to ``actor``'s runs; called under the lock.
+
+        An out-of-order by-ID handoff joins neighbouring runs when the gap is
+        filled. Each fact write touches one small index file, not the retained
+        bodies. A message we cannot summarize leaves no index to skip with.
+        """
+        path = self._skip_path(queue, actor)
+        try:
+            message = self._message(queue, seq)
+            if message is None:
+                return
+            runs, gates = self._skip_index(queue, actor, self._head(queue))
+            runs, gates = list(runs), list(gates)
+            gates = [gate for gate in gates if gate[0] != seq]
+            deadline = message.get("deliver_at")
+            if deadline is not None:
+                _instant(deadline, "deliver_at")
+                gates.append((seq, deadline))
+            gates.sort()
+            before = next((i for i, run in enumerate(runs) if run[1] == seq - 1), None)
+            after = next((i for i, run in enumerate(runs) if run[0] == seq + 1), None)
+            if before is not None and after is not None:
+                runs[before] = (runs[before][0], runs[after][1])
+                del runs[after]
+            elif before is not None:
+                runs[before] = (runs[before][0], seq)
+            elif after is not None:
+                runs[after] = (seq, runs[after][1])
+            else:
+                runs.append((seq, seq))
+                runs.sort()
+            atomic_write(path, canonical({"runs": [list(run) for run in runs],
+                                          "gates": [list(gate) for gate in gates]}))
+        except (Denied, ValueError, RecursionError):
+            path.unlink(missing_ok=True)  # a corrupt summary licenses no skip
 
     def _cursor_principal(self, name: str) -> str:
         """Decode the cursor filename convention back to a concrete principal."""
@@ -679,12 +744,18 @@ class QueueStore:
             head = self._head(declaration.name)
             seq = (cursor if cursor is not None
                    else max(self._retained(declaration.name), 0))
+            # An explicit cursor pages history: delivered rows are returned.
+            index = (self._skip_index(declaration.name, actor, head)
+                     if cursor is None else ((), ()))
             rows, delayed = [], False
             # Bound the page by rows returned, not by positions examined:
             # already-delivered rows are skipped and must never push a later
             # undelivered message out of reach. The scan still stops at a
             # not-yet-due message (head-of-line) and at the queue head.
             while seq < head and len(rows) < limit:
+                seq = self._skip_to(index, seq, stamp)
+                if seq >= head:
+                    break
                 candidate = seq + 1
                 message = self._message(declaration.name, candidate)
                 if message is not None and not self._due(message, stamp):
@@ -719,12 +790,16 @@ class QueueStore:
             raise Denied(f"newest must be from 0 to {PAGE_MAX}")
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
+        seq = max(self._retained(declaration.name), 0)
+        index = self._skip_index(declaration.name, actor, head)
         count, rows = 0, []
         # Count undelivered messages, not examined positions: a delivered
-        # prefix of any length cannot hide the next undelivered message.
+        # run of any length cannot hide the next undelivered message.
         # A not-yet-due message still ends the contiguous run (head-of-line).
         while seq < head:
+            seq = self._skip_to(index, seq, stamp)
+            if seq >= head:
+                break
             candidate = seq + 1
             message = self._message(declaration.name, candidate)
             if message is not None and not self._due(message, stamp):
@@ -751,11 +826,14 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
+        seq = max(self._retained(declaration.name), 0)
+        index = self._skip_index(declaration.name, actor, head)
         # Scan to the head, stopping at the first not-yet-due message. A long
-        # delivered prefix is skipped, not counted, so it cannot hide a wake.
+        # delivered run is skipped, not counted, so it cannot hide a wake.
         while seq < head:
-            seq += 1
+            seq = self._skip_to(index, seq, stamp) + 1
+            if seq > head:
+                break
             message = self._message(declaration.name, seq)
             if message is None:
                 continue
@@ -878,11 +956,14 @@ class QueueStore:
         declaration = self._grant(queue, actor, write=False)
         stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         head = self._head(declaration.name)
-        seq = max(self._retained(declaration.name), self._floor(declaration.name, actor, head), 0)
+        seq = max(self._retained(declaration.name), 0)
+        index = self._skip_index(declaration.name, actor, head)
         # As in ``due``, delivered rows are skipped without ending the scan,
-        # so a delivered prefix cannot hide a later actionable deadline.
+        # so a delivered run cannot hide a later actionable deadline.
         while seq < head:
-            seq += 1
+            seq = self._skip_to(index, seq, stamp) + 1
+            if seq > head:
+                break
             message = self._message(declaration.name, seq)
             if message is None:
                 continue
@@ -982,6 +1063,37 @@ class QueueStore:
             entry.unlink()
         directory.rmdir()
 
+    def _remove_skip(self, queue: str, seq: int) -> None:
+        """Retire one removed message from every reader's derived runs."""
+        directory = self.root / self._relative(queue, "skip")
+        if not directory.exists():
+            return
+        if directory.is_symlink() or not directory.is_dir():
+            raise Denied("Corrupt skip directory")
+        head = self._head(queue)
+        for path in sorted(directory.glob("*.json")):
+            try:
+                actor = self._cursor_principal(path.stem)
+            except Denied:
+                path.unlink(missing_ok=True)  # an unnamed summary cannot be used
+                continue
+            runs, gates = self._skip_index(queue, actor, head)
+            remaining = []
+            for start, end in runs:
+                if seq < start or seq > end:
+                    remaining.append((start, end))
+                    continue
+                if start < seq:
+                    remaining.append((start, seq - 1))
+                if seq < end:
+                    remaining.append((seq + 1, end))
+            gates = [gate for gate in gates if gate[0] != seq]
+            if remaining or gates:
+                atomic_write(path, canonical({"runs": [list(run) for run in remaining],
+                                              "gates": [list(gate) for gate in gates]}))
+            else:
+                path.unlink(missing_ok=True)
+
     def _remove_message(self, queue: str, seq: int, message: Mapping) -> None:
         """Unlink a message, its delivery facts, and a generated id pointer.
 
@@ -996,6 +1108,7 @@ class QueueStore:
             raise Denied("Corrupt queue message")
         (self.root / self._relative(queue, "messages", f"{seq:020d}.json")).unlink(missing_ok=True)
         self._remove_delivery(queue, seq)
+        self._remove_skip(queue, seq)
         try:
             pointer = self._id_pointer(message["id"])
         except (Denied, KeyError):
