@@ -816,6 +816,80 @@ class NativeWakeTests(unittest.TestCase):
                              for v in e.values()),
                          "a fact claimed the path was watched")
 
+    def test_dropped_notification_still_readmits_at_exact_deadline(self):
+        """A dropped hint notification must not strand a settled daemon: an
+        armed exact deadline re-arms the watcher, the fingerprint re-check sees
+        the change the writer published, and no polling loop starts. This is
+        the 'hint OR exact deadline' invariant on the remaining leg — a change
+        whose kernel event was lost is still observed within the deadline.
+        """
+        from mizu import daemon_notify
+        baseline = daemon_wake.fingerprint(self.root)
+        stop = threading.Event()
+        wait_calls = []
+        armed = []
+
+        class DroppingWatcher:
+            # Registration succeeds and coverage is reported, but wait()
+            # never surfaces the writer's hint: the notification is lost
+            # (queue overflow, coalesced remote-origin event). wait() blocks
+            # only until the exact deadline or stop.
+            unwatchable = ()
+            paths = (self.root / "wake",)
+
+            def __init__(self, *args, **kwargs):
+                armed.append(time.monotonic())
+
+            def wait(self, deadline):
+                wait_calls.append(time.monotonic())
+                stop.wait(max(0, deadline - time.monotonic()))
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        deadline = time.monotonic() + 0.25
+
+        def bump():
+            # The writer publishes a watched hint while the daemon is parked;
+            # the fake watcher drops the event that would have surfaced it.
+            time.sleep(0.05)
+            (self.root / "wake" / "hint.json").write_text("{}")
+
+        thread = threading.Thread(target=bump)
+        thread.start()
+        captured = io.StringIO()
+        with patch.object(daemon_notify, "available", return_value=True), \
+                patch.object(daemon_notify, "Watcher", DroppingWatcher), \
+                patch.object(daemon_wake, "_wait_portable",
+                             side_effect=AssertionError("polling fallback ran")), \
+                contextlib.redirect_stdout(captured):
+            started = time.monotonic()
+            reason = daemon_wake.wait(stop, self.root, baseline, deadline)
+            elapsed = time.monotonic() - started
+        thread.join(timeout=1.0)
+
+        # The dropped event did not wake it early; the deadline did, and the
+        # re-arm's fingerprint check found the hint. So the result is a change
+        # re-admitted at the deadline bound, not a bare deadline timeout.
+        self.assertEqual(reason, "change")
+        self.assertGreaterEqual(elapsed, deadline - started - 0.02)
+        self.assertGreaterEqual(len(wait_calls), 1)
+        # A first arm parked before the mutation; re-arming after the deadline
+        # is what caught the dropped change.
+        self.assertGreaterEqual(len(armed), 2, armed)
+        events = [json.loads(line) for line in captured.getvalue().splitlines()
+                  if line.strip()]
+        coverage = [e for e in events if e.get("event") == "native_wake_coverage"]
+        self.assertTrue(coverage)
+        for event in coverage:
+            self.assertEqual(event["remote_origin"], "unverified")
+
     def test_unwatchable_registration_failure_is_reported_as_a_fact(self):
         """A failed registration is still reported, alongside the coverage
         fact that every arming emits.
