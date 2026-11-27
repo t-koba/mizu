@@ -933,14 +933,29 @@ class QueueStoreTests(unittest.TestCase):
         caller_pointer = ids / (caller["id"] + ".json")
         self.assertTrue(caller_pointer.exists())
         self.assertNotIn("id_generated", json.loads(caller_pointer.read_text(encoding="utf-8")))
+        self.assertFalse((retire / (caller["id"] + ".json")).exists())  # no orphan intent
 
-        victim = store.append("notes", {}, "host", now=OLD)
+        target = store.append("notes", {}, "host", now=OLD)
+        self.deliver(store, "notes", target, now=NOW)
+        victim = store.append("notes", {}, "role:alpha", now=OLD, refs=[target["id"]])
+        caller_victim = store.append("notes", {}, "role:alpha", id="e" * 32, now=OLD,
+                                     refs=[target["id"]])
         live = store.append("notes", {}, "host", now=NOW)  # not due for removal
         self.deliver(store, "notes", victim, now=NOW)
+        self.deliver(store, "notes", caller_victim, now=NOW)
+        self.assertEqual(sorted(entry["id"] for entry in store._refs_to(target["id"])),
+                         sorted([victim["id"], caller_victim["id"]]))
         victim_pointer = ids / (victim["id"] + ".json")
+        caller_victim_pointer = ids / (caller_victim["id"] + ".json")
+        target_pointer = ids / (target["id"] + ".json")
         live_pointer = ids / (live["id"] + ".json")
         victim_body = root / "queues" / "notes" / "messages" / f"{victim['seq']:020d}.json"
         victim_facts = root / "queues" / "notes" / "delivery" / f"{victim['seq']:020d}"
+        caller_victim_body = (root / "queues" / "notes" / "messages"
+                              / f"{caller_victim['seq']:020d}.json")
+        caller_victim_facts = (root / "queues" / "notes" / "delivery"
+                               / f"{caller_victim['seq']:020d}")
+        target_body = root / "queues" / "notes" / "messages" / f"{target['seq']:020d}.json"
         skip = root / "queues" / "notes" / "skip" / "role_alpha.json"
 
         real_remove = store._remove_delivery
@@ -957,23 +972,67 @@ class QueueStoreTests(unittest.TestCase):
         intent = retire / (victim["id"] + ".json")
         self.assertFalse(victim_body.exists())
         self.assertTrue(victim_facts.is_dir())  # interrupted dependent cleanup
-        self.assertEqual(json.loads(skip.read_text(encoding="utf-8"))["runs"], [[victim["seq"]] * 2])
         self.assertTrue(victim_pointer.exists())
         self.assertEqual(json.loads(intent.read_text(encoding="utf-8")),
                          {"id": victim["id"], "queue": "notes", "seq": victim["seq"],
-                          "id_generated": True})
+                          "id_generated": True, "refs": [target["id"]]})
+        # The outgoing ref is still a phantom: the target still lists the victim.
+        self.assertIn(victim["id"], [entry["id"] for entry in store._refs_to(target["id"])])
+        self.assertTrue(caller_victim_body.exists())  # later referrer not yet reached
+        self.assertTrue(target_body.exists())  # blocked by the live referrers
 
         resumed = QueueStore(root, self.queues)
-        resumed.append("notes", {}, "host", now=NOW)  # reopen + append runs retention
+        real_second = resumed._remove_delivery
+
+        def fail_caller(queue, seq):
+            if seq == caller_victim["seq"]:
+                raise OSError("injected caller failure")
+            real_second(queue, seq)
+
+        with patch.object(resumed, "_remove_delivery", side_effect=fail_caller):
+            with self.assertRaisesRegex(OSError, "injected caller"):
+                resumed.append("notes", {}, "host", now=NOW)
+        caller_intent = retire / (caller_victim["id"] + ".json")
+        self.assertFalse(caller_victim_body.exists())
+        self.assertTrue(caller_victim_facts.is_dir())  # interrupted caller cleanup
+        self.assertEqual(json.loads(caller_intent.read_text(encoding="utf-8")),
+                         {"id": caller_victim["id"], "queue": "notes",
+                          "seq": caller_victim["seq"], "id_generated": False,
+                          "refs": [target["id"]]})
+        # The generated victim finished: its phantom is gone, but the target is
+        # still blocked by the interrupted caller referrer.
+        self.assertNotIn(victim["id"], [entry["id"] for entry in resumed._refs_to(target["id"])])
+        self.assertIn(caller_victim["id"],
+                      [entry["id"] for entry in resumed._refs_to(target["id"])])
         self.assertFalse(victim_pointer.exists())
         self.assertFalse(intent.exists())
         self.assertFalse(victim_facts.exists())
-        self.assertFalse(skip.exists())  # derived runs finished too
+        self.assertTrue(caller_victim_pointer.exists())  # tombstone never unlinked
+
+        reopened = QueueStore(root, self.queues)
+        reopened.append("notes", {}, "host", now=NOW)  # reopen + append runs retention
+        self.assertFalse(caller_intent.exists())  # caller intent expires without orphan
+        self.assertTrue(caller_victim_pointer.exists())  # caller tombstone survives
+        self.assertFalse(caller_victim_facts.exists())
+        # No phantom ref remains for either removed referrer.
+        self.assertEqual(reopened._refs_to(target["id"]), [])
+        self.assertFalse((root / "queues" / "refs" / (target["id"] + ".json")).exists()
+                         and [entry for entry in reopened._refs_to(target["id"])
+                              if entry.get("id") in (victim["id"], caller_victim["id"])])
+        # The fully delivered target is removable once the last phantom is gone.
+        self.assertFalse(target_body.exists())
+        with self.assertRaises(Denied):
+            reopened.message(target["id"], "role:alpha")
+        self.assertFalse(target_pointer.exists())  # generated target pointer retires
+        self.assertFalse((retire / (target["id"] + ".json")).exists())
+        reopened._reconcile_retirements()  # repeated passes leave no phantom or orphan
+        self.assertEqual(reopened._refs_to(target["id"]), [])
+        self.assertEqual(list(retire.glob("*.json")), [])
         self.assertTrue(caller_pointer.exists())  # caller tombstone survives
         self.assertTrue(live_pointer.exists())  # pointer to a live message survives
         self.assertTrue((root / "queues" / "notes" / "messages"
                          / f"{live['seq']:020d}.json").exists())
-        self.assertEqual(resumed.message(live["id"], "role:alpha"), live)
+        self.assertEqual(reopened.message(live["id"], "role:alpha"), live)
 
     def test_retirement_reconciliation_is_bounded_and_idempotent(self):
         root = self.root / "retire-bounded"
@@ -985,7 +1044,7 @@ class QueueStoreTests(unittest.TestCase):
                          canonical({"queue": "notes", "seq": seq, "id_generated": True}))
             atomic_write(retire / (message_id + ".json"),
                          canonical({"id": message_id, "queue": "notes", "seq": seq,
-                                    "id_generated": True}))
+                                    "id_generated": True, "refs": []}))
         with patch("mizu.kernel.queues.MAX_RETIRE_RECONCILE", 1):
             store._reconcile_retirements()
             self.assertEqual(len(list(retire.glob("*.json"))), 1)
@@ -1002,20 +1061,47 @@ class QueueStoreTests(unittest.TestCase):
         orphan = "d" * 32
         atomic_write(retire / (orphan + ".json"),
                      canonical({"id": orphan, "queue": "notes", "seq": 3,
-                                "id_generated": True}))
+                                "id_generated": True, "refs": []}))
         store._reconcile_retirements()
         self.assertFalse((retire / (orphan + ".json")).exists())
+
+        # A caller removal records an intent that expires while keeping its
+        # tombstone, and its outgoing refs are finished idempotently.
+        caller_id, target_id = "c" * 32, "e" * 32
+        atomic_write(pointers / (caller_id + ".json"),
+                     canonical({"queue": "notes", "seq": 5}))
+        atomic_write(root / "queues" / "refs" / target_id / "to.json",
+                     canonical([{"id": caller_id, "queue": "notes", "seq": 5}]))
+        atomic_write(retire / (caller_id + ".json"),
+                     canonical({"id": caller_id, "queue": "notes", "seq": 5,
+                                "id_generated": False, "refs": [target_id]}))
+        store._reconcile_retirements()
+        self.assertFalse((retire / (caller_id + ".json")).exists())
+        self.assertTrue((pointers / (caller_id + ".json")).exists())
+        self.assertEqual(store._refs_to(target_id), [])
+        store._reconcile_retirements()  # repeated passes leave no phantom or orphan
+        self.assertEqual(store._refs_to(target_id), [])
+        self.assertEqual(list(retire.glob("*.json")), [])
 
     def test_malformed_retire_intent_licenses_no_deletion(self):
         root = self.root / "retire-unsafe"
         store = QueueStore(root, self.queues)
         pointers, retire = root / "queues" / "ids", root / "queues" / "retire"
         cases = [
-            {"id": "1" * 32, "queue": "notes", "seq": 1},  # no generated marker
-            {"id": "2" * 32, "queue": "notes", "seq": 1, "id_generated": False},
-            {"id": "3" * 32, "queue": "notes", "seq": 2, "id_generated": True},  # wrong seq
-            {"id": "4" * 32, "queue": "missing", "seq": 1, "id_generated": True},
-            {"id": "5" * 32, "queue": "notes", "seq": 1, "id_generated": True, "extra": 1},
+            {"id": "1" * 32, "queue": "notes", "seq": 1},  # no generated marker or refs
+            {"id": "2" * 32, "queue": "notes", "seq": 1, "id_generated": True},  # no refs
+            {"id": "3" * 32, "queue": "notes", "seq": 2, "id_generated": True,
+             "refs": []},  # wrong seq
+            {"id": "4" * 32, "queue": "missing", "seq": 1, "id_generated": True,
+             "refs": []},
+            {"id": "5" * 32, "queue": "notes", "seq": 1, "id_generated": True,
+             "refs": [], "extra": 1},
+            {"id": "7" * 32, "queue": "notes", "seq": 1, "id_generated": True,
+             "refs": ["not-an-id"]},
+            {"id": "8" * 32, "queue": "notes", "seq": 1, "id_generated": True,
+             "refs": "ab" * 16},
+            {"id": "9" * 32, "queue": "notes", "seq": 1, "id_generated": "yes",
+             "refs": []},
         ]
         for index, intent in enumerate(cases):
             message_id = intent["id"]
@@ -1041,15 +1127,26 @@ class QueueStoreTests(unittest.TestCase):
         atomic_write(pointers / (caller_id + ".json"), canonical({"queue": "notes", "seq": 1}))
         atomic_write(retire / (caller_id + ".json"),
                      canonical({"id": caller_id, "queue": "notes", "seq": 1,
-                                "id_generated": True}))
+                                "id_generated": True, "refs": []}))
         live = store.append("notes", {}, "host", now=NOW)
         live_intent = retire / (live["id"] + ".json")
         atomic_write(live_intent, canonical({"id": live["id"], "queue": "notes",
-                                             "seq": live["seq"], "id_generated": True}))
+                                             "seq": live["seq"], "id_generated": True,
+                                             "refs": []}))
         store._reconcile_retirements()
         self.assertTrue((pointers / (caller_id + ".json")).exists())
         self.assertTrue((pointers / (live["id"] + ".json")).exists())
         self.assertTrue(live_intent.exists())
+        self.assertTrue((retire / (caller_id + ".json")).exists())
+        # A caller intent naming the wrong body is unsafe even with valid refs.
+        wrong = "b" * 32
+        atomic_write(pointers / (wrong + ".json"), canonical({"queue": "notes", "seq": 9}))
+        atomic_write(retire / (wrong + ".json"),
+                     canonical({"id": wrong, "queue": "notes", "seq": 1,
+                                "id_generated": False, "refs": []}))
+        store._reconcile_retirements()
+        self.assertTrue((pointers / (wrong + ".json")).exists())
+        self.assertTrue((retire / (wrong + ".json")).exists())
 
     def test_migrate_cursors_converts_once_without_importing_woken(self):
         queue = self.root / "queues" / "tasks"
