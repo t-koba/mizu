@@ -340,17 +340,16 @@ class CiRequests:
         mkdir(self.root / SEEK_DIR)
         write_json(self._seek_path(publication), index)
 
-    def _establish_empty_seek(self, publication_id: str, instant: dt.datetime) -> bool:
+    def establish_publication_empty(self, publication_id: str) -> bool:
         """Record a certified publication's known emptiness as a durable index.
 
-        Called while a validated activity token still proves this publication
-        quiet. The empty index survives later, unrelated request writes that
-        rotate that global token. No activity token is rotated here; only the
-        per-publication index is written under the writer lock.
+        Under the writer lock, a publication with no index gets an empty index
+        only when the ledger has no legacy marker naming it. This proof is
+        publication-local: unrelated request writes cannot revoke it. No
+        activity token is rotated here; callers suppress OSError, Denied,
+        LimitExceeded, ValueError, TypeError and MizuError as before.
         """
         if not isinstance(publication_id, str) or not _HEX64.fullmatch(publication_id):
-            return False
-        if not self._fresh_activity(instant):
             return False
         with lock(self.lock):
             entries, invalid = self._seek_read(publication_id)
@@ -366,6 +365,16 @@ class CiRequests:
             write_json(self._seek_path(publication_id), {
                 "version": SEEK_VERSION, "publication_id": publication_id, "entries": []})
             return True
+
+    def _establish_empty_seek(self, publication_id: str, instant: dt.datetime) -> bool:
+        """Record known emptiness when a validated activity token is fresh.
+
+        The freshness gate remains a fallback; publication-local certification
+        itself does not depend on the global activity token.
+        """
+        if not self._fresh_activity(instant):
+            return False
+        return self.establish_publication_empty(publication_id)
 
     def _retire_legacy_seeks(self) -> bool:
         """Remove superseded flat index files before first seek certification."""
@@ -543,11 +552,14 @@ class CiRequests:
         The shared reader's configured name and candidate limits apply before
         date filtering, so a candidate cap reached before that window makes
         only pages naming a scanned publication incomplete instead of proving
-        absence. A publication with no index is known empty when a validated
-        activity token predates the exact query instant: it needs neither a
-        shared scan nor an incomplete page. That known emptiness is recorded
-        as a durable per-publication empty seek index under the writer lock, so
-        a later unrelated request write cannot revoke it. A query naming both
+        absence. A publication with no index is known empty when the ledger is
+        certified free of markers naming that publication: publication-local
+        certification needs neither a shared scan nor an incomplete page and
+        is robust to unrelated writes. It is recorded as a durable per-publication
+        empty seek index under the writer lock. A validated activity token
+        predating the exact query instant remains a fallback proof of emptiness
+        for that window; without either proof the publication stays on the
+        conservative shared scan. A query naming both
         indexed and legacy publications receives the indexed items plus the
         conservative legacy result.
         Trust: locally recorded evidence; a dispatch that cannot be validated
@@ -602,18 +614,22 @@ class CiRequests:
                 invalid_publications.add(publication_id)
             elif entries is not None:
                 indexed[publication_id] = entries
-            elif (_HEX64.fullmatch(publication_id)
-                  and self._fresh_activity(publication_instants[publication_id])):
-                # Known empty: no request write has happened since the
-                # publication, so this publication needs no ledger scan. Record
-                # that fact under the writer lock so later unrelated writes
-                # cannot revoke it. A failure here leaves this call's
-                # token-based answer intact.
+            elif _HEX64.fullmatch(publication_id):
+                # A publication-local proof of emptiness is independent of the
+                # global activity token, which any unrelated write rotates.
+                # The freshness token stays as a fallback: when it proves no
+                # write since the publication, this window needs no scan even
+                # if no durable index can be written. Otherwise the shared
+                # scan remains conservative.
                 with contextlib.suppress(OSError, Denied, LimitExceeded,
                                          ValueError, TypeError, MizuError):
-                    self._establish_empty_seek(
-                        publication_id, publication_instants[publication_id])
-                continue
+                    if self.establish_publication_empty(publication_id):
+                        continue
+                    if self._fresh_activity(publication_instants[publication_id]):
+                        self._establish_empty_seek(
+                            publication_id, publication_instants[publication_id])
+                        continue
+                legacy.add(publication_id)
             else:
                 legacy.add(publication_id)
         indexed_rows: list = []

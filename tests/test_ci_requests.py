@@ -1072,6 +1072,83 @@ class CiRequestTests(Fixture):
         self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
         self.assertEqual(store._seek_read(publication), ([(identity, "2026-06-02")], False))
 
+    def test_first_lookup_after_unrelated_dispatch_is_publication_local(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        receipt = self.fresh_receipt()
+        publication = receipt["publication_id"]
+        instant = dt.datetime.fromisoformat(receipt["recorded_at"])
+        other = "f" * 64
+        other_identity = request_id(other, SHA, ["ci"])
+        store.mark_dispatch(other_identity, {
+            "request_id": other_identity, "publication_id": other, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2036-10-23T00:00:00+00:00"})
+        self.assertFalse(store._seek_path(publication).exists())
+        # That unrelated write rotates the global token, so freshness alone
+        # cannot certify this publication's emptiness any more.
+        later = instant + dt.timedelta(days=1)
+        delta = later - dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            self.assertFalse(store._fresh_activity(instant))
+            with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")) as scan, \
+                    patch.object(store, "_read", side_effect=AssertionError("dispatch read used")) as read:
+                pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+        scan.assert_not_called()
+        read.assert_not_called()
+        self.assertEqual(store._seek_read(publication), ([], False))
+
+    def test_first_lookup_with_marker_for_this_publication_stays_conservative(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        publication = "f" * 64
+        self.unrelated_marker(store, SHA, publication)
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        later = instant + dt.timedelta(days=1)
+        delta = later - dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            self.assertFalse(store._seek_certifiable(publication))
+            with patch.object(store, "_rows", return_value=([], True)) as scan:
+                pages = store.matching_many({"head": ([publication], instant)})
+        scan.assert_called_once()
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": True}})
+        self.assertFalse(store._seek_path(publication).exists())
+
+    def test_established_empty_index_grows_after_unrelated_dispatch(self):
+        store = CiRequests(self.project.root, CiRequestEvidence())
+        self.write_activity()
+        mkdir(store.root)  # An empty ledger can be certified locally.
+        receipt = self.fresh_receipt()
+        publication = receipt["publication_id"]
+        instant = dt.datetime.fromisoformat(receipt["recorded_at"])
+        later = instant + dt.timedelta(days=1)
+        delta = later - dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        stamp_ns = ((delta.days * 86_400 + delta.seconds) * 1_000_000_000
+                    + delta.microseconds * 1000)
+        with self.activity_stat_patch(mtime_ns=stamp_ns, ctime_ns=stamp_ns):
+            with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+                pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [], "incomplete": False}})
+        self.assertEqual(store._seek_read(publication), ([], False))
+        # An unrelated dispatch cannot revoke the established empty index.
+        other = "f" * 64
+        other_identity = request_id(other, SHA, ["ci"])
+        store.mark_dispatch(other_identity, {
+            "request_id": other_identity, "publication_id": other, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2036-10-23T00:00:00+00:00"})
+        identity = request_id(publication, SHA, ["ci"])
+        store.mark_dispatch(identity, {
+            "request_id": identity, "publication_id": publication, "sha": SHA,
+            "workflows": ["ci"], "dispatched_at": "2036-10-23T00:00:00+00:00"})
+        with patch.object(store, "_rows", side_effect=AssertionError("shared scan used")):
+            pages = store.matching_many({"head": ([publication], instant)})
+        self.assertEqual(pages, {"head": {"items": [identity], "incomplete": False}})
+        self.assertEqual(store._seek_read(publication), ([(identity, "2036-10-23")], False))
+
     def test_activity_boundary_uses_the_exact_instant_not_its_date(self):
         store = CiRequests(self.project.root, CiRequestEvidence())
         self.write_activity()
