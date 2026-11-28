@@ -8,7 +8,7 @@ import support  # noqa: F401 -- puts src on sys.path for the standalone unittest
 
 from mizu.errors import Denied, LimitExceeded
 from mizu.kernel.query import (
-    MAX_ARGS, MAX_DEPTH, MAX_IN_VALUES, MAX_PATTERN_CHARS, MAX_REGEX_INPUT_CHARS,
+    MAX_ARGS, MAX_DEPTH, MAX_IN_VALUES, MAX_PATTERN_CHARS,
     MAX_VALUE_CHARS, Relation, evaluate,
 )
 
@@ -350,12 +350,6 @@ class KernelQueryTests(unittest.TestCase):
                 with self.assertRaises(Denied):
                     self.run_query({"relation": "m"}, relations={"m": rows})
 
-        long_value = [{**MESSAGES[0], "id": "x" * (MAX_REGEX_INPUT_CHARS + 1)}]
-        with self.assertRaises(Denied):
-            self.run_query({"relation": "m", "where": {"op": "regex", "field": "id",
-                                                       "pattern": "^x+$"}},
-                           relations={"m": long_value})
-
         query = {"relation": "m", "select": ["id"], "limit": 1}
         for kwargs in ({"max_rows": 0}, {"max_bytes": 0}, {"cursor": -1},
                        {"visible": object()}, {"max_rows": True}):
@@ -364,6 +358,16 @@ class KernelQueryTests(unittest.TestCase):
                     self.run_query(query, **kwargs)
         with self.assertRaises(Denied):
             self.run_query(query, cursor=6, relations={"m": MESSAGES[:2]})
+
+    def test_regex_evaluates_a_long_declared_field(self):
+        long_row = [{**MESSAGES[0], "id": "x" * 65536}]
+        result = self.run_query(
+            {"relation": "m", "where": {"op": "regex", "field": "id",
+                                        "pattern": "^x+$"},
+             "select": ["queue"], "limit": 5},
+            relations={"m": long_row})
+        self.assertEqual(result["rows"], [{"queue": "Q"}])
+        self.assertFalse(result["more"])
 
     def test_evaluation_does_not_mutate_its_inputs(self):
         before = copy.deepcopy(self.relations)

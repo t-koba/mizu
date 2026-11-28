@@ -36,15 +36,14 @@ from ..errors import Denied, LimitExceeded
 MAX_NAME_CHARS = 64
 MAX_RELATIONS = 64
 MAX_FIELDS = 64
-MAX_VALUE_CHARS = 4096
-MAX_ROW_BYTES = 8192
+MAX_VALUE_CHARS = 65536
+MAX_ROW_BYTES = 256 * 1024
 MAX_IN_VALUES = 64
 MAX_ARGS = 32
 MAX_ON = 32
 MAX_DEPTH = 8
 MAX_PATTERN_CHARS = 128
 MAX_QUANTIFIERS = 2
-MAX_REGEX_INPUT_CHARS = 256
 MAX_ORDER = 8
 # Deterministic prefix when a keyless relation has neither seq nor id.
 MAX_FALLBACK_TIE = 4
@@ -401,8 +400,6 @@ def _eval(node: tuple, row: dict, schemas: Mapping[str, Relation],
         return _visible_field(row, node[1]) in node[2]
     if op == "regex":
         value = _visible_field(row, node[1])
-        if len(value) > MAX_REGEX_INPUT_CHARS:
-            raise Denied("Regex input exceeds its character bound")
         return node[2].search(value) is not None
     if op == "and":
         return all(_eval(item, row, schemas, relations, visible, budget) for item in node[1])
