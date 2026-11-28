@@ -9,10 +9,16 @@ or output shaping, so a value that was not exposed cannot affect a result.
 Caller-named ordering requires visible fields; automatic tiebreakers use only
 fields present in a row's visible view and skip the rest.
 
-Every call examines at most ``max_rows`` rows, including rows examined by
-nested checks, and emits at most ``max_bytes`` of serialized rows. Exhausting
-the row bound raises; exhausting the byte bound yields a continuation cursor
-so caller-driven paging never truncates a result silently.
+``max_rows`` is an internal mechanism limit on authorized rows examined per
+call, including rows examined by nested checks; a row denied by ``visible``
+consumes none of it. The bound limits work, not caller-visible data: the
+response holds only rows, the next cursor, whether more rows follow and the
+matching count when requested. Relation sequences are bounded in-memory
+candidates supplied by the caller; the eventual kernel supplies only
+authorized candidates, with index slices making that pre-filter bounded.
+Each call also emits at most ``max_bytes`` of serialized rows. Exhausting the
+authorized-row bound raises; exhausting the byte bound yields a continuation
+cursor so caller-driven paging never truncates a result silently.
 """
 from __future__ import annotations
 
@@ -173,7 +179,7 @@ def _visible_field(row: Mapping[str, Any], field: str) -> Any:
 
 
 class _Budget:
-    """Per-call count of examined rows, including rows of nested relations."""
+    """Per-call count of authorized rows examined, including nested relations."""
     __slots__ = ("max_rows", "examined")
 
     def __init__(self, max_rows: int):
@@ -188,7 +194,6 @@ class _Budget:
 
 def _authorized(raw: Any, name: str, relation: Relation,
                 visible: Callable[[str, dict], dict | None], budget: _Budget) -> dict | None:
-    budget.take()
     _row(raw, relation, "declared row")
     try:
         view = visible(name, raw)
@@ -196,7 +201,9 @@ def _authorized(raw: Any, name: str, relation: Relation,
         raise Denied("Visibility check failed") from exc
     if view is None:
         return None
-    return _row(view, relation, "visible row", subset=True)
+    checked = _row(view, relation, "visible row", subset=True)
+    budget.take()
+    return checked
 
 
 def _pattern(raw: Any) -> re.Pattern[str]:
@@ -425,9 +432,10 @@ def evaluate(relations: Mapping[str, Sequence[dict]], schemas: Mapping[str, Rela
 
     ``visible`` is applied to every row examined, at every nesting level,
     before that row takes part in a check. It returns the permitted fields or
-    ``None`` when the row itself is not permitted. The result holds ``rows``,
-    the next ``cursor``, whether ``more`` rows follow, the matching ``count``
-    when requested and the number of rows ``examined`` in this call.
+    ``None`` when the row itself is not permitted. ``max_rows`` bounds
+    authorized rows examined in this call, never a response field. The result
+    holds ``rows``, the next ``cursor``, whether ``more`` rows follow and the
+    matching ``count`` when requested.
     """
     checked = _schemas(schemas)
     plan = _compile_query(query, checked)
@@ -487,4 +495,4 @@ def evaluate(relations: Mapping[str, Sequence[dict]], schemas: Mapping[str, Rela
     next_cursor = cursor + len(rows)
     more = len(rows) < len(chosen) or next_cursor < len(ordered)
     return {"rows": rows, "next": next_cursor, "more": more,
-            "count": len(ordered) if plan["count"] else None, "examined": budget.examined}
+            "count": len(ordered) if plan["count"] else None}

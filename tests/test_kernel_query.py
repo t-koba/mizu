@@ -86,8 +86,7 @@ class KernelQueryTests(unittest.TestCase):
         self.assertEqual(result["count"], 2)
         self.assertFalse(result["more"])
         self.assertEqual(result["next"], 2)
-        # Five base rows plus twelve peer rows: one, four, three, zero and four.
-        self.assertEqual(result["examined"], 17)
+        self.assertEqual(set(result), {"rows", "next", "more", "count"})
 
     def test_field_predicate_and_order_select_earliest_rows(self):
         result = self.run_query({"relation": "d",
@@ -96,7 +95,6 @@ class KernelQueryTests(unittest.TestCase):
                                  "select": ["msg_id", "at"], "limit": 10})
         self.assertEqual([row["msg_id"] for row in result["rows"]], ["m1", "m2"])
         self.assertEqual([row["at"] for row in result["rows"]], [at(5), at(6)])
-        self.assertEqual(result["examined"], 3)
         self.assertIsNone(result["count"])
 
     def test_exists_probes_both_reference_directions(self):
@@ -140,7 +138,6 @@ class KernelQueryTests(unittest.TestCase):
         result = self.run_query(query, visible=visible)
         self.assertEqual([row["id"] for row in result["rows"]], ["m1", "m3", "m5"])
         self.assertEqual(result["count"], 3)
-        self.assertEqual(result["examined"], 5)
 
         with self.assertRaises(Denied):
             self.run_query({"relation": "m",
@@ -183,7 +180,7 @@ class KernelQueryTests(unittest.TestCase):
             page = self.run_query(query, cursor=cursor)
             self.assertLessEqual(len(page["rows"]), 2)
             seen.extend(row["id"] for row in page["rows"])
-            self.assertEqual(page["examined"], 5)
+            self.assertEqual(set(page), {"rows", "next", "more", "count"})
             if not page["more"]:
                 break
             self.assertEqual(page["next"], cursor + len(page["rows"]))
@@ -215,9 +212,69 @@ class KernelQueryTests(unittest.TestCase):
                 {"op": "not_exists", "relation": "r", "on": {"id": "to_id"},
                  "where": {"op": "eq", "field": "ref_author", "value": "alice"}},
             ]}, "select": ["id"], "order": [{"field": "seq", "desc": False}], "limit": 10}
-        self.assertEqual(self.run_query(query, max_rows=17)["examined"], 17)
+        within = self.run_query(query, max_rows=17)
+        self.assertEqual([row["id"] for row in within["rows"]], ["m2", "m5"])
+        self.assertIsNone(within["count"])
         with self.assertRaises(LimitExceeded):
             self.run_query(query, max_rows=16)
+
+    def test_denied_rows_do_not_change_page_or_consume_the_row_bound(self):
+        schema = Relation("v", {"id": "str", "seq": "int"}, key="id")
+        visible_rows = [{"id": f"k{i}", "seq": i} for i in range(1, 4)]
+        denied_rows = [{"id": f"x{i}", "seq": 100 + i} for i in range(1, 6)]
+        query = {"relation": "v", "where": {"op": "le", "field": "seq", "value": 3},
+                 "select": ["id"], "order": [{"field": "seq", "desc": False}],
+                 "limit": 2, "count": True}
+
+        def visible(name, row):
+            return dict(row) if row["id"].startswith("k") else None
+
+        expected = None
+        for extra in (0, 1, 3, len(denied_rows)):
+            with self.subTest(denied_rows=extra):
+                result = self.run_query(
+                    query, relations={"v": visible_rows + denied_rows[:extra]},
+                    schemas={"v": schema}, visible=visible, max_rows=3)
+                self.assertEqual(set(result), {"rows", "next", "more", "count"})
+                self.assertNotIn("examined", result)
+                self.assertEqual(result["rows"], [{"id": "k1"}, {"id": "k2"}])
+                self.assertEqual(result["next"], 2)
+                self.assertTrue(result["more"])
+                self.assertEqual(result["count"], 3)
+                outcome = ("ok", result["rows"], result["next"], result["more"],
+                           result["count"])
+                expected = outcome if expected is None else expected
+                self.assertEqual(outcome, expected)
+
+        peer_schema = Relation("p", {"ref": "str"}, key="ref")
+        hidden_peers = [{"ref": f"x{i}"} for i in range(1, 4)]
+        join = {"relation": "v", "where": {
+            "op": "not_exists", "relation": "p", "on": {"id": "ref"}},
+                "select": ["id"], "order": [{"field": "seq", "desc": False}],
+                "limit": 2, "count": True}
+
+        def visible_peers(name, row):
+            return dict(row) if name == "v" or not row["ref"].startswith("x") else None
+
+        expected = None
+        for extra in (0, 1, len(hidden_peers)):
+            with self.subTest(denied_peers=extra):
+                # Two visible base rows consume the bound fully; denied peers
+                # used to push it over and raise even though none are readable.
+                result = self.run_query(
+                    join, relations={"v": visible_rows[:2], "p": hidden_peers[:extra]},
+                    schemas={"v": schema, "p": peer_schema}, visible=visible_peers,
+                    max_rows=2)
+                self.assertEqual(set(result), {"rows", "next", "more", "count"})
+                self.assertNotIn("examined", result)
+                self.assertEqual(result["rows"], [{"id": "k1"}, {"id": "k2"}])
+                self.assertEqual(result["next"], 2)
+                self.assertFalse(result["more"])
+                self.assertEqual(result["count"], 2)
+                outcome = ("ok", result["rows"], result["next"], result["more"],
+                           result["count"])
+                expected = outcome if expected is None else expected
+                self.assertEqual(outcome, expected)
 
     def test_invalid_expressions_and_shapes_fail_closed(self):
         eq = {"op": "eq", "field": "seq", "value": 1}
@@ -333,7 +390,6 @@ class KernelQueryTests(unittest.TestCase):
                                 visible=visible)
         self.assertEqual(result["rows"], [{"a": "one"}, {"a": "two"}])
         self.assertEqual(result["count"], 2)
-        self.assertEqual(result["examined"], 2)
         self.assertEqual(result["next"], 2)
         self.assertFalse(result["more"])
         self.assertTrue(all("hidden" not in str(value) for row in result["rows"]
@@ -357,7 +413,6 @@ class KernelQueryTests(unittest.TestCase):
                                 visible=visible)
         self.assertEqual(result["rows"], [{"seq": 2}, {"seq": 1}])
         self.assertEqual(result["count"], 2)
-        self.assertEqual(result["examined"], 2)
         self.assertEqual(result["next"], 2)
         self.assertFalse(result["more"])
 
@@ -386,7 +441,7 @@ class KernelQueryTests(unittest.TestCase):
                 self.assertEqual(first, again)
                 self.assertEqual(first["rows"], [{"note": "n1"}, {"note": "n2"}])
                 self.assertEqual(first["count"], 4)
-                self.assertEqual(first["examined"], 4)
+                self.assertNotIn("examined", first)
                 self.assertEqual(first["next"], 2)
                 self.assertTrue(first["more"])
                 second = self.run_query(query, relations={"t": rows},
