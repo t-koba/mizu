@@ -25,16 +25,30 @@ pi lock で `@google/genai` 2.21.0 → 2.32.0、`@types/node` 26.6.3 → 26.6.6�
 `@types/node` 26.6.4 → 26.6.6、`openai` 7.19.0 → 7.59.0、`undici` 8.12.3 → 8.12.4 である
 （`undici` 8.12.4 は 6 件の GHSA 勧告を修正）。1.5.2 と 1.6.0 の差分をレビューし、Mizu が使う
 公開入口に契約破壊がないことを確認した（詳細は下記 Pi 節）。
+2026-11-27 に最新 stable の Pi 1.7.0 へ追随し、両 adapter の Pi 依存を同じリリースへ固定した
+（adapters/pi の2依存、adapters/pi-durable の4依存（Chord を含む））。両 lock は既存 lock を
+入力に含めた trusted materialize で再生成し、承認済み offline npm cache から `npm ci` で実装物を
+install して SDK・durable・replay の各 gate を通過させた。1.6.0 の両 lock との差分では、非 Pi
+パッケージの解決版の変更は両 lock で `@google/genai` 2.32.0 → 3.6.1、`@types/node` 26.6.6 →
+26.6.11 であり、さらに pi-ai 1.7.0 が固定する `@aws-sdk/credential-provider-node` 3.972.82 が
+pi-ai 配下に nested で追加された（既存の 3.972.84 はそのまま）。1.6.0 と 1.7.0 の差分を
+レビューし、Mizu が使う公開入口に契約破壊がないことを確認した（詳細は下記 Pi 節）。1.7.0 coding-agent の破壊的変更は install telemetry
+（`enableInstallTelemetry` / `PI_TELEMETRY`）の削除だけで、Mizu はこれを使わない。1.6.1 で
+`showCacheMissNotices` が per-notice の設定へ置換されたが、Mizu はこれも使わない。
+pi-durable 1.7.0 に変更はなく、1.6.1 の tag 付き park / wrap / hook 結果 / signal / `CommitResult` の形も
+adapter が使わない（変更のない `submit(draft, context)` 形式のみを使用）。新たな terminal session の
+resume、画像生成、provider の既定モデル変更、prompt caching は、Mizu がモデルを明示固定し
+これらの機能を使わないため影響しない。
 実行物のバージョンは証跡であり、
 Mizu が旧実行物を判定・変換・拒否するための条件ではない。内部の設定・bridge・保存記録には
 世代番号を持たせない。
 
 ## Pi
 
-[1.6.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc.md)
+[1.7.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.7.0/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.7.0/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.7.0/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.7.0/packages/coding-agent/docs/rpc.md)
 を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
 （`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
 契約破壊がないことを確認してから固定した。v1.0.4 から v1.1.0 の差分も同様に評価した：
@@ -96,6 +110,18 @@ extension の tool をまとめる。`CodemodeNamespace` とその `prefix`、`n
 `CodemodeToolOptions.namespaces` は fallback なしで削除された。Mizu の launcher は `defineTool` で
 bridge tool を直接登録し namespace / exposure を指定しないため影響を受けず、operator の設定も
 codemode namespace / prefix を指定しない。`pi.live` は文書名として残る。
+1.6.1 の coding-agent は `showCacheMissNotices` を per-notice の設定へ置換し、
+`compat.supportsStrictMode`、decision models、codemode の classify での `responseId`、
+`blockedKind` を追加した。`after_provider_response` は HTTP error 時にも発火するようになり、
+長い RPC 行の再走査が二次時間になる問題も修正した。Mizu は `showCacheMissNotices` を使わない。
+pi-durable 1.6.1 は park / wrap / hook 結果 / signal / `CommitResult` に tag を付け、
+`submit(tx, draft)` の transaction 形式を `admit` へ改名した; Mizu の adapter は変更のない
+`submit(draft, context)` 形式のみを使う。pi-durable 1.7.0 に変更はない。
+1.7.0 coding-agent の破壊的変更は install telemetry（`enableInstallTelemetry`、`PI_TELEMETRY`）
+の削除で、Mizu は使わない。新たな terminal program の resume、codemode の画像生成、provider の
+既定モデル変更は、`models.json` / bundled catalog でモデルを明示固定しこれらの機能を使わない
+Mizu には影響しない。長い RPC 行の再走査修正は Mizu の RPC mode に関係するが、コード変更は不要である。
+[docs/operations.md](operations.md) が参照する cache-stat の実装は 1.7.0 でも変わらない。
 
 pi-durable の launcher は Pi 自身の `ModelRuntime` で固定モデルを解決する。
 解決元は pi と同じ二つ: 同梱カタログと engine directory の `models.json`。

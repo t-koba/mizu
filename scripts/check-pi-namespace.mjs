@@ -1,4 +1,4 @@
-/** Installed Pi 1.6.0 selects extension/MCP tools by namespace. Faux model, no network. */
+/** Installed Pi 1.7.0 selects extension/MCP tools by namespace. Faux model, no network. */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -161,7 +161,7 @@ return JSON.stringify({ found: found.map(t => t.name), scoped: scoped.map(t => t
   for (const name of ['find_reference', 'mcp__guides__find_guide'])
     assert.ok(session.getActiveToolNames().includes(name), `tool_search activated ${name}`);
   assert.equal(faux.state.callCount, 3, 'three scripted faux turns, no other inference');
-  console.log(JSON.stringify({ status: 'pass', kind: 'pi-namespace-selection', sdk_version: '1.6.0',
+  console.log(JSON.stringify({ status: 'pass', kind: 'pi-namespace-selection', sdk_version: '1.7.0',
     extension_namespace: 'mcp__docs', mcp_namespace: 'mcp__guides', mcp_tool: 'mcp__guides__find_guide',
     codemode_selection: true, tool_search_selection: true, legacy_namespace_options: false,
     paid_inference: 'not_run', http: 'not_run' }));
