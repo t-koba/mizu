@@ -97,8 +97,11 @@ def validate_structure(record):
     """
     if not isinstance(record, dict):
         return False, "record_not_object"
+    schema = record.get("schema")
     if "schema" not in record:
         return False, "schema_missing"
+    if not isinstance(schema, str) or schema not in SUPPORTED_SCHEMAS:
+        return False, "schema_unsupported"
     m = record.get("measurement")
     if not isinstance(m, dict):
         return False, "measurement_not_object"

@@ -283,6 +283,8 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
         an uncaught exception (whose traceback could leak private paths)."""
         mutations = {
             "top_level_list": lambda r: [],
+            "schema_oversized": lambda r: r.__setitem__("schema", "x" * 12000),
+            "schema_unsupported": lambda r: r.__setitem__("schema", "not-a-schema"),
             "deployment_not_dict": lambda r: r["measurement"].__setitem__("deployment", [1]),
             "measurement_not_dict": lambda r: r.__setitem__("measurement", "bad"),
             "validity_not_dict": lambda r: r["measurement"].__setitem__("validity", "bad"),
@@ -306,6 +308,9 @@ class Stage4CpuEvidenceTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 for marker in ("Traceback", "AttributeError", "TypeError", "KeyError"):
                     self.assertNotIn(marker, proc.stderr)
+                # A malformed record must not control the summary size: only
+                # a fixed diagnostic is emitted, never echoed record data.
+                self.assertLess(len(proc.stdout), 1024, proc.stdout[:200])
                 summary = json.loads(proc.stdout)  # must be parseable JSON
                 self.assertIs(summary["passed"], False)
                 self.assertIs(summary["checks"]["record_structure"], False)
