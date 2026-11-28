@@ -320,5 +320,114 @@ class KernelQueryTests(unittest.TestCase):
         self.assertEqual(result["count"], 3)
 
 
+    def test_keyless_relation_tolerates_hidden_automatic_tie_fields(self):
+        schema = Relation("x", {"a": "str", "b": "int", "body": "str"})
+        rows = [{"a": "two", "b": 2, "body": "hidden-2"},
+                {"a": "one", "b": 1, "body": "hidden-1"}]
+
+        def visible(name, row):
+            return {field: value for field, value in row.items() if field != "body"}
+
+        result = self.run_query({"relation": "x", "select": ["a"], "count": True},
+                                relations={"x": rows}, schemas={"x": schema},
+                                visible=visible)
+        self.assertEqual(result["rows"], [{"a": "one"}, {"a": "two"}])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["examined"], 2)
+        self.assertEqual(result["next"], 2)
+        self.assertFalse(result["more"])
+        self.assertTrue(all("hidden" not in str(value) for row in result["rows"]
+                            for value in row.values()))
+        with self.assertRaises(Denied):
+            self.run_query({"relation": "x", "select": ["a"],
+                            "order": [{"field": "body", "desc": False}]},
+                           relations={"x": rows}, schemas={"x": schema},
+                           visible=visible)
+
+    def test_keyed_relation_tolerates_hidden_key(self):
+        schema = Relation("m", {"id": "str", "seq": "int", "body": "str"}, key="id")
+        rows = [{"id": "k2", "seq": 2, "body": "s2"},
+                {"id": "k1", "seq": 1, "body": "s1"}]
+
+        def visible(name, row):
+            return {field: value for field, value in row.items() if field != "id"}
+
+        result = self.run_query({"relation": "m", "select": ["seq"], "count": True},
+                                relations={"m": rows}, schemas={"m": schema},
+                                visible=visible)
+        self.assertEqual(result["rows"], [{"seq": 2}, {"seq": 1}])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["examined"], 2)
+        self.assertEqual(result["next"], 2)
+        self.assertFalse(result["more"])
+
+    def test_hidden_tie_field_keeps_order_and_pages_stable(self):
+        schema = Relation("t", {"id": "str", "rank": "int", "note": "str",
+                                "body": "str"}, key="id")
+        rows = [{"id": f"t{i}", "rank": 0 if i == 3 else 1,
+                 "note": f"n{i}", "body": f"s{i}"} for i in range(1, 5)]
+        query = {"relation": "t", "select": ["note"],
+                 "order": [{"field": "rank", "desc": True}],
+                 "limit": 2, "count": True}
+
+        def narrow(name, row):
+            return {field: value for field, value in row.items()
+                    if field not in ("id", "body")}
+
+        def wide(name, row):
+            return {field: value for field, value in row.items() if field != "id"}
+
+        for view in (narrow, wide):
+            with self.subTest(view=view.__name__):
+                first = self.run_query(query, relations={"t": rows},
+                                       schemas={"t": schema}, visible=view)
+                again = self.run_query(query, relations={"t": rows},
+                                       schemas={"t": schema}, visible=view)
+                self.assertEqual(first, again)
+                self.assertEqual(first["rows"], [{"note": "n1"}, {"note": "n2"}])
+                self.assertEqual(first["count"], 4)
+                self.assertEqual(first["examined"], 4)
+                self.assertEqual(first["next"], 2)
+                self.assertTrue(first["more"])
+                second = self.run_query(query, relations={"t": rows},
+                                        schemas={"t": schema}, visible=view,
+                                        cursor=first["next"])
+                self.assertEqual(second["rows"], [{"note": "n4"}, {"note": "n3"}])
+                self.assertEqual(second["next"], 4)
+                self.assertFalse(second["more"])
+                notes = [row["note"] for row in first["rows"] + second["rows"]]
+                self.assertEqual(notes, ["n1", "n2", "n4", "n3"])
+                self.assertEqual(len(set(notes)), 4)
+                self.assertTrue(all(set(row) == {"note"}
+                                    for row in first["rows"] + second["rows"]))
+
+    def test_wide_keyless_relation_uses_bounded_tie_prefix(self):
+        schema = Relation("wide", {f"f{i}": "str" for i in range(10)})
+        rows = [{f"f{i}": f"{label}{i}" for i in range(10)} for label in ("a", "b")]
+
+        def visible(name, row):
+            return ({field: row[field] for field in ("f0", "f9")}
+                    if row["f0"].startswith("a") else {"f9": row["f9"]})
+
+        result = self.run_query({"relation": "wide", "select": ["f9"], "count": True},
+                                relations={"wide": rows}, schemas={"wide": schema},
+                                visible=visible)
+        self.assertEqual(result["rows"], [{"f9": "b9"}, {"f9": "a9"}])
+        self.assertEqual(result["count"], 2)
+        self.assertFalse(result["more"])
+
+    def test_full_explicit_order_keeps_input_order(self):
+        schema = Relation("wide", {f"f{i}": "str" for i in range(10)})
+        rows = [{**{f"f{i}": "same" for i in range(10)}, "f9": label}
+                for label in ("z", "a")]
+        query = {"relation": "wide", "select": ["f9"],
+                 "order": [{"field": f"f{i}", "desc": False} for i in range(8)],
+                 "count": True}
+        result = self.run_query(query, relations={"wide": rows},
+                                schemas={"wide": schema})
+        self.assertEqual(result["rows"], [{"f9": "z"}, {"f9": "a"}])
+        self.assertEqual(result["count"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,8 @@ checks that join rows on equal field values. Evaluation is pure over the rows
 supplied by the caller. A caller-supplied visibility function selects the rows
 and fields available to that caller; it runs before any comparison, ordering
 or output shaping, so a value that was not exposed cannot affect a result.
+Caller-named ordering requires visible fields; automatic tiebreakers use only
+fields present in a row's visible view and skip the rest.
 
 Every call examines at most ``max_rows`` rows, including rows examined by
 nested checks, and emits at most ``max_bytes`` of serialized rows. Exhausting
@@ -38,6 +40,8 @@ MAX_PATTERN_CHARS = 128
 MAX_QUANTIFIERS = 2
 MAX_REGEX_INPUT_CHARS = 256
 MAX_ORDER = 8
+# Deterministic prefix when a keyless relation has neither seq nor id.
+MAX_FALLBACK_TIE = 4
 MAX_SELECT = 64
 MAX_LIMIT = 4096
 MAX_CALL_ROWS = 65536
@@ -326,18 +330,22 @@ def _compile_query(query: Any, schemas: Mapping[str, Relation]) -> dict:
     count = query.get("count", False)
     if type(count) is not bool:
         raise Denied("count must be a boolean")
-    tie = ([relation.key] if relation.key is not None
-           else [field for field in ("seq", "id") if field in relation.fields])
-    if not tie:
-        tie = sorted(relation.fields)
-    for field in tie:
-        if field not in seen:
-            order.append((field, False))
-            seen.add(field)
-    if len(order) > MAX_ORDER:
-        raise Denied("order exceeds the bound after adding tiebreakers")
+    candidates = ([relation.key] if relation.key is not None
+                  else [field for field in ("seq", "id") if field in relation.fields])
+    if not candidates:
+        candidates = sorted(relation.fields)[:MAX_FALLBACK_TIE]
+    tie: list[str] = []
+    for field in candidates:
+        if field in seen:
+            continue
+        # Explicit, automatic and position slots share one key bound.
+        if len(order) + len(tie) + 1 >= MAX_ORDER:
+            break
+        tie.append(field)
+        seen.add(field)
     return {"relation": name, "where": where, "select": tuple(select),
-            "order": tuple(order), "limit": limit, "count": count}
+            "order": tuple(order), "tie": tuple(tie),
+            "limit": limit, "count": count}
 
 
 def _sort_value(value: Any, type_name: str) -> Any:
@@ -346,6 +354,13 @@ def _sort_value(value: Any, type_name: str) -> Any:
     if type_name == "bool":
         return int(value)
     return value
+
+
+def _tie_slot(row: Mapping[str, Any], field: str, type_name: str) -> tuple[int, Any]:
+    """A comparable slot for an automatic tie field, using only visible values."""
+    if field not in row:
+        return (0, "")
+    return (1, _sort_value(row[field], type_name))
 
 
 def _rows(relations: Mapping[str, Sequence[dict]], name: str) -> Sequence[dict]:
@@ -438,8 +453,17 @@ def evaluate(relations: Mapping[str, Sequence[dict]], schemas: Mapping[str, Rela
         if plan["where"] is None or _eval(plan["where"], row, checked, relations, visible, budget):
             matched.append(row)
 
-    keyed = [tuple(_sort_value(_visible_field(row, field), relation.fields[field])
-                   for field, _ in plan["order"]) for row in matched]
+    keyed = []
+    for position, row in enumerate(matched):
+        slots = tuple(_sort_value(_visible_field(row, field), relation.fields[field])
+                      for field, _ in plan["order"])
+        slots += tuple(_tie_slot(row, field, relation.fields[field])
+                       for field in plan["tie"])
+        # A full explicit key leaves no room for a position slot; the stable
+        # sort passes already preserve input order for rows that tie on it.
+        if len(slots) < MAX_ORDER:
+            slots += (position,)
+        keyed.append(slots)
     ordered = sorted(zip(keyed, matched, strict=True), key=lambda item: item[0])
     for position in range(len(plan["order"]) - 1, -1, -1):
         order = plan["order"][position]
