@@ -26,6 +26,12 @@ class Budget:
         """Current budget day in the configured zone (UTC default unchanged)."""
         return dt.datetime.now(self._tz).date().isoformat()
 
+    def _resolve_day(self, day: str | None) -> str:
+        """Resolve an optional declared day, validating it as ISO ``YYYY-MM-DD``."""
+        day = day or self._today()
+        dt.date.fromisoformat(day)  # raises ValueError for a malformed day
+        return day
+
     def gc(self, *, keep_days: int | None = None) -> int:
         """Remove day-files older than the window. Best-effort; never fails admission.
 
@@ -123,8 +129,7 @@ class Budget:
         exhausted, shared exhausted, malformed, or oversize; legacy files without
         ``projects`` keep their aggregate and start per-project counts at 0.
         """
-        day = day or self._today()
-        dt.date.fromisoformat(day)
+        day = self._resolve_day(day)
         project = self._check_project(project)
         if not isinstance(request_id, str) or not request_id or "\x00" in request_id or "\n" in request_id:
             raise Denied("Invalid budget request identity")
@@ -173,19 +178,20 @@ class Budget:
         self.gc()
         return count
 
-    def audit(self) -> dict:
-        """Scope-correct structural diagnosis of today's ledger.
+    def audit(self, *, day: str | None = None) -> dict:
+        """Scope-correct structural diagnosis of one day's ledger.
 
         Schema: reports the shared day total against ``shared_daily`` plus
-        each project's own count against ``daily``. Bounds: reads today's
-        day-file only. Trust: local operator state. Failure: never raises;
-        structural problems are returned as ``malformed`` entries for the
-        caller (doctor) to fail loudly on. Over-limit counts -- legitimate
-        exhaustion or a later config reduction -- are reported as data, not
-        corruption: only the ledger shape is judged here, never the policy
-        values.
+        each project's own count against ``daily``. ``day`` defaults to today
+        and is validated like ``take``; any declared day may be diagnosed.
+        Bounds: reads one day-file only. Trust: local operator state. Failure:
+        never raises for I/O; structural problems are returned as ``malformed``
+        entries for the caller (doctor) to fail loudly on. Over-limit counts --
+        legitimate exhaustion or a later config reduction -- are reported as
+        data, not corruption: only the ledger shape is judged here, never the
+        policy values.
         """
-        day = self._today()
+        day = self._resolve_day(day)
         path = self.root / f"{day}.json"
         unreadable = False
         missing = object()
@@ -220,10 +226,11 @@ class Budget:
                 "shared_exhausted": bool(self.shared_daily > 0 and shared >= self.shared_daily),
                 "bytes": size, "reaped": reaped}
 
-    def peek(self, project: str = "") -> dict:
-        """Read today's bounded budget counters without reaping or writing.
+    def peek(self, project: str = "", *, day: str | None = None) -> dict:
+        """Read one day's bounded budget counters without reaping or writing.
 
-        Bounds: one ``YYYY-MM-DD.json`` file up to ``day_file_bytes``
+        ``day`` defaults to today and is validated like ``take``; any declared
+        day may be read. Bounds: one ``YYYY-MM-DD.json`` file up to ``day_file_bytes``
         (``limits.budget_day_file_bytes``, default 4 MiB).
         Trust: local ledger only. Missing day files report zero counters;
         unsafe, oversized, malformed, or unreadable files report
@@ -231,7 +238,7 @@ class Budget:
         calls ``gc`` and is suitable for read-only evidence projections.
         """
         project = self._check_project(project)
-        day = self._today()
+        day = self._resolve_day(day)
         path = self.root / f"{day}.json"
         empty = {"day": day, "zone": self.timezone, "used": 0, "limit": self.daily,
                  "shared_used": 0, "shared_limit": self.shared_daily,
@@ -281,18 +288,19 @@ class Budget:
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
             return {"status": "unavailable", "project": project}
 
-    def usage(self, project: str = "") -> dict:
-        """Report per-project usage plus the shared day total.
+    def usage(self, project: str = "", *, day: str | None = None) -> dict:
+        """Report per-project usage plus one day's shared total.
 
         Schema: ``project=\"\"`` reports the shared aggregate as ``used``
         (legacy shape); a named project reports its own count as ``used``
         with ``limit`` as the per-project cap. Both shapes always carry
-        ``shared_used``/``shared_limit``. Bounds: reads today's day-file only.
+        ``shared_used``/``shared_limit``. ``day`` defaults to today and is
+        validated like ``take``. Bounds: reads one day-file only.
         Trust: local operator state. Failure: never raises for I/O; corrupt
         shapes read as empty.
         """
         project = self._check_project(project)
-        day = self._today()
+        day = self._resolve_day(day)
         path = self.root / f"{day}.json"
         record = read_json(path, {"requests": []})
         if not isinstance(record, dict):

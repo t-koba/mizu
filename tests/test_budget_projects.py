@@ -19,6 +19,36 @@ class PerProjectBudgetTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def test_derived_reads_accept_an_explicit_day_without_changing_default(self):
+        budget = Budget(self.root, 10, shared_daily=20)
+        # Admit on a declared day; default-day reads must not see those counters.
+        budget.take("d1", day="2099-10-03", project="alpha")
+        budget.take("d2", day="2099-10-03", project="beta")
+        self.assertEqual(budget.peek("alpha", day="2099-10-03")["used"], 1)
+        self.assertEqual(budget.peek("alpha", day="2099-10-03")["shared_used"], 2)
+        self.assertEqual(budget.usage("alpha", day="2099-10-03")["used"], 1)
+        self.assertEqual(budget.usage("beta", day="2099-10-03")["used"], 1)
+        report = budget.audit(day="2099-10-03")
+        self.assertEqual(report["day"], "2099-10-03")
+        self.assertEqual(report["shared_used"], 2)
+        self.assertEqual(report["projects"], {"alpha": 1, "beta": 1})
+        # A different declared day is empty; an absent day reports zero, not error.
+        self.assertEqual(budget.peek("alpha", day="2099-10-04")["shared_used"], 0)
+        self.assertEqual(budget.usage("alpha", day="2099-10-04")["used"], 0)
+        self.assertEqual(budget.audit(day="2099-10-04")["shared_used"], 0)
+        # Default callers still read today's (absent) counters unchanged.
+        self.assertEqual(budget.usage("alpha")["day"], budget._today())
+        self.assertEqual(budget.usage("alpha")["shared_used"], 0)
+        self.assertEqual(budget.audit()["day"], budget._today())
+
+    def test_derived_reads_reject_a_malformed_day(self):
+        budget = Budget(self.root, 10)
+        for call in (lambda: budget.peek(day="not-a-day"),
+                     lambda: budget.usage(day="2026-13-99"),
+                     lambda: budget.audit(day="2026/10/03")):
+            with self.assertRaises(ValueError):
+                call()
+
     def test_projects_admit_independently(self):
         budget = Budget(self.root, 1)
         self.assertEqual(budget.take("a1", project="alpha"), 1)
