@@ -287,9 +287,13 @@ mode and adds no caller that mounts anything.
 An instance is a `(name, identity)` pair. Liveness is referential:
 `unreferenced(instances, referenced)` returns only instances that no
 declaration or execution still references, so a shared identity stays alive
-while any referrer remains. Declarations and runtime facts are bounded and
-fail closed. Routing the existing check cache through this mechanism is a
-later userland slice; no current flow consumes these declarations yet.
+while any referrer remains. Liveness is answered for any number of instances:
+the caller passes the iterables it already holds, so per-call work is bounded
+by what the caller can list, and removal keeps making progress however much
+state exists. Declarations, identity keys and runtime facts/strings stay
+bounded and fail closed; the count of instances is not a cap. Routing the
+existing check cache through this mechanism is a later userland slice; no
+current flow consumes these declarations yet.
 
 ## Bounds
 

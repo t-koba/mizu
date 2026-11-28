@@ -32,7 +32,6 @@ MAX_DECLARATIONS = 64
 MAX_IDENTITY_KEYS = 32
 MAX_STRING = 255
 MAX_MOUNT_RULES = 64
-MAX_INSTANCES = 4096
 MODES = ("ro", "rw")
 _DECLARATION_KEYS = frozenset({"identity_from", "identity_value", "mounts"})
 _MOUNT_KEYS = frozenset({"mode", "when"})
@@ -181,16 +180,14 @@ def _pair(item: Any, where: str) -> tuple[str, str]:
 
 
 def _pairs(items: Iterable[Any], where: str) -> set[tuple[str, str]]:
+    # Liveness answers for any number of instances: callers pass the iterables
+    # they already hold, so per-call work is bounded by what the caller can list.
+    # Each pair is still validated; declarations, keys and strings stay bounded.
     try:
         iterator = iter(items)
     except TypeError:
         raise Denied(f"{where} must be iterable") from None
-    result = set()
-    for index, item in enumerate(iterator):
-        if index >= MAX_INSTANCES:
-            raise Denied(f"{where} exceeds its bound of {MAX_INSTANCES} pairs")
-        result.add(_pair(item, where))
-    return result
+    return {_pair(item, where) for item in iterator}
 
 
 def unreferenced(instances: Iterable[tuple[str, str]],

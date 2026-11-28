@@ -145,6 +145,16 @@ class Liveness(unittest.TestCase):
                          frozenset({("artifact", "digest-b"), ("fixed", "digest-c")}))
         self.assertEqual(unreferenced(instances, [("fixed", "digest-a")]), frozenset(instances))
 
+    def test_removal_works_past_total_instance_count(self):
+        # Liveness is not capped by how much exists: the directories that most
+        # need removal are those left once a total-reachability limit trips.
+        stale = ("artifact", "stale-digest")
+        instances = [(f"artifact", f"live-{n}") for n in range(5000)] + [stale]
+        referenced = [(f"artifact", f"live-{n}") for n in range(5000)]
+        self.assertEqual(unreferenced(instances, referenced), frozenset({stale}))
+        # A large reference set likewise cannot hide a removable instance.
+        self.assertEqual(unreferenced([stale], referenced), frozenset({stale}))
+
     def test_removal_only_without_referrer(self):
         instance = ("artifact", "digest-a")
         self.assertEqual(unreferenced([instance], []), frozenset({instance}))
