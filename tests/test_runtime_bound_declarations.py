@@ -608,9 +608,6 @@ DECLARATIONS = {
         'MAX_PROJECTS': (
             '4096', 'safety',
             'charge ledger / fixed per-day project-table ceiling; overflow fails closed before derivation'),
-        'MAX_IDS': (
-            '65536', 'safety',
-            'charge ledger / fixed per-day charge count and membership-key ceiling; overflow fails closed'),
         'MAX_COUNTS_BYTES': (
             '512 * 1024', 'safety',
             'charge ledger / bounded counts sidecar read and write ceiling'),

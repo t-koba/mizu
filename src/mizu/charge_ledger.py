@@ -37,7 +37,6 @@ MAX_PROJECT_CHARS = 63
 MAX_LINE_BYTES = 8192
 READ_PAGE = 256
 MAX_PROJECTS = 4096
-MAX_IDS = 65536
 MAX_COUNTS_BYTES = 512 * 1024
 MAX_OFFSET_BYTES = 256
 INTEGER_LIMIT = (1 << 63) - 1
@@ -166,7 +165,7 @@ class DayLedger:
         if value is None:
             return {"shared": 0, "projects": {}}
         if (not isinstance(value, dict) or set(value) != _COUNT_KEYS
-                or type(value["shared"]) is not int or not 0 <= value["shared"] <= MAX_IDS
+                or type(value["shared"]) is not int or not 0 <= value["shared"] <= INTEGER_LIMIT
                 or not isinstance(value["projects"], dict)
                 or len(value["projects"]) > MAX_PROJECTS):
             raise Denied("Charge counts sidecar is malformed")
@@ -185,7 +184,7 @@ class DayLedger:
 
     def _write_offset(self, shared: int, offset: int) -> None:
         """Publish a byte checkpoint for the counts generation just written."""
-        if (type(shared) is not int or not 0 <= shared <= MAX_IDS
+        if (type(shared) is not int or not 0 <= shared <= INTEGER_LIMIT
                 or type(offset) is not int or not 0 <= offset <= INTEGER_LIMIT):
             raise Denied("Invalid charge offset checkpoint")
         body = canonical({"shared": shared, "offset": offset})
@@ -247,10 +246,8 @@ class DayLedger:
             raise Denied("Duplicate charge request id") from exc
 
     def add(self, project: str, request_id: str) -> None:
-        """Record one membership key, refusing a duplicate or a full index."""
+        """Record one membership key, refusing a duplicate."""
         key = self._key(project, request_id)
-        if self.counts()["shared"] >= MAX_IDS:
-            raise InfraExceeded("Charge id index is full")
         self._add_key(key)
 
     def _log_size(self) -> int:
@@ -313,8 +310,6 @@ class DayLedger:
                 self._recovered = (seq, log_size)
                 return applied
             for charge, next_seq in page:
-                if applied >= MAX_IDS or seq >= MAX_IDS:
-                    raise InfraExceeded("Charge id index is full")
                 self._add_key(self._key(charge.project, charge.id), exclusive=False)
                 if charge.project not in projects and len(projects) >= MAX_PROJECTS:
                     raise InfraExceeded("Charge project table is full")
@@ -335,8 +330,6 @@ class DayLedger:
         projects = counts["projects"]
         if charge.project not in projects and len(projects) >= MAX_PROJECTS:
             raise InfraExceeded("Charge project table is full")
-        if counts["shared"] >= MAX_IDS:
-            raise InfraExceeded("Charge id index is full")
         if self.has(charge.project, charge.id):
             raise Denied("Duplicate charge request id")
         offset = self._log_size()

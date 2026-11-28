@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support  # noqa: F401 -- puts src on sys.path for the standalone unittest run
 
 from mizu.charge_ledger import (
-    MAX_COUNTS_BYTES, MAX_IDS, MAX_LINE_BYTES, MAX_OFFSET_BYTES, MAX_PROJECTS,
-    MAX_PROJECT_CHARS, MAX_REQUEST_ID_CHARS, READ_PAGE,
+    INTEGER_LIMIT, MAX_COUNTS_BYTES, MAX_LINE_BYTES, MAX_OFFSET_BYTES,
+    MAX_PROJECTS, MAX_PROJECT_CHARS, MAX_REQUEST_ID_CHARS, READ_PAGE,
     Charge, DayLedger, charge_line, parse_charge_line,
 )
 from mizu.errors import Denied, InfraExceeded
@@ -163,11 +163,14 @@ class ChargeLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(InfraExceeded, "project table is full"):
             self.ledger.append(Charge("new-id", "new-project", 0))
 
-        self._write_counts({"shared": MAX_IDS, "projects": {"alpha": MAX_IDS}})
-        with self.assertRaisesRegex(InfraExceeded, "id index is full"):
-            self.ledger.append(Charge("new-id", "alpha", MAX_IDS))
-        with self.assertRaisesRegex(InfraExceeded, "id index is full"):
-            self.ledger.add("alpha", "another-id")
+        self._write_counts({"shared": 100000, "projects": {"alpha": 100000}})
+        self.ledger.append(Charge("new-id", "alpha", 100000))
+        self.assertEqual(self.ledger.counts()["shared"], 100001)
+        self.ledger.add("alpha", "another-id")
+        self.assertTrue(self.ledger.has("alpha", "another-id"))
+
+        self._write_counts({"shared": INTEGER_LIMIT, "projects": {}})
+        self.assertEqual(self.ledger.counts()["shared"], INTEGER_LIMIT)
 
     def test_corrupt_sidecars_and_log_lines_fail_closed(self):
         self.ledger.append(Charge("one", "alpha", 0))
