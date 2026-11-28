@@ -271,7 +271,10 @@ class WorkConversion(Fixture):
         # One evidence change must move the emitted digest, and the emitter
         # must still agree with an independent computation of the new bundle.
         changed = {**record, "verification": {**record["verification"],
-                                              "code_digest": "0" * 64}}
+                                              "code_digest": "0" * 64},
+                   "verification_scope": "1" * 64,
+                   "completion_evidence": {"statement": "Attested",
+                                           "evidence": {"note": "value pin"}}}
         emitted = load_script().chain_body(changed, item, record["rev"],
                                            "completion", SCHEMA)
         self.assertNotEqual(emitted["proof"], completion[0]["body"]["proof"])
