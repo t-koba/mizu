@@ -304,6 +304,15 @@ class KernelQueryTests(unittest.TestCase):
             {"relation": "m", "where": {"op": "regex", "field": "id", "pattern": r"^(a)\1$"}},
             {"relation": "m", "where": {"op": "regex", "field": "id",
                                         "pattern": "a*a*a*b"}},
+            # Backtracking cost must be bounded by the pattern, not the field:
+            # two quantifiers partition input (cubic) and an unanchored one
+            # retries at every start position (quadratic).
+            {"relation": "m", "where": {"op": "regex", "field": "id",
+                                        "pattern": "x*x*y$"}},
+            {"relation": "m", "where": {"op": "regex", "field": "id",
+                                        "pattern": "x*y$"}},
+            {"relation": "m", "where": {"op": "regex", "field": "id",
+                                        "pattern": "^a|b*$"}},
             {"relation": "m", "where": {"op": "exists", "relation": "nope",
                                         "on": {"id": "to_id"}}},
             {"relation": "m", "where": {"op": "exists", "relation": "r", "on": {}}},
@@ -368,6 +377,19 @@ class KernelQueryTests(unittest.TestCase):
             relations={"m": long_row})
         self.assertEqual(result["rows"], [{"queue": "Q"}])
         self.assertFalse(result["more"])
+
+    def test_long_field_single_quantifier_stays_linear(self):
+        # A single anchored repetition matches on a 65 KiB field in one scan;
+        # the pattern cost bound must never become a field-length refusal.
+        for pattern in ("^x*y$", "^.*x$", "^[^x]*y$"):
+            with self.subTest(pattern=pattern):
+                long_row = [{**MESSAGES[0], "id": "x" * 65536}]
+                result = self.run_query(
+                    {"relation": "m", "where": {"op": "regex", "field": "id",
+                                                "pattern": pattern},
+                     "select": ["queue"], "limit": 5},
+                    relations={"m": long_row})
+                self.assertIsInstance(result["rows"], list)
 
     def test_evaluation_does_not_mutate_its_inputs(self):
         before = copy.deepcopy(self.relations)

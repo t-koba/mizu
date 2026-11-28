@@ -19,6 +19,11 @@ authorized candidates, with index slices making that pre-filter bounded.
 Each call also emits at most ``max_bytes`` of serialized rows. Exhausting the
 authorized-row bound raises; exhausting the byte bound yields a continuation
 cursor so caller-driven paging never truncates a result silently.
+
+A regex pattern is compiled to a linear-time grammar: at most one repetition,
+anchored at the start and unconditional. Python's backtracking engine can
+otherwise spend unbounded CPU on a single field independently of these bounds,
+so field length is never refused; the pattern grammar carries the cost bound.
 """
 from __future__ import annotations
 
@@ -43,7 +48,7 @@ MAX_ARGS = 32
 MAX_ON = 32
 MAX_DEPTH = 8
 MAX_PATTERN_CHARS = 128
-MAX_QUANTIFIERS = 2
+MAX_QUANTIFIERS = 1
 MAX_ORDER = 8
 # Deterministic prefix when a keyless relation has neither seq nor id.
 MAX_FALLBACK_TIE = 4
@@ -206,12 +211,28 @@ def _authorized(raw: Any, name: str, relation: Relation,
 
 
 def _pattern(raw: Any) -> re.Pattern[str]:
-    """Compile a conservative pattern: no groups, backrefs or nested repeats."""
+    """Compile a linear-time pattern: no groups, backrefs or nested repeats.
+
+    Python's ``re`` is a backtracking engine, so the grammar alone must bound
+    match cost independently of field length. A repetition must be the pattern's
+    only one and it must be anchored and unconditional: a second quantifier
+    partitions the same input (``x*x*y$`` is cubic), an unanchored quantifier
+    retries at every start position (``x*y$`` is quadratic), and alternation
+    could hide an unanchored quantified branch. Plain alternation and literal
+    patterns remain allowed. Under these rules ``re.search`` is one linear scan.
+    """
     pattern = _text(raw, "regex pattern", MAX_PATTERN_CHARS)
     if "(" in pattern or ")" in pattern or _BACKREF.search(pattern):
         raise Denied("Regex pattern uses a refused construct")
-    if sum(pattern.count(char) for char in "*+?{}") > MAX_QUANTIFIERS:
+    # Count quantifier tokens: each of `*`, `+`, `?`, and each `{...}` repeat
+    # is one. A bounded repeat stays linear because its count cannot grow with
+    # the field, so it remains available under the same one-token budget.
+    quantifiers = (sum(pattern.count(char) for char in "*+?")
+                   + pattern.count("{"))
+    if quantifiers > MAX_QUANTIFIERS:
         raise Denied("Regex pattern has too many repetitions")
+    if quantifiers and (not pattern.startswith("^") or "|" in pattern):
+        raise Denied("Regex repetition must be anchored and unconditional")
     try:
         return re.compile(pattern)
     except re.error as exc:
