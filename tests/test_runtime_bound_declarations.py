@@ -1807,6 +1807,9 @@ PARAMETER_BOUND = re.compile(
 # (relative file, qualified class/function scope, parameter):
 #     (exact ast.unparse(default), classification, owner / rationale)
 PARAMETER_DEFAULTS = {
+    ('charge_ledger.py', 'DayLedger.read_from', 'start_offset'): (
+        '0', 'mechanism',
+        'charge ledger / internal recovery read begins at byte zero unless a coherent checkpoint is supplied'),
     ('proposal_waits.py', 'delivery', 'limit'): (
         '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
     ('proposal_waits.py', 'pending', 'limit'): (
@@ -1935,6 +1938,12 @@ TIMED_WAIT_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
+    ('kernel/query.py', 'evaluate', 1, 0): (
+        '-1', 'mechanism',
+        'query ordering / reverse stable-sort pass ends exclusive of the first order key'),
+    ('kernel/query.py', 'evaluate', 2, 0): (
+        '-1', 'mechanism',
+        'query ordering / reverse stable-sort step applies keys from last to first'),
     ('kernel/queues.py', 'QueueStore._migrate_cursors', 0, 0): (
         '1', 'format',
         'kernel queues / cursor migration starts at the first sequence'),
@@ -1973,6 +1982,9 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
+    ('kernel/query.py', 'evaluate', 0, 0): (
+        "len(plan['order']) - 1", 'mechanism',
+        'query ordering / reverse stable-sort pass begins at the last declared order key'),
     ('kernel/queues.py', 'QueueStore._retain', 0, 0): (
         'cursor + 1', 'mechanism',
         'kernel queues / retention resumes after the durable retain cursor'),
