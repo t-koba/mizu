@@ -391,6 +391,21 @@ class KernelQueryTests(unittest.TestCase):
                     relations={"m": long_row})
                 self.assertIsInstance(result["rows"], list)
 
+    def test_cursor_reaches_rows_past_the_old_total_cap(self):
+        # A per-call bound and a cursor must not cap total reachability: a page
+        # whose offset is past 65536 is answerable when the caller supplies the
+        # work bound. The former MAX_CALL_ROWS ceiling made it unreachable.
+        schema = Relation("big", {"seq": "int"}, key="seq")
+        rows = [{"seq": i} for i in range(70000)]
+        query = {"relation": "big", "select": ["seq"],
+                 "order": [{"field": "seq", "desc": False}], "limit": 3}
+        result = self.run_query(query, relations={"big": rows}, schemas={"big": schema},
+                                max_rows=70000, cursor=65536)
+        self.assertEqual(result["rows"], [{"seq": 65536}, {"seq": 65537}, {"seq": 65538}])
+        self.assertEqual(result["next"], 65539)
+        self.assertTrue(result["more"])
+        self.assertFalse(result["count"])
+
     def test_evaluation_does_not_mutate_its_inputs(self):
         before = copy.deepcopy(self.relations)
         result = self.run_query({"relation": "m", "where": {

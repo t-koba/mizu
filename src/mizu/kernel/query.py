@@ -54,7 +54,6 @@ MAX_ORDER = 8
 MAX_FALLBACK_TIE = 4
 MAX_SELECT = 64
 MAX_LIMIT = 4096
-MAX_CALL_ROWS = 65536
 MAX_CALL_BYTES = 64 * 1024 * 1024
 DEFAULT_LIMIT = 256
 INTEGER_LIMIT = (1 << 63) - 1
@@ -461,11 +460,11 @@ def evaluate(relations: Mapping[str, Sequence[dict]], schemas: Mapping[str, Rela
         raise Denied("Relations must be a table")
     if not callable(visible):
         raise Denied("Visibility must be callable")
-    if type(max_rows) is not int or not 1 <= max_rows <= MAX_CALL_ROWS:
+    if type(max_rows) is not int or not 1 <= max_rows <= INTEGER_LIMIT:
         raise Denied("max_rows must be a positive bounded integer")
     if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_CALL_BYTES:
         raise Denied("max_bytes must be a positive bounded integer")
-    if type(cursor) is not int or not 0 <= cursor <= MAX_CALL_ROWS:
+    if type(cursor) is not int or not 0 <= cursor <= INTEGER_LIMIT:
         raise Denied("cursor must be a nonnegative bounded integer")
 
     name = plan["relation"]
