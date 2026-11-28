@@ -284,6 +284,30 @@ class ChargeLedgerTests(unittest.TestCase):
                          [Charge("one", "alpha", 0), Charge("two", "beta", 1),
                           Charge("three", "alpha", 2)])
 
+    def test_log_append_opens_in_binary_mode(self):
+        """The log must never pass through the C runtime's text newline translation.
+
+        On Windows a text-mode descriptor rewrites each ``\n`` as ``\r\n``,
+        making replayed lines noncanonical and shifting every byte checkpoint.
+        """
+        binary = getattr(os, "O_BINARY", None)
+        if binary is None:
+            self.skipTest("platform has no separate binary file mode")
+        opened = []
+        real_open = os.open
+
+        def spy(path, flags, *args, **kwargs):
+            if Path(path) == self.ledger.log_path:
+                opened.append(flags)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(os, "open", spy):
+            with self.ledger.lock():
+                self.ledger.append(Charge("binary", "alpha", 0))
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0] & binary)
+        self.assertNotIn(b"\r", self.ledger.log_path.read_bytes())
+
     def test_durable_log_append_precedes_sidecar_updates(self):
         calls = []
         real_fsync = os.fsync

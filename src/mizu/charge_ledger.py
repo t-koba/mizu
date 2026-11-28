@@ -270,7 +270,8 @@ class DayLedger:
         except FileNotFoundError:
             existed = False
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= (getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                  | getattr(os, "O_BINARY", 0))
         fd = os.open(self.log_path, flags, 0o600)
         try:
             written = os.write(fd, line)
