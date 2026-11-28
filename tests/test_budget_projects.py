@@ -335,6 +335,42 @@ class PerProjectBudgetTests(unittest.TestCase):
         with self.assertRaises(Denied):
             budget.usage("../escape")
 
+    def test_gc_reaps_all_ledger_file_families_for_an_expired_day(self):
+        budget = Budget(self.root, 100)
+        day = "2000-01-02"
+        for suffix in Budget._DAY_SUFFIXES:
+            target = self.root / f"{day}{suffix}"
+            if suffix == ".ids":
+                target.mkdir()
+                (target / "key").write_bytes(b"")
+            else:
+                target.write_bytes(b"x")
+        # A current day's ledger files must survive the same call.
+        today = budget._today()
+        (self.root / f"{today}.charges").write_bytes(b"x")
+        # A symlinked id directory must never be traversed or reaped as state.
+        outside = self.root / "outside"
+        outside.mkdir()
+        alias = self.root / "2000-01-03.ids"
+        try:
+            alias.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlinks are unavailable: {exc}")
+        self.assertEqual(budget.gc(), 1)
+        for suffix in Budget._DAY_SUFFIXES:
+            self.assertFalse((self.root / f"{day}{suffix}").exists(), suffix)
+        self.assertTrue((self.root / f"{today}.charges").exists())
+        self.assertTrue((self.root / "2000-01-03.ids").is_symlink())
+        self.assertTrue(outside.exists())
+
+    def test_gc_zero_retention_reaps_nothing(self):
+        budget = Budget(self.root, 100, retention_days=0)
+        (self.root / "2000-01-02.charges").write_bytes(b"x")
+        (self.root / "2000-01-02.json").write_bytes(b"{}")
+        self.assertEqual(budget.gc(), 0)
+        self.assertTrue((self.root / "2000-01-02.charges").exists())
+        self.assertTrue((self.root / "2000-01-02.json").exists())
+
 
 class BudgetConfigTests(Fixture):
     def test_day_file_default_override_and_ranges(self):

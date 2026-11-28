@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shutil
 import stat
 from pathlib import Path
 
@@ -32,14 +33,24 @@ class Budget:
         dt.date.fromisoformat(day)  # raises ValueError for a malformed day
         return day
 
-    def gc(self, *, keep_days: int | None = None) -> int:
-        """Remove day-files older than the window. Best-effort; never fails admission.
+    # Every state file belonging to one budget day. The legacy day file is
+    # ``.json``; the append-only ledger contributes its log, sidecars, id
+    # index directory and lock. All share the same ``YYYY-MM-DD`` prefix.
+    _DAY_SUFFIXES = (".json", ".charges", ".charges.lock", ".counts.json",
+                     ".offset.json", ".ids")
 
-        Schema/bounds: day-files ``YYYY-MM-DD.json`` in the configured zone; ``keep_days`` defaults to
-        the operator-selected ``retention_days`` (``[limits] retention_days``,
-        default 31, 0 disables reaping). Trust: local operator state only.
-        Retry: best-effort, skips unreadable entries. Evidence: returns the
-        reaped count. Failure: never raises for I/O; corrupt names are skipped.
+    def gc(self, *, keep_days: int | None = None) -> int:
+        """Remove expired days' files (legacy and ledger). Best-effort.
+
+        Schema/bounds: a day is ``YYYY-MM-DD`` in the configured zone and all
+        its state files (``.json``, ``.charges``, ``.counts.json``,
+        ``.offset.json``, ``.ids/``, ``.charges.lock``) share that prefix.
+        ``keep_days`` defaults to the operator-selected ``retention_days``
+        (``[limits] retention_days``, default 31, 0 disables reaping).
+        Trust: local operator state only. Retry: best-effort, skips unreadable
+        entries. Evidence: returns the number of days reaped (one per expired
+        day with state present). Failure: never raises for I/O; corrupt day
+        names and unknown same-prefix files are skipped.
         """
         if keep_days is None:
             keep_days = self.retention_days
@@ -48,13 +59,30 @@ class Budget:
         removed = 0
         try:
             today = dt.datetime.now(self._tz).date()
-            for path in self.root.glob("????-??-??.json"):
+            expired: set[str] = set()
+            for path in self.root.glob("????-??-??.*"):
+                day = path.name[:10]
                 try:
-                    if (today - dt.date.fromisoformat(path.stem)).days > keep_days:
-                        path.unlink()
-                        removed += 1
-                except (ValueError, OSError):
+                    stale = (today - dt.date.fromisoformat(day)).days > keep_days
+                except ValueError:
                     continue
+                if stale:
+                    expired.add(day)
+            for day in expired:
+                reaped = False
+                for suffix in self._DAY_SUFFIXES:
+                    target = self.root / f"{day}{suffix}"
+                    try:
+                        if target.is_dir() and not target.is_symlink():
+                            shutil.rmtree(target)
+                            reaped = True
+                        elif target.is_file():
+                            target.unlink()
+                            reaped = True
+                    except OSError:
+                        continue
+                if reaped:
+                    removed += 1
         except OSError:
             pass
         return removed
