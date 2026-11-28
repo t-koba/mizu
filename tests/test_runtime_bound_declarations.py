@@ -570,6 +570,7 @@ DECLARATIONS = {
             '128', 'mechanism', 'publication / opaque listing cursor format bound'),
     },
     'run_health.py': {
+        'MAX_ERROR_TEXT': ('512', 'safety', 'run health / bounded failure-text retained in the health fact'),
         'MAX_RATE_FILE_BYTES': ('64 * 1024', 'safety', 'run health / bounded untrusted result-record read'),
         'MAX_RATE_BYTES': ('8 * 1024 * 1024', 'safety', 'run health / total status-rate content-read ceiling'),
     },

@@ -7,9 +7,27 @@ from support import Fixture
 from mizu.errors import ProtocolError
 from mizu.fs import read_json, write_json
 from mizu.runtime import _record_health_failure
+from mizu.run_health import MAX_ERROR_TEXT
 
 
 class FailureBrakePauseCauseTests(Fixture):
+
+    def test_health_fact_records_error_class_and_bounded_text(self):
+        # A terminal failure is recorded as a bounded fact: class plus capped
+        # text, alongside the unit and time already in the health record.
+        long_text = "quota exceeded " * 200
+        exc = ProtocolError(long_text)
+        _record_health_failure(self.project, "worker", "run-fact", exc, 3)
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertEqual(health["error_class"], "ProtocolError")
+        self.assertEqual(health["error"], str(exc)[:MAX_ERROR_TEXT])
+        self.assertEqual(len(health["error"]), MAX_ERROR_TEXT)
+        self.assertEqual(health["last_run"], "run-fact")
+        self.assertIn("updated_at", health)
+        # Brake behavior is unchanged: below threshold, no pause or cause.
+        self.assertFalse(self.project.control()["paused"])
+        self.assertNotIn("pause_cause", self.project.control())
+
     def test_auto_pause_writes_bounded_cause_and_keeps_reason(self):
         exc = ProtocolError("failure detail that must stay out of control.json")
         _record_health_failure(self.project, "worker", "run-1", exc, 1)

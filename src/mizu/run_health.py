@@ -7,6 +7,9 @@ from .errors import Cancelled, CaptureLimitExceeded, MissingFinish
 from .fs import now, read_json, write_json
 from .snapshot import MAX_MISSING_FINISH_STREAK, missing_finish_streak
 
+#: Bounded human-readable failure text retained in a role health record.
+MAX_ERROR_TEXT = 512
+
 
 def _capture_cause(exc, cause=None) -> str | None:
     """The capture-limit cause this unit observed, if any.
@@ -18,8 +21,19 @@ def _capture_cause(exc, cause=None) -> str | None:
     if isinstance(cause, str) and cause:
         return cause
     if isinstance(exc, CaptureLimitExceeded):
-        return str(exc)[:512]
+        return str(exc)[:MAX_ERROR_TEXT]
     return None
+
+
+def _failure_fact(exc) -> dict:
+    """Bounded structured fact describing a terminal failure.
+
+    Schema: ``error_class`` is the exception class name and ``error`` is the
+    bounded exception text. Both accompany the role (record file name), unit
+    (``last_run``) and time (``updated_at``) already stored in the health
+    record, so one fact answers what failed without an unbounded message.
+    """
+    return {"error_class": type(exc).__name__, "error": str(exc)[:MAX_ERROR_TEXT]}
 
 
 def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
@@ -57,7 +71,7 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
             recorded = previous if isinstance(previous, str) and previous else None
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
-                    "last_run": run_id, "error": str(exc), "updated_at": now(),
+                    "last_run": run_id, "updated_at": now(), **_failure_fact(exc),
                     **({"capture_limit": recorded} if recorded else {})})
         if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
             reason = "Repeated failures; inspect health and run records"
@@ -95,7 +109,7 @@ def _record_missing_finish_only(project, role_name, run_id, exc, cause=None,
             recorded = previous if isinstance(previous, str) and previous else None
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
-                    "last_run": run_id, "error": str(exc), "updated_at": now(),
+                    "last_run": run_id, "updated_at": now(), **_failure_fact(exc),
                     **({"capture_limit": recorded} if recorded else {})})
 
 
