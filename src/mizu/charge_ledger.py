@@ -1,10 +1,18 @@
 """Append-only charge records with bounded admission state.
 
-One day's charges go to a single append-only log. Running counts and request
-membership are answered from small bounded sidecars instead of that log, so
-the write and read cost of one charge does not depend on accumulated volume.
-State is local and caller-locked; every bound is a mechanism limit and every
-violation is refused.
+One day's charges go to a single append-only log. The log is the system of
+record: a charge commits when its canonical line is written and fsynced there.
+Running counts and request membership are a synchronously derived view in
+small bounded sidecars, so the write and read cost of one charge does not
+depend on accumulated volume.
+
+Callers hold :meth:`DayLedger.lock` across admission and append. A process
+starting admission after a crash must call :meth:`DayLedger.recover` under
+that lock before using :meth:`DayLedger.has` or :meth:`DayLedger.counts`, so a
+durable-but-unindexed charge cannot be charged twice. Recovery replays the
+log tail from the counts checkpoint and makes sidecar writes idempotent.
+State is local; every bound is a mechanism limit and every violation is
+refused.
 """
 from __future__ import annotations
 
@@ -18,7 +26,7 @@ import unicodedata
 from pathlib import Path
 
 from .errors import Denied, InfraExceeded, LimitExceeded
-from .fs import atomic_write, canonical, digest, loads_finite, lock, mkdir, read_json
+from .fs import atomic_write, canonical, digest, loads_finite, lock, mkdir, read_json, sync_dir
 
 #: Mechanism bounds. Strings are bounded in characters, one serialized line in
 #: bytes, and each page of a read in records; none is an operator setting.
@@ -100,9 +108,11 @@ class DayLedger:
     ``<day>.counts.json`` (running counts) and ``<day>.ids/<digest>``
     (one membership key per scope and request id).
 
-    Callers hold :meth:`lock` across a group of writes; the sidecars and log
-    are then coherent with each other. Reads take no lock beyond the atomic
-    replacement guarantees of :func:`~mizu.fs.read_json`.
+    The log is committed first and durably; the sidecars are derived from it.
+    Callers hold :meth:`lock` across a group of writes and run :meth:`recover`
+    before admission when a previous process may have died between the two.
+    Reads take no lock beyond the atomic replacement guarantees of
+    :func:`~mizu.fs.read_json`.
     """
 
     def __init__(self, root: Path, day: str):
@@ -118,6 +128,8 @@ class DayLedger:
         self.counts_path = self.root / f"{day}.counts.json"
         self.index_dir = self.root / f"{day}.ids"
         self.lock_path = self.root / f"{day}.charges.lock"
+        # Validated log prefix (counts checkpoint, log bytes) for this instance.
+        self._recovered: tuple[int, int] | None = None
 
     @contextlib.contextmanager
     def lock(self):
@@ -172,9 +184,11 @@ class DayLedger:
         """Answer membership from one digest-keyed sidecar entry, never the log."""
         return self._has_key(self._key(project, request_id))
 
-    def _add_key(self, key: str) -> None:
+    def _add_key(self, key: str, *, exclusive: bool = True) -> None:
         if self._has_key(key):
-            raise Denied("Duplicate charge request id")
+            if exclusive:
+                raise Denied("Duplicate charge request id")
+            return
         if self.index_dir.exists() and (self.index_dir.is_symlink() or not self.index_dir.is_dir()):
             raise Denied("Charge id index is not a directory")
         mkdir(self.index_dir)
@@ -190,21 +204,71 @@ class DayLedger:
             raise InfraExceeded("Charge id index is full")
         self._add_key(key)
 
+    def _log_size(self) -> int:
+        try:
+            info = self.log_path.lstat()
+        except FileNotFoundError:
+            return 0
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise Denied("Charge log is not a regular file")
+        return info.st_size
+
     def _append_log(self, line: bytes) -> None:
         mkdir(self.root)
+        try:
+            self.log_path.lstat()
+            existed = True
+        except FileNotFoundError:
+            existed = False
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(self.log_path, flags, 0o600)
         try:
             written = os.write(fd, line)
+            if written == len(line):
+                os.fsync(fd)
         finally:
             os.close(fd)
+        if not existed:
+            sync_dir(self.root)
         if written != len(line):
             raise Denied("Incomplete charge append")
 
+    def recover(self) -> int:
+        """Derive sidecars from the log tail after the counts checkpoint.
+
+        Caller holds :meth:`lock`. Replay is forward-only and bounded: the log
+        is committed before any sidecar, so it is never behind the derived
+        view. Existing membership keys are kept, making replay idempotent.
+        Returns the number of records applied.
+        """
+        counts = self.counts()
+        seq = counts["shared"]
+        log_size = self._log_size()
+        if self._recovered == (seq, log_size):
+            return 0
+        projects = dict(counts["projects"])
+        applied = 0
+        while True:
+            page = self.read_from(seq)
+            if not page:
+                self._recovered = (seq, log_size)
+                return applied
+            for charge, next_seq in page:
+                if applied >= MAX_IDS or seq >= MAX_IDS:
+                    raise InfraExceeded("Charge id index is full")
+                self._add_key(self._key(charge.project, charge.id), exclusive=False)
+                if charge.project not in projects and len(projects) >= MAX_PROJECTS:
+                    raise InfraExceeded("Charge project table is full")
+                projects[charge.project] = projects.get(charge.project, 0) + 1
+                seq = next_seq
+                applied += 1
+            self._write_counts({"shared": seq, "projects": projects})
+
     def append(self, charge: Charge) -> None:
-        """Append one charge and its bounded state under the caller's lock."""
+        """Commit one durable log record, then derive its sidecars."""
         line = charge_line(charge)
+        self.recover()
         counts = self.counts()
         if charge.seq != counts["shared"]:
             raise Denied("Charge sequence is out of order")
@@ -213,12 +277,15 @@ class DayLedger:
             raise InfraExceeded("Charge project table is full")
         if counts["shared"] >= MAX_IDS:
             raise InfraExceeded("Charge id index is full")
-        self._add_key(self._key(charge.project, charge.id))
+        if self.has(charge.project, charge.id):
+            raise Denied("Duplicate charge request id")
+        self._append_log(line)
         updated = {"shared": counts["shared"] + 1,
                    "projects": {**projects,
                                 charge.project: projects.get(charge.project, 0) + 1}}
+        self._add_key(self._key(charge.project, charge.id))
         self._write_counts(updated)
-        self._append_log(line)
+        self._recovered = (updated["shared"], self._log_size())
 
     def read_from(self, seq: int) -> tuple[tuple[Charge, int], ...]:
         """Return at most one bounded page of ``(charge, next_seq)`` from ``seq``.
@@ -229,12 +296,8 @@ class DayLedger:
         """
         if type(seq) is not int or seq < 0:
             raise Denied("Invalid read position")
-        try:
-            info = self.log_path.lstat()
-        except FileNotFoundError:
+        if not self._log_size():
             return ()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise Denied("Charge log is not a regular file")
         page: list[tuple[Charge, int]] = []
         stream = self.log_path.open("rb")
         with stream:

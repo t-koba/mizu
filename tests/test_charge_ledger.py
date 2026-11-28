@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import support  # noqa: F401 -- puts src on sys.path for the standalone unittest run
 
@@ -186,6 +187,131 @@ class ChargeLedgerTests(unittest.TestCase):
         os.symlink(self.ledger.root / "elsewhere", self.ledger.index_dir / fresh)
         with self.assertRaises(Denied):
             self.ledger.has("alpha", "never-added")
+
+    def test_failed_log_append_does_not_poison_the_id(self):
+        original = self.ledger._append_log
+
+        def fail(line):
+            raise OSError("simulated ENOSPC")
+
+        self.ledger._append_log = fail
+        try:
+            with self.assertRaises(OSError):
+                self.ledger.append(Charge("req-1", "alpha", 0))
+        finally:
+            self.ledger._append_log = original
+        self.assertEqual(self.ledger.counts(), {"shared": 0, "projects": {}})
+        self.assertFalse(self.ledger.has("alpha", "req-1"))
+
+        self.ledger.append(Charge("req-1", "alpha", 0))
+        self.assertEqual(self.ledger.read_from(0), ((Charge("req-1", "alpha", 0), 1),))
+        self.assertEqual(self.ledger.counts(), {"shared": 1, "projects": {"alpha": 1}})
+
+    def test_recover_derives_sidecars_from_durable_but_unindexed_log(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+            # Crash after the durable log append, before any sidecar write.
+            with self.ledger.log_path.open("ab") as stream:
+                stream.write(charge_line(Charge("two", "beta", 1)))
+            self.assertEqual(self.ledger.counts(), {"shared": 1, "projects": {"alpha": 1}})
+            self.assertFalse(self.ledger.has("beta", "two"))
+
+        # A new process recovers under the lock before trusting the sidecars.
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 1)
+            self.assertEqual(fresh.recover(), 0)
+        expected = {"shared": 2, "projects": {"alpha": 1, "beta": 1}}
+        self.assertEqual(fresh.counts(), expected)
+        self.assertTrue(fresh.has("alpha", "one"))
+        self.assertTrue(fresh.has("beta", "two"))
+        self.assertEqual([charge for charge, _ in fresh.read_from(0)],
+                         [Charge("one", "alpha", 0), Charge("two", "beta", 1)])
+
+        # A lost checkpoint and key replay from the start without a double charge.
+        self.ledger.counts_path.unlink()
+        (self.ledger.index_dir / self.ledger._key("beta", "two")).unlink()
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 2)
+        self.assertEqual(fresh.counts(), expected)
+        self.assertTrue(fresh.has("alpha", "one"))
+        self.assertTrue(fresh.has("beta", "two"))
+
+        with fresh.lock():
+            fresh.append(Charge("three", "alpha", 2))
+        self.assertEqual(fresh.counts()["shared"], 3)
+        body = fresh.log_path.read_bytes()
+        with self.assertRaises(Denied):
+            fresh.append(Charge("three", "alpha", 2))
+        with self.assertRaisesRegex(Denied, "Duplicate"):
+            fresh.append(Charge("three", "alpha", 3))
+        self.assertEqual(fresh.log_path.read_bytes(), body)
+        self.assertEqual(fresh.counts()["shared"], 3)
+        self.assertEqual(len(fresh.read_from(0)), 3)
+
+        with fresh.log_path.open("ab") as stream:
+            stream.write(b"damaged line\n")
+        with self.assertRaises(Denied):
+            fresh.recover()
+
+    def test_failed_counts_write_is_derived_on_next_recovery(self):
+        self.ledger.append(Charge("one", "alpha", 0))
+        original = self.ledger._write_counts
+
+        def fail_once(counts):
+            self.ledger._write_counts = original
+            raise OSError("simulated sidecar failure")
+
+        self.ledger._write_counts = fail_once
+        with self.assertRaises(OSError):
+            self.ledger.append(Charge("two", "beta", 1))
+        self.assertEqual(self.ledger.counts(), {"shared": 1, "projects": {"alpha": 1}})
+
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 1)
+            self.assertTrue(fresh.has("beta", "two"))
+            fresh.append(Charge("three", "alpha", 2))
+        self.assertEqual(fresh.counts()["shared"], 3)
+        self.assertEqual([charge for charge, _ in fresh.read_from(0)],
+                         [Charge("one", "alpha", 0), Charge("two", "beta", 1),
+                          Charge("three", "alpha", 2)])
+
+    def test_durable_log_append_precedes_sidecar_updates(self):
+        calls = []
+        real_fsync = os.fsync
+        original_log = self.ledger._append_log
+        original_counts = self.ledger._write_counts
+        original_key = self.ledger._add_key
+
+        def log(line):
+            calls.append("log")
+            original_log(line)
+
+        def counts(value):
+            calls.append("counts")
+            original_counts(value)
+
+        def key(value, **kwargs):
+            calls.append("key")
+            original_key(value, **kwargs)
+
+        def fsync(fd):
+            calls.append("fsync")
+            return real_fsync(fd)
+
+        self.ledger._append_log = log
+        self.ledger._write_counts = counts
+        self.ledger._add_key = key
+        with mock.patch.object(os, "fsync", fsync):
+            with self.ledger.lock():
+                self.ledger.append(Charge("req-1", "alpha", 0))
+        self.assertEqual(calls.count("log"), 1)
+        self.assertEqual(calls.count("key"), 1)
+        self.assertEqual(calls.count("counts"), 1)
+        self.assertLess(calls.index("log"), calls.index("fsync"))
+        self.assertLess(calls.index("fsync"), calls.index("key"))
+        self.assertLess(calls.index("key"), calls.index("counts"))
 
     def test_day_validation_and_caller_lock(self):
         for day in ("2026-1-1", "20260101", "not-a-day", 123, "2026-02-30"):
