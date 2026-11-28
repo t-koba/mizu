@@ -1,15 +1,18 @@
 """Append-only charge ledger: bounded records, constant-cost writes, sidecar reads."""
+import json
 import math
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support  # noqa: F401 -- puts src on sys.path for the standalone unittest run
 
 from mizu.charge_ledger import (
-    MAX_COUNTS_BYTES, MAX_IDS, MAX_LINE_BYTES, MAX_PROJECTS,
+    MAX_COUNTS_BYTES, MAX_IDS, MAX_LINE_BYTES, MAX_OFFSET_BYTES, MAX_PROJECTS,
     MAX_PROJECT_CHARS, MAX_REQUEST_ID_CHARS, READ_PAGE,
     Charge, DayLedger, charge_line, parse_charge_line,
 )
@@ -29,6 +32,9 @@ class ChargeLedgerTests(unittest.TestCase):
     def _write_counts(self, value):
         self.root.mkdir(parents=True, exist_ok=True)
         self.ledger.counts_path.write_bytes(canonical(value))
+
+    def _offset(self, ledger=None):
+        return json.loads((ledger or self.ledger).offset_path.read_bytes())
 
     @staticmethod
     def _even(i):
@@ -323,6 +329,188 @@ class ChargeLedgerTests(unittest.TestCase):
         self.assertTrue(self.ledger.lock_path.exists())
         self.assertEqual(self.ledger.counts(), {"shared": 1, "projects": {"alpha": 1}})
 
+
+
+    def test_fresh_recovery_seeks_past_a_damaged_log_head(self):
+        total = 5
+        with self.ledger.lock():
+            for i in range(total):
+                self.ledger.append(Charge(f"id-{i}", "alpha", i))
+        line_length = len(charge_line(Charge("id-0", "alpha", 0)))
+        with self.ledger.log_path.open("r+b") as stream:
+            stream.write(b"damaged head\n" + b"x" * (line_length - len(b"damaged head\n")))
+        # A scan from byte zero would fail closed on the damaged first line.
+        with self.assertRaises(Denied):
+            self.ledger.read_from(0)
+
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 0)
+            self.assertEqual(fresh.recover(), 0)
+        self.assertEqual(fresh.counts(), {"shared": total, "projects": {"alpha": total}})
+        for i in range(total):
+            self.assertTrue(fresh.has("alpha", f"id-{i}"))
+        self.assertEqual(self._offset(fresh), {"shared": total, "offset": total * line_length})
+
+    def test_fresh_recovery_replays_a_durable_tail_once(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("first", "alpha", 0))
+        line = charge_line(Charge("tail", "beta", 1))
+        checkpoint = self.ledger.log_path.stat().st_size
+        with self.ledger.log_path.open("ab") as stream:
+            stream.write(line)
+        self.assertEqual(self.ledger.counts(), {"shared": 1, "projects": {"alpha": 1}})
+        self.assertEqual(self._offset(), {"shared": 1, "offset": checkpoint})
+
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 1)
+            self.assertEqual(fresh.recover(), 0)
+        self.assertEqual(fresh.counts(), {"shared": 2, "projects": {"alpha": 1, "beta": 1}})
+        self.assertTrue(fresh.has("alpha", "first"))
+        self.assertTrue(fresh.has("beta", "tail"))
+        self.assertEqual(self._offset(fresh), {"shared": 2, "offset": checkpoint + len(line)})
+        self.assertEqual(fresh.read_from(2, start_offset=checkpoint + len(line)), ())
+
+    def test_incoherent_checkpoints_fall_back_without_double_charging(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+        first_size = self.ledger.log_path.stat().st_size
+        tail = charge_line(Charge("two", "beta", 1))
+        with self.ledger.log_path.open("ab") as stream:
+            stream.write(tail)
+        final_size = first_size + len(tail)
+        key = self.ledger._key("beta", "two")
+        bodies = (
+            canonical({"shared": 0, "offset": first_size}),
+            canonical({"shared": 1, "offset": final_size + 1}),
+            canonical({"shared": 1, "offset": -1}),
+            canonical({"shared": True, "offset": first_size}),
+            b"{damaged\n",
+            b"x" * (MAX_OFFSET_BYTES + 1),
+        )
+        for body in bodies:
+            with self.subTest(body=body[:30]):
+                self.ledger.counts_path.write_bytes(
+                    canonical({"shared": 1, "projects": {"alpha": 1}}))
+                (self.ledger.index_dir / key).unlink(missing_ok=True)
+                self.ledger.offset_path.write_bytes(body)
+                fresh = DayLedger(self.root, self.DAY)
+                with fresh.lock():
+                    self.assertEqual(fresh.recover(), 1)
+                    self.assertEqual(fresh.recover(), 0)
+                self.assertEqual(fresh.counts(), {"shared": 2,
+                                                  "projects": {"alpha": 1, "beta": 1}})
+                self.assertTrue(fresh.has("alpha", "one"))
+                self.assertTrue(fresh.has("beta", "two"))
+                self.assertEqual(self._offset(fresh), {"shared": 2, "offset": final_size})
+
+    def test_trusted_checkpoint_on_the_wrong_line_fails_closed(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+            self.ledger.append(Charge("two", "beta", 1))
+        head = len(charge_line(Charge("one", "alpha", 0)))
+        self.ledger.offset_path.write_bytes(canonical({"shared": 2, "offset": head}))
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            with self.assertRaisesRegex(Denied, "sequence is inconsistent"):
+                fresh.recover()
+        self.assertEqual(fresh.counts(), {"shared": 2,
+                                          "projects": {"alpha": 1, "beta": 1}})
+        self.assertEqual(self._offset(fresh), {"shared": 2, "offset": head})
+
+    @staticmethod
+    def _trace_sidecars(ledger):
+        calls = []
+        original_counts = ledger._write_counts
+        original_offset = ledger._write_offset
+
+        def counts(value):
+            calls.append("counts")
+            original_counts(value)
+
+        def offset(shared, position):
+            calls.append("offset")
+            original_offset(shared, position)
+
+        ledger._write_counts = counts
+        ledger._write_offset = offset
+        return calls
+
+    def test_failed_offset_write_is_repaired_without_double_charging(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+        original = self.ledger._write_offset
+
+        def fail(shared, position):
+            self.ledger._write_offset = original
+            raise OSError("simulated offset sidecar failure")
+
+        self.ledger._write_offset = fail
+        with self.assertRaises(OSError):
+            self.ledger.append(Charge("two", "beta", 1))
+        self.assertEqual(self.ledger.counts(), {"shared": 2, "projects": {"alpha": 1, "beta": 1}})
+        self.assertEqual(self._offset(), {"shared": 1, "offset": len(charge_line(Charge("one", "alpha", 0)))})
+
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 0)
+            self.assertEqual(fresh.recover(), 0)
+        self.assertEqual(fresh.counts(), {"shared": 2, "projects": {"alpha": 1, "beta": 1}})
+        self.assertTrue(fresh.has("beta", "two"))
+        self.assertEqual(self._offset(fresh),
+                         {"shared": 2, "offset": fresh.log_path.stat().st_size})
+
+    def test_offset_is_published_after_counts_in_append_and_recovery(self):
+        calls = self._trace_sidecars(self.ledger)
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+        self.assertEqual(calls, ["counts", "offset"])
+
+        line = charge_line(Charge("two", "beta", 1))
+        with self.ledger.log_path.open("ab") as stream:
+            stream.write(line)
+        fresh = DayLedger(self.root, self.DAY)
+        calls = self._trace_sidecars(fresh)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), 1)
+        self.assertEqual(calls, ["counts", "offset"])
+
+    def test_recovery_advances_checkpoint_across_pages(self):
+        total = READ_PAGE + 5
+        with self.ledger.lock():
+            for i in range(total):
+                self.ledger.append(Charge(f"id-{i}", "alpha", i))
+        size = self.ledger.log_path.stat().st_size
+        # Rewind the counts checkpoint with a matching zero offset: a cold
+        # recovery must replay every record in bounded pages.
+        self.ledger.counts_path.write_bytes(canonical({"shared": 0, "projects": {}}))
+        self.ledger.offset_path.write_bytes(canonical({"shared": 0, "offset": 0}))
+        fresh = DayLedger(self.root, self.DAY)
+        calls = self._trace_sidecars(fresh)
+        with fresh.lock():
+            self.assertEqual(fresh.recover(), total)
+        self.assertEqual(calls, ["counts", "offset"] * 2)
+        self.assertEqual(fresh.counts(), {"shared": total, "projects": {"alpha": total}})
+        self.assertEqual(self._offset(fresh), {"shared": total, "offset": size})
+
+    def test_read_from_start_offset_is_bounded_and_checks_ordinal(self):
+        with self.ledger.lock():
+            self.ledger.append(Charge("one", "alpha", 0))
+            self.ledger.append(Charge("two", "beta", 1))
+        size = self.ledger.log_path.stat().st_size
+        head = size - len(charge_line(Charge("two", "beta", 1)))
+        self.assertEqual(self.ledger.read_from(1, start_offset=head),
+                         ((Charge("two", "beta", 1), 2),))
+        self.assertEqual(self.ledger.read_from(2, start_offset=size), ())
+        for bad in (-1, size + 1, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Denied):
+                    self.ledger.read_from(0, start_offset=bad)
+        with self.assertRaisesRegex(Denied, "sequence is inconsistent"):
+            self.ledger.read_from(2, start_offset=head)
+        # Public reads still scan from byte zero.
+        self.assertEqual(len(self.ledger.read_from(0)), 2)
 
 if __name__ == "__main__":
     unittest.main()

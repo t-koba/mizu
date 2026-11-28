@@ -2,15 +2,17 @@
 
 One day's charges go to a single append-only log. The log is the system of
 record: a charge commits when its canonical line is written and fsynced there.
-Running counts and request membership are a synchronously derived view in
-small bounded sidecars, so the write and read cost of one charge does not
-depend on accumulated volume.
+Running counts, request membership and a byte-offset checkpoint are
+synchronously derived views in small bounded sidecars, so the write and read
+cost of one charge does not depend on accumulated volume.
 
 Callers hold :meth:`DayLedger.lock` across admission and append. A process
 starting admission after a crash must call :meth:`DayLedger.recover` under
 that lock before using :meth:`DayLedger.has` or :meth:`DayLedger.counts`, so a
-durable-but-unindexed charge cannot be charged twice. Recovery replays the
-log tail from the counts checkpoint and makes sidecar writes idempotent.
+durable-but-unindexed charge cannot be charged twice. Recovery seeks to the
+checkpointed line for the counts position and replays only the tail; an
+incoherent checkpoint falls back to a bounded scan from byte zero. Sidecar
+writes are idempotent.
 State is local; every bound is a mechanism limit and every violation is
 refused.
 """
@@ -37,10 +39,12 @@ READ_PAGE = 256
 MAX_PROJECTS = 4096
 MAX_IDS = 65536
 MAX_COUNTS_BYTES = 512 * 1024
+MAX_OFFSET_BYTES = 256
 INTEGER_LIMIT = (1 << 63) - 1
 
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _COUNT_KEYS = frozenset({"shared", "projects"})
+_OFFSET_KEYS = frozenset({"shared", "offset"})
 _RECORD_KEYS = frozenset({"id", "project", "seq"})
 
 
@@ -56,6 +60,15 @@ def _seq(value: object) -> int:
     if type(value) is not int or not 0 <= value <= INTEGER_LIMIT:
         raise Denied("Charge sequence must be a nonnegative integer within bounds")
     return value
+
+
+class _Page(tuple):
+    """A page of records with the byte position just past its last line."""
+
+    def __new__(cls, charges, end_offset: int):
+        page = super().__new__(cls, charges)
+        page.end_offset = end_offset
+        return page
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,8 +118,9 @@ class DayLedger:
     """One day's charge log and its bounded sidecars.
 
     Layout under ``root``: ``<day>.charges`` (append-only log),
-    ``<day>.counts.json`` (running counts) and ``<day>.ids/<digest>``
-    (one membership key per scope and request id).
+    ``<day>.counts.json`` (running counts), ``<day>.offset.json`` (byte
+    position of the counts checkpoint) and ``<day>.ids/<digest>`` (one
+    membership key per scope and request id).
 
     The log is committed first and durably; the sidecars are derived from it.
     Callers hold :meth:`lock` across a group of writes and run :meth:`recover`
@@ -126,6 +140,7 @@ class DayLedger:
         self.day = day
         self.log_path = self.root / f"{day}.charges"
         self.counts_path = self.root / f"{day}.counts.json"
+        self.offset_path = self.root / f"{day}.offset.json"
         self.index_dir = self.root / f"{day}.ids"
         self.lock_path = self.root / f"{day}.charges.lock"
         # Validated log prefix (counts checkpoint, log bytes) for this instance.
@@ -133,7 +148,7 @@ class DayLedger:
 
     @contextlib.contextmanager
     def lock(self):
-        """Caller-held exclusion for the log and both sidecars."""
+        """Caller-held exclusion for the log and its sidecars."""
         with lock(self.lock_path):
             yield
 
@@ -167,6 +182,40 @@ class DayLedger:
             raise InfraExceeded("Charge counts sidecar exceeds its byte bound")
         mkdir(self.root)
         atomic_write(self.counts_path, body)
+
+    def _write_offset(self, shared: int, offset: int) -> None:
+        """Publish a byte checkpoint for the counts generation just written."""
+        if (type(shared) is not int or not 0 <= shared <= MAX_IDS
+                or type(offset) is not int or not 0 <= offset <= INTEGER_LIMIT):
+            raise Denied("Invalid charge offset checkpoint")
+        body = canonical({"shared": shared, "offset": offset})
+        if len(body) > MAX_OFFSET_BYTES:
+            raise InfraExceeded("Charge offset sidecar exceeds its byte bound")
+        mkdir(self.root)
+        atomic_write(self.offset_path, body)
+
+    def _checkpoint(self, seq: int, log_size: int) -> int | None:
+        """Return a trusted seek position for ``seq``, or None to scan from 0.
+
+        The checkpoint names the counts generation it describes. Anything
+        missing, malformed, negative, past the end of the log or describing a
+        different generation is unusable: replay from byte zero is slower but
+        correct. An offset of zero cannot describe a nonempty checkpointed
+        prefix either.
+        """
+        try:
+            value = read_json(self.offset_path, None, max_bytes=MAX_OFFSET_BYTES)
+        except (Denied, LimitExceeded, OSError, ValueError, UnicodeError, RecursionError):
+            return None
+        if value is None:
+            return None
+        if (not isinstance(value, dict) or set(value) != _OFFSET_KEYS
+                or type(value["shared"]) is not int or value["shared"] != seq
+                or type(value["offset"]) is not int
+                or not 0 <= value["offset"] <= log_size
+                or (value["offset"] == 0 and seq != 0)):
+            return None
+        return value["offset"]
 
     def _has_key(self, key: str) -> bool:
         entry = self.index_dir / key
@@ -240,18 +289,26 @@ class DayLedger:
         Caller holds :meth:`lock`. Replay is forward-only and bounded: the log
         is committed before any sidecar, so it is never behind the derived
         view. Existing membership keys are kept, making replay idempotent.
-        Returns the number of records applied.
+        Returns the number of records applied. A cold instance seeks straight
+        to the checkpoint when it is coherent with the counts sidecar.
         """
         counts = self.counts()
         seq = counts["shared"]
         log_size = self._log_size()
         if self._recovered == (seq, log_size):
             return 0
+        checkpoint = self._checkpoint(seq, log_size)
+        start = checkpoint if checkpoint is not None else 0
         projects = dict(counts["projects"])
         applied = 0
         while True:
-            page = self.read_from(seq)
+            page = self.read_from(seq, start_offset=start)
             if not page:
+                if checkpoint is None and seq and page.end_offset:
+                    # Repair an unusable checkpoint so later cold starts can
+                    # seek; counts and log are already at this position. An
+                    # empty ledger needs no sidecar for its zero checkpoint.
+                    self._write_offset(seq, page.end_offset)
                 self._recovered = (seq, log_size)
                 return applied
             for charge, next_seq in page:
@@ -264,6 +321,8 @@ class DayLedger:
                 seq = next_seq
                 applied += 1
             self._write_counts({"shared": seq, "projects": projects})
+            start = page.end_offset
+            self._write_offset(seq, start)
 
     def append(self, charge: Charge) -> None:
         """Commit one durable log record, then derive its sidecars."""
@@ -279,29 +338,44 @@ class DayLedger:
             raise InfraExceeded("Charge id index is full")
         if self.has(charge.project, charge.id):
             raise Denied("Duplicate charge request id")
+        offset = self._log_size()
         self._append_log(line)
         updated = {"shared": counts["shared"] + 1,
                    "projects": {**projects,
                                 charge.project: projects.get(charge.project, 0) + 1}}
         self._add_key(self._key(charge.project, charge.id))
         self._write_counts(updated)
+        self._write_offset(updated["shared"], offset + len(line))
         self._recovered = (updated["shared"], self._log_size())
 
-    def read_from(self, seq: int) -> tuple[tuple[Charge, int], ...]:
+    def read_from(self, seq: int, *, start_offset: int = 0) -> tuple[tuple[Charge, int], ...]:
         """Return at most one bounded page of ``(charge, next_seq)`` from ``seq``.
 
+        The result is a tuple; its internal ``end_offset`` is the byte
+        position where reading stopped, used to advance the checkpoint.
         Preceding records are consumed as bounded lines and discarded; they
         are never all held in memory. A malformed or out-of-order line fails
         closed, and ``next_seq`` is the position from which to continue.
+
+        ``start_offset`` is internal to :meth:`recover`. It skips a validated
+        checkpointed prefix; the first line found there must have ``seq`` as
+        its ordinal or the read fails closed. Untrusted checkpoints are passed
+        as 0, where records before ``seq`` are still consumed and discarded.
         """
         if type(seq) is not int or seq < 0:
             raise Denied("Invalid read position")
-        if not self._log_size():
-            return ()
+        if type(start_offset) is not int or start_offset < 0:
+            raise Denied("Invalid read offset")
+        log_size = self._log_size()
+        if start_offset > log_size:
+            raise Denied("Read offset exceeds log size")
+        if not log_size:
+            return _Page((), 0)
         page: list[tuple[Charge, int]] = []
         stream = self.log_path.open("rb")
         with stream:
-            ordinal = 0
+            stream.seek(start_offset)
+            ordinal = seq if start_offset else 0
             while True:
                 line = stream.readline(MAX_LINE_BYTES + 1)
                 if not line:
@@ -315,4 +389,5 @@ class DayLedger:
                 page.append((charge, charge.seq + 1))
                 if len(page) >= READ_PAGE:
                     break
-        return tuple(page)
+            end_offset = stream.tell()
+        return _Page(page, end_offset)
