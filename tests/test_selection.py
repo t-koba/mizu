@@ -926,10 +926,10 @@ class SelectionTests(SelectionFixture):
         budget = Budget(self.config.data / 'budget', self.config.limits.daily_requests,
                         self.config.limits.retention_days, self.config.limits.shared_daily_requests,
                         self.config.timezone)
-        ledger = read_json(budget.root / f'{budget._today()}.json')
-        admitted = ledger['projects'][self.project.name]
-        self.assertEqual(len(admitted), 2)
-        self.assertEqual(len(set(admitted)), 2)
+        # take() is idempotent per request id, so two admitted calls are two
+        # distinct ids; assert the count through the public derived read rather
+        # than the day-file layout, which the ledger cutover will replace.
+        self.assertEqual(budget.peek(self.project.name)['used'], 2)
         self.assertIs(driver.calls[0][0], context)
 
     def test_nonterminal_or_uncertain_failures_keep_selector_attempt_identity(self):

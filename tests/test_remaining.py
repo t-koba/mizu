@@ -492,9 +492,12 @@ else:
             with self.assertRaises(LimitExceeded):Engine(config,driver=ScriptDriver()).run(self.project,'worker')
             Clock.current=dt.datetime(2026,10,4,0,0,1,tzinfo=dt.timezone.utc)
             Engine(config,driver=ScriptDriver()).run(self.project,'worker')
-        from mizu.fs import read_json
-        self.assertEqual(len(read_json(config.data/'budget/2026-10-03.json')['requests']),1)
-        self.assertEqual(len(read_json(config.data/'budget/2026-10-04.json')['requests']),1)
+        from mizu.budget import Budget
+        budget = Budget(config.data / 'budget', config.limits.daily_requests,
+                        config.limits.retention_days, config.limits.shared_daily_requests,
+                        config.timezone)
+        self.assertEqual(budget.peek(day='2026-10-03')['shared_used'], 1)
+        self.assertEqual(budget.peek(day='2026-10-04')['shared_used'], 1)
 
     def test_bridge_close_stops_and_collects_active_operation(self):
         import threading
