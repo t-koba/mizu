@@ -9,6 +9,7 @@ import dataclasses
 import multiprocessing
 import os
 import queue
+import shutil
 import stat
 import threading
 import time
@@ -1478,8 +1479,14 @@ class QueueTests(Fixture):
                     engine.stop.set()
                     if thread is not None:
                         thread.join(5)
-                    for path in (self.config.data / 'budget').glob('*.json'):
-                        path.unlink()
+                    budget_dir = self.config.data / 'budget'
+                    if budget_dir.is_dir():
+                        for path in budget_dir.iterdir():
+                            if path.is_dir():
+                                shutil.rmtree(path, ignore_errors=True)
+                            else:
+                                with contextlib.suppress(OSError):
+                                    path.unlink()
                 self.assertIsNotNone(thread)
                 self.assertFalse(thread.is_alive())
                 expected = Busy if change == 'drain' else Denied if change in ('pause', 'unarm') else InfraExceeded

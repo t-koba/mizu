@@ -8,6 +8,7 @@ daily-budget refusal into ProtocolError/ModelFailure; Context.admission_wait
 (set by type, never message text) maps that back to a deferral.
 """
 import dataclasses
+import shutil
 import sys
 from types import SimpleNamespace
 from support import Fixture, ScriptDriver, ROOT
@@ -103,11 +104,16 @@ class ResumeHealthTests(Fixture):
                 return pi.execute(context, prompt, profile=profile)
 
         for _ in range(3):
-            for path in (cfg.data / "budget").glob("????-??-??.json"):
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+            budget_dir = cfg.data / "budget"
+            if budget_dir.is_dir():
+                for path in budget_dir.iterdir():
+                    try:
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
+                    except OSError:
+                        pass
             with self.assertRaises(ProtocolError):
                 Engine(cfg, driver=PiBudgetDriver()).run(self.project, "reporter")
         # The Pi transport surfaces the host-side budget refusal as
