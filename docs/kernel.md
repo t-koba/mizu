@@ -272,6 +272,25 @@ non-object JSON on stdout. `record_observations` refuses a non-dict response,
 a missing, non-list or over-long `observations` value, a non-object body, and
 any append the destination queue's schema or grants reject.
 
+## Declared persistent directories
+
+A `[persistent.<name>]` declaration names a directory without giving it a path
+or purpose. Its identity is the digest of exactly its `identity_from` facts
+using `fs.canonical` and `fs.digest`, or an explicit configured literal used
+only where facts cannot be established. Facts outside `identity_from` cannot
+change the identity. Mount rules are ordered equalities over named facts: the
+first rule whose equalities all match grants its `ro` or `rw` mode, and no
+match grants no mount. The caller that mounts a writable directory is
+responsible for serializing its use; this declarative slice only selects the
+mode and adds no caller that mounts anything.
+
+An instance is a `(name, identity)` pair. Liveness is referential:
+`unreferenced(instances, referenced)` returns only instances that no
+declaration or execution still references, so a shared identity stays alive
+while any referrer remains. Declarations and runtime facts are bounded and
+fail closed. Routing the existing check cache through this mechanism is a
+later userland slice; no current flow consumes these declarations yet.
+
 ## Bounds
 
 Bounds are either fixed mechanism limits or configuration with documented

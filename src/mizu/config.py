@@ -395,7 +395,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "workspace_cache",
     "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor", "completion_evidence", "queues", "drivers"})
+    "project_import", "doctor", "completion_evidence", "queues", "drivers", "persistent"})
 
 
 def _load_merged(top: Path) -> tuple[dict, tuple[Path, ...]]:
@@ -1305,6 +1305,11 @@ def _kernel_queues(raw):
     return parse_queues(raw)
 
 
+def _kernel_persistent(raw):
+    from .kernel import parse_persistent
+    return parse_persistent(raw)
+
+
 def _kernel_drivers(raw, queues):
     from .kernel import parse_drivers
     return parse_drivers(raw, queues)
@@ -1538,6 +1543,8 @@ class Config:
     record_kinds: dict = dataclasses.field(default_factory=dict)
     #: Kernel message queues declared by the deployment (docs/kernel.md).
     queues: dict = dataclasses.field(default_factory=dict)
+    #: Kernel persistent directory declarations (docs/kernel.md).
+    persistent: Mapping = dataclasses.field(default_factory=dict)
     #: Kernel observation drivers declared by the deployment (docs/kernel.md).
     drivers: Mapping = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
@@ -2205,6 +2212,7 @@ def load(file: Path) -> Config:
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
     queues = _kernel_queues(data.get("queues", {}))
+    persistent = _kernel_persistent(data.get("persistent", {}))
     drivers = _kernel_drivers(data.get("drivers", {}), queues)
     from .kernel.queues import allows as _queue_allows
     for key, writer in (("observation_queue", "host"), ("approval_queue", "operator")):
@@ -2247,6 +2255,7 @@ def load(file: Path) -> Config:
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), record_kinds=kinds,
                   queues=queues,
+                  persistent=persistent,
                   drivers=drivers,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),

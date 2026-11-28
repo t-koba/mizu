@@ -146,6 +146,21 @@ body = {type = "string", max = 16384, required = true}
 # docs/kernel.md#drivers for schema, bounds and trust.
 # [drivers]
 
+# Persistent directories are declared [persistent.<name>] tables; absent by
+# default. Identity comes from bounded facts or, only where those cannot be
+# established, an explicit literal. Mounts are ordered fact equalities with
+# mode "ro" or "rw"; no matching rule grants no mount. No current flow consumes
+# these declarations yet: wiring existing flows comes in a later slice. See
+# docs/kernel.md#declared-persistent-directories.
+# [persistent]
+# [persistent.shared]
+# identity_from = ["tier", "stage"]
+# # identity_value = "fixed-identity"  # alternative when facts cannot be established
+# mounts = [
+#     {mode = "ro", when = {tier = "shared"}},
+#     {mode = "rw", when = {tier = "local", stage = "active"}},
+# ]
+
 # Host publisher outcomes for publication_ci waits default closed (record_kinds
 # absent). Schema and host adapter route:
 # docs/shared-records.md#declared-host-publisher-outcomes
