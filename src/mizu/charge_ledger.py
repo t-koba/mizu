@@ -348,6 +348,41 @@ class DayLedger:
         self._write_offset(updated["shared"], offset + len(line))
         self._recovered = (updated["shared"], self._log_size())
 
+    def admit(self, project: str, request_id: str, *, daily: int,
+              shared_daily: int = 0) -> int:
+        """Admit one request against the per-project and shared day limits.
+
+        The caller holds :meth:`lock`; recovery runs under it first, so a
+        durable-but-unindexed charge is never charged twice. Schema: opaque
+        ``request_id`` and scope ``project`` (``""`` uses the shared set).
+        Bounds: limits are nonnegative integers (bool excluded); a zero shared
+        limit disables that ceiling. Trust: local operator state under the
+        caller's lock, with the log as the system of record. Retry: idempotent
+        per (project, request_id), returning the scope count with no new log
+        line. Evidence: returns the scope count after admission. Failure:
+        ``Denied`` for invalid limits or unreadable state, ``InfraExceeded``
+        for per-project or shared exhaustion.
+        """
+        if (type(daily) is not int or daily < 0
+                or type(shared_daily) is not int or shared_daily < 0):
+            raise Denied("Admission limits must be nonnegative integers")
+        self.recover()
+        known = self.has(project, request_id)
+        counts = self.counts()
+        scope = counts["shared"] if not project else counts["projects"].get(project, 0)
+        if known:
+            return scope
+        if scope >= daily:
+            if project:
+                raise InfraExceeded(
+                    f"daily model-request budget exhausted for project {project}")
+            raise InfraExceeded("daily model-request budget exhausted")
+        if shared_daily > 0 and counts["shared"] >= shared_daily:
+            raise InfraExceeded("daily model-request shared budget exhausted")
+        self.append(Charge(id=request_id, project=project, seq=counts["shared"]))
+        updated = self.counts()
+        return updated["shared"] if not project else updated["projects"].get(project, 0)
+
     def read_from(self, seq: int, *, start_offset: int = 0) -> tuple[tuple[Charge, int], ...]:
         """Return at most one bounded page of ``(charge, next_seq)`` from ``seq``.
 

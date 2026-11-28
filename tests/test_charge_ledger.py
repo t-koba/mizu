@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -511,6 +512,182 @@ class ChargeLedgerTests(unittest.TestCase):
             self.ledger.read_from(2, start_offset=head)
         # Public reads still scan from byte zero.
         self.assertEqual(len(self.ledger.read_from(0)), 2)
+
+    def test_admit_writes_one_bounded_line_per_charge(self):
+        total = 2000
+
+        def identity(i):
+            # Compensate for the ordinal's digit count as _even() does.
+            digits = len(str(i))
+            return "r" * (12 - 2 * digits) + str(i)
+
+        expected = len(charge_line(Charge(identity(0), "alpha", 0)))
+        deltas = []
+        with self.ledger.lock():
+            for i in range(total):
+                before = self.ledger.log_path.stat().st_size if self.ledger.log_path.exists() else 0
+                self.assertEqual(self.ledger.admit("alpha", identity(i), daily=total), i + 1)
+                deltas.append(self.ledger.log_path.stat().st_size - before)
+        self.assertEqual(min(deltas), expected)
+        self.assertEqual(max(deltas), expected)
+        self.assertLessEqual(max(deltas), MAX_LINE_BYTES)
+        self.assertEqual(self.ledger.log_path.stat().st_size, total * expected)
+        self.assertEqual(self.ledger.counts(), {"shared": total, "projects": {"alpha": total}})
+        for i in range(total):
+            self.assertTrue(self.ledger.has("alpha", identity(i)))
+
+    def test_admit_repeat_returns_the_scope_count_without_a_new_charge(self):
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("alpha", "same", daily=5), 1)
+            self.assertEqual(self.ledger.admit("beta", "other", daily=5), 1)
+            self.assertEqual(self.ledger.admit("", "shared-id", daily=5), 3)
+            body = self.ledger.log_path.read_bytes()
+            counts = self.ledger.counts()
+            self.assertEqual(self.ledger.admit("alpha", "same", daily=1), 1)
+            self.assertEqual(self.ledger.admit("beta", "other", daily=5), 1)
+            self.assertEqual(self.ledger.admit("", "shared-id", daily=5), 3)
+        self.assertEqual(self.ledger.log_path.read_bytes(), body)
+        self.assertEqual(self.ledger.counts(), counts)
+        # A scope owns its key space: the same id elsewhere is a new charge.
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("gamma", "same", daily=5), 1)
+        self.assertEqual(self.ledger.counts()["shared"], 4)
+
+    def test_admit_project_and_shared_exhaustion_fail_closed(self):
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("alpha", "a1", daily=2), 1)
+            self.assertEqual(self.ledger.admit("alpha", "a2", daily=2), 2)
+            for i in range(3):
+                self.assertEqual(self.ledger.admit("beta", f"b{i}", daily=3), i + 1)
+            # Another project's count neither exhausts nor frees alpha's quota.
+            with self.assertRaises(InfraExceeded) as caught:
+                self.ledger.admit("alpha", "a3", daily=2)
+            self.assertEqual(str(caught.exception),
+                             "daily model-request budget exhausted for project alpha")
+            self.assertEqual(self.ledger.admit("alpha", "a3", daily=3), 3)
+            body = self.ledger.log_path.read_bytes()
+            counts = self.ledger.counts()
+            with self.assertRaises(InfraExceeded) as caught:
+                self.ledger.admit("alpha", "a4", daily=3)
+            self.assertEqual(str(caught.exception),
+                             "daily model-request budget exhausted for project alpha")
+            with self.assertRaises(InfraExceeded) as caught:
+                self.ledger.admit("", "s1", daily=6)
+            self.assertEqual(str(caught.exception), "daily model-request budget exhausted")
+            with self.assertRaises(InfraExceeded) as caught:
+                self.ledger.admit("gamma", "g1", daily=5, shared_daily=6)
+            self.assertEqual(str(caught.exception),
+                             "daily model-request shared budget exhausted")
+            with self.assertRaises(InfraExceeded) as caught:
+                self.ledger.admit("", "s2", daily=100, shared_daily=6)
+            self.assertEqual(str(caught.exception),
+                             "daily model-request shared budget exhausted")
+        self.assertEqual(self.ledger.log_path.read_bytes(), body)
+        self.assertEqual(self.ledger.counts(), counts)
+
+    def test_concurrent_admits_are_exact_and_idempotent(self):
+        projects = ("alpha", "beta", "gamma")
+        per_project = 12
+        unique = [(project, i) for project in projects for i in range(per_project)]
+
+        def charge(task):
+            project, index = task
+            with self.ledger.lock():
+                return self.ledger.admit(project, f"{project}-{index}", daily=per_project)
+
+        # Concurrent first admits take each project's sequence in some order;
+        # concurrent repeats then see the settled count and charge nothing.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(charge, unique))
+            repeats = list(pool.map(charge, unique))
+        for project in projects:
+            own = sorted(value for (name, _), value in zip(unique, results)
+                         if name == project)
+            self.assertEqual(own, list(range(1, per_project + 1)))
+        self.assertEqual(repeats, [per_project] * len(unique))
+        expected_counts = {"shared": len(unique),
+                           "projects": {project: per_project for project in projects}}
+        self.assertEqual(self.ledger.counts(), expected_counts)
+        charges = [charge for charge, _ in self.ledger.read_from(0)]
+        self.assertEqual(len(charges), len(unique))
+        self.assertEqual([charge.seq for charge in charges], list(range(len(unique))))
+        self.assertEqual({(charge.project, charge.id) for charge in charges},
+                         {(project, f"{project}-{i}") for project, i in unique})
+        for project, i in unique:
+            self.assertTrue(self.ledger.has(project, f"{project}-{i}"))
+
+    def test_admit_recovers_a_durable_tail_and_a_failed_sidecar_once(self):
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("alpha", "one", daily=10), 1)
+        checkpoint = self.ledger.log_path.stat().st_size
+        tail = charge_line(Charge("two", "beta", 1))
+        with self.ledger.log_path.open("ab") as stream:
+            stream.write(tail)
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.admit("beta", "two", daily=10), 1)
+            self.assertEqual(fresh.admit("alpha", "one", daily=10), 1)
+            self.assertEqual(fresh.admit("gamma", "three", daily=10), 1)
+        final_size = checkpoint + len(tail) + len(charge_line(Charge("three", "gamma", 2)))
+        self.assertEqual(fresh.log_path.stat().st_size, final_size)
+        self.assertEqual(fresh.counts(), {"shared": 3, "projects": {
+            "alpha": 1, "beta": 1, "gamma": 1}})
+
+        original = fresh._write_counts
+
+        def fail_once(counts):
+            fresh._write_counts = original
+            raise OSError("simulated sidecar failure")
+
+        fresh._write_counts = fail_once
+        with fresh.lock():
+            with self.assertRaises(OSError):
+                fresh.admit("alpha", "four", daily=10)
+        self.assertEqual(fresh.counts()["shared"], 3)
+        durable = fresh.log_path.read_bytes()
+        restart = DayLedger(self.root, self.DAY)
+        with restart.lock():
+            self.assertEqual(restart.admit("alpha", "four", daily=10), 2)
+            self.assertEqual(restart.admit("beta", "two", daily=10), 1)
+        self.assertEqual(restart.log_path.read_bytes(), durable)
+        self.assertEqual(restart.counts()["shared"], 4)
+        self.assertEqual(len(restart.read_from(0)), 4)
+
+    def test_admit_refuses_malformed_counts_and_replays_a_lost_sidecar(self):
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("alpha", "one", daily=10), 1)
+        body = self.ledger.log_path.read_bytes()
+        self.ledger.counts_path.write_bytes(canonical({"shared": -1, "projects": {}}))
+        with self.ledger.lock():
+            with self.assertRaises(Denied):
+                self.ledger.admit("alpha", "two", daily=10)
+        self.assertEqual(self.ledger.log_path.read_bytes(), body)
+
+        self.ledger.counts_path.unlink()
+        fresh = DayLedger(self.root, self.DAY)
+        with fresh.lock():
+            self.assertEqual(fresh.admit("alpha", "two", daily=10), 2)
+            self.assertEqual(fresh.admit("alpha", "one", daily=10), 2)
+        self.assertEqual(fresh.counts(), {"shared": 2, "projects": {"alpha": 2}})
+        self.assertEqual(len(fresh.read_from(0)), 2)
+
+    def test_admit_invalid_limits_fail_closed(self):
+        with self.ledger.lock():
+            self.assertEqual(self.ledger.admit("alpha", "one", daily=10), 1)
+        body = self.ledger.log_path.read_bytes()
+        counts = self.ledger.counts()
+        for name, value in ((name, value) for name in ("daily", "shared_daily")
+                            for value in (-1, True, 1.5, math.nan, "10", None)):
+            with self.subTest(name=name, value=value):
+                with self.ledger.lock():
+                    with self.assertRaises(Denied):
+                        if name == "daily":
+                            self.ledger.admit("alpha", "two", daily=value)
+                        else:
+                            self.ledger.admit("alpha", "two", daily=10, shared_daily=value)
+                self.assertEqual(self.ledger.log_path.read_bytes(), body)
+                self.assertEqual(self.ledger.counts(), counts)
+
 
 if __name__ == "__main__":
     unittest.main()
