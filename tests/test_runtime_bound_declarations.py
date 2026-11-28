@@ -594,6 +594,32 @@ DECLARATIONS = {
             '2 * 1000 * 67 + 1024', 'safety',
             'feed updates / bounded cursor stores at most 1000 completed and 1000 partially delivered SHA-256 identities plus its envelope'),
     },
+    'charge_ledger.py': {
+        'MAX_REQUEST_ID_CHARS': (
+            '1024', 'mechanism',
+            'charge ledger / bounded opaque request-id characters in one canonical log line'),
+        'MAX_PROJECT_CHARS': (
+            '63', 'format',
+            'charge ledger / bounded project name characters matching the project identifier format'),
+        'MAX_LINE_BYTES': (
+            '8192', 'safety',
+            'charge ledger / fixed serialized line ceiling; one over-bound line fails closed before append'),
+        'MAX_PROJECTS': (
+            '4096', 'safety',
+            'charge ledger / fixed per-day project-table ceiling; overflow fails closed before derivation'),
+        'MAX_IDS': (
+            '65536', 'safety',
+            'charge ledger / fixed per-day charge count and membership-key ceiling; overflow fails closed'),
+        'MAX_COUNTS_BYTES': (
+            '512 * 1024', 'safety',
+            'charge ledger / bounded counts sidecar read and write ceiling'),
+        'MAX_OFFSET_BYTES': (
+            '256', 'safety',
+            'charge ledger / bounded byte-checkpoint sidecar read and write ceiling'),
+        'INTEGER_LIMIT': (
+            '(1 << 63) - 1', 'format',
+            'charge ledger / signed-64-bit integer representation ceiling for sequence and offset fields'),
+    },
     'kernel/queues.py': {
         'MAX_BODY_BYTES': (
             '1024 * 1024', 'safety',
