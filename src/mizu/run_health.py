@@ -10,6 +10,90 @@ from .snapshot import MAX_MISSING_FINISH_STREAK, missing_finish_streak
 #: Bounded human-readable failure text retained in a role health record.
 MAX_ERROR_TEXT = 512
 
+# Named failure events: a durable, bounded, per-role fact that configuration
+# can route like any other event in a later slice. This slice only emits and
+# reads the fact; it changes no brake, control, config or dispatch behaviour.
+FAILURE_EVENT_KIND = "unit_failure"
+MAX_UNIT_CHARS = 128
+MAX_FAILURE_EVENT_BYTES = 4096
+MAX_FAILURE_GENERATION = (1 << 62) - 1
+
+
+def _failure_event_path(project, role_name):
+    """Bounded per-role failure-event path (None when unusable, never raises)."""
+    try:
+        name = str(role_name)
+        if (not name or "/" in name or "\\" in name or "\x00" in name
+                or ".." in name):
+            return None
+        return project.root / "health" / "events" / f"{name}.json"
+    except Exception:
+        return None
+
+
+def read_failure_event(project, role_name):
+    """Return one bounded named failure event for a role (never raises).
+
+    Schema: ``kind`` names the event, ``role`` and ``unit`` identify its source,
+    ``error_class`` and bounded ``error`` carry the fact, ``at`` is its time and
+    ``generation`` lets a later routing slice detect a new event without
+    interpreting the fact. Unknown kinds, wrong roles, unbounded fields and
+    malformed records fail closed as absent.
+    """
+    try:
+        name = str(role_name)
+        path = _failure_event_path(project, name)
+        if path is None:
+            return None
+        value = read_json(path, None, max_bytes=MAX_FAILURE_EVENT_BYTES)
+        if not isinstance(value, dict) or value.get("kind") != FAILURE_EVENT_KIND:
+            return None
+        if (value.get("role") != name
+                or not isinstance(value.get("error_class"), str)
+                or not isinstance(value.get("error"), str)
+                or len(value["error"]) > MAX_ERROR_TEXT
+                or not isinstance(value.get("unit"), str)
+                or len(value["unit"]) > MAX_UNIT_CHARS
+                or not isinstance(value.get("at"), str)
+                or type(value.get("generation")) is not int
+                or not 0 <= value["generation"] <= MAX_FAILURE_GENERATION):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def emit_failure_event(project, role_name, run_id, exc, *, at=None):
+    """Persist one bounded named failure event, or return None on any failure.
+
+    The record is one bounded file per role, replaced on each failure; a
+    generation counter distinguishes a new event from one already routed.
+    This is additive: the existing failure brake, control state, config and
+    dispatch are untouched. Never raises, so failure bookkeeping cannot break
+    the run it observes.
+    """
+    try:
+        name = str(role_name)
+        path = _failure_event_path(project, name)
+        if path is None:
+            return None
+        previous = read_failure_event(project, name)
+        generation = (previous["generation"] + 1) if previous else 0
+        generation = min(generation, MAX_FAILURE_GENERATION)
+        record = {
+            "kind": FAILURE_EVENT_KIND,
+            "role": name,
+            "unit": (str(run_id) if isinstance(run_id, str) else "")[:MAX_UNIT_CHARS],
+            "error_class": type(exc).__name__[:MAX_UNIT_CHARS],
+            "error": str(exc)[:MAX_ERROR_TEXT],
+            "at": at if isinstance(at, str) and at else now(),
+            "generation": generation,
+        }
+        write_json(path, record)
+        return record
+    except Exception:
+        return None
+
 
 def _capture_cause(exc, cause=None) -> str | None:
     """The capture-limit cause this unit observed, if any.
@@ -73,6 +157,7 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
                     "last_run": run_id, "updated_at": now(), **_failure_fact(exc),
                     **({"capture_limit": recorded} if recorded else {})})
+        emit_failure_event(project, role_name, run_id, exc)
         if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
             reason = "Repeated failures; inspect health and run records"
             if recorded:
@@ -111,6 +196,7 @@ def _record_missing_finish_only(project, role_name, run_id, exc, cause=None,
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
                     "last_run": run_id, "updated_at": now(), **_failure_fact(exc),
                     **({"capture_limit": recorded} if recorded else {})})
+        emit_failure_event(project, role_name, run_id, exc)
 
 
 def _clear_missing_finish_streak(project, role_name):

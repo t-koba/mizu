@@ -573,6 +573,9 @@ DECLARATIONS = {
         'MAX_ERROR_TEXT': ('512', 'safety', 'run health / bounded failure-text retained in the health fact'),
         'MAX_RATE_FILE_BYTES': ('64 * 1024', 'safety', 'run health / bounded untrusted result-record read'),
         'MAX_RATE_BYTES': ('8 * 1024 * 1024', 'safety', 'run health / total status-rate content-read ceiling'),
+        'MAX_UNIT_CHARS': ('128', 'mechanism', 'run health / bounded unit and error-class identity in a named failure event'),
+        'MAX_FAILURE_EVENT_BYTES': ('4096', 'safety', 'run health / bounded named failure-event record read'),
+        'MAX_FAILURE_GENERATION': ('(1 << 62) - 1', 'mechanism', 'run health / bounded monotonic generation counter for failure-event routing'),
     },
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
